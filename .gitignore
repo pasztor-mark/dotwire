@@ -1,0 +1,11 @@
+bin/
+obj/
+/packages/
+riderModule.iml
+/_ReSharper.Caches/
+.reminders
+docs/superpowers
+.superpowers
+CLAUDE.local.md
+.remember/
+.idea

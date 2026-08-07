@@ -1,0 +1,7 @@
+﻿services:
+  dotwire:
+    image: dotwire
+    build:
+      context: .
+      dockerfile: dotwire/Dockerfile
+
