@@ -1,5 +1,3 @@
--- Authoritative role/membership tables (ARCHITECTURE.md, "Data layout"): the JWT claims a
--- role, these tables decide. Role spelling is normative (AUTH.md) - no variants.
 CREATE TABLE user_roles (
     user_id text PRIMARY KEY,
     role    text NOT NULL CHECK (role IN ('member', 'auditor', 'admin'))
@@ -11,4 +9,5 @@ CREATE TABLE room_members (
     PRIMARY KEY (room_id, user_id)
 );
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON user_roles, room_members TO dotwire_app;
+GRANT SELECT ON user_roles, room_members TO dotwire_app;
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON user_roles, room_members FROM dotwire_app;

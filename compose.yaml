@@ -4,6 +4,14 @@ services:
     build:
       context: .
       dockerfile: dotwire/Dockerfile
+    user: "1654:1654"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
     ports:
       - "8080:8080"
     environment:
@@ -37,6 +45,16 @@ services:
   postgres:
     image: timescale/timescaledb:latest-pg17
     command: ["postgres", "-c", "shared_buffers=256MB", "-c", "work_mem=16MB", "-c", "max_connections=200"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
     environment:
       POSTGRES_DB: dotwire
       POSTGRES_USER: dotwire
@@ -54,6 +72,11 @@ services:
   nats:
     image: nats:2.10-alpine
     command: ["-js", "-sd", "/data", "-m", "8222"]
+    user: "1000:1000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     ports:
       - "4222:4222"
       - "8222:8222"

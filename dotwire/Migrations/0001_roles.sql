@@ -1,7 +1,3 @@
--- Runtime service role. The migrator role (compose POSTGRES_USER, owner) applies schema;
--- the app connects as dotwire_app, whose grants are the real append-only enforcement on
--- audit_log, owners bypass grants, so testing enforcement as the owner proves nothing.
--- Password is set by the migration runner (ALTER ROLE from config) . never embedded here.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'dotwire_app') THEN
@@ -10,4 +6,6 @@ BEGIN
 END
 $$;
 
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+REVOKE CREATE ON SCHEMA public FROM dotwire_app;
 GRANT USAGE ON SCHEMA public TO dotwire_app;

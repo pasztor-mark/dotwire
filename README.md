@@ -143,6 +143,15 @@ dotnet publish dotwire/dotwire.csproj -c Release
 
 ---
 
+## Roadmap
+
+* **SignalR Realtime Subscribe Path:** Full-duplex WebSocket hub for live room subscriptions, presence, typing indicators, and ephemeral fanout.
+* **Presend Moderation Webhook:** Synchronous host callback hook before message publish with configurable fail-open/fail-closed timeouts for content moderation.
+* **Resumable SSE (Server-Sent Events) Stream:** Zero-dependency HTTP stream for AI agent harnesses and observability workers.
+* **Host SDKs:** Official client SDKs for .NET, TypeScript/JavaScript, and Python to simplify token signing and SignalR consumption.
+* **Compliance Export & Verification CLI:** Offline verification tool for validating SHA-256 audit log hash chains.
+* **DSAR & Right-to-be-Forgotten APIs:** Message redaction endpoints that cryptographically erase content while preserving hash-chain integrity.
+
 ## Normative Specifications & Documentation
 
 The architecture is governed by normative contracts:
