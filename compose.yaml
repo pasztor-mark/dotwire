@@ -1,7 +1,70 @@
-﻿services:
+services:
   dotwire:
     image: dotwire
     build:
       context: .
       dockerfile: dotwire/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      DOTNET_gcServer: "1"
+      DOTNET_GCDynamicAdaptationMode: "1"
+      ConnectionStrings__PostgresMigrator: "Host=postgres;Port=5432;Database=dotwire;Username=dotwire;Password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+      ConnectionStrings__PostgresWrite: "Host=postgres;Port=5432;Database=dotwire;Username=dotwire_app;Password=${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}"
+      ConnectionStrings__PostgresRead: "Host=postgres;Port=5432;Database=dotwire;Username=dotwire_app;Password=${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}"
+      Postgres__AppRolePassword: "${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}"
+      Dotwire__Encryption__ActiveKeyId: "${Dotwire__Encryption__ActiveKeyId:-k1}"
+      Dotwire__Encryption__Keys__k1: "${Dotwire__Encryption__Keys__k1:?set Dotwire__Encryption__Keys__k1 in .env}"
+      Nats__Url: "nats://nats:4222"
+      Auth__Issuer: "${Auth__Issuer:?set Auth__Issuer in .env}"
+      Auth__Audience: "${Auth__Audience:?set Auth__Audience in .env}"
+      Auth__Keys__dev: "${Auth__Keys__dev:?set Auth__Keys__dev in .env}"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
 
+  postgres:
+    image: timescale/timescaledb:latest-pg17
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "work_mem=16MB", "-c", "max_connections=200"]
+    environment:
+      POSTGRES_DB: dotwire
+      POSTGRES_USER: dotwire
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dotwire -d dotwire"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - natsdata:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  natsdata:

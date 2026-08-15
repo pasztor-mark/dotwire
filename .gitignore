@@ -8,4 +8,8 @@ docs/superpowers
 .superpowers
 CLAUDE.local.md
 .remember/
+**/.DS_Store
 .idea
+# secrets
+.env
+dev-jwt.*

@@ -1,0 +1,112 @@
+using System.Text;
+using System.Text.Json;
+using Dotwire.Api;
+using Dotwire.Configuration;
+using Dotwire.Data;
+using Microsoft.Extensions.Options;
+using NATS.Client.JetStream;
+using Npgsql;
+
+namespace Dotwire.Nats;
+
+/// <summary>
+/// Drains the durable postgres-writer consumer into the messages hypertable in batches
+/// (≤ BatchMaxMessages or BatchLingerMs, whichever first - pre-implementation.md §1.6).
+/// At-least-once + ON CONFLICT DO NOTHING on the (room_id, time, seq) PK = idempotent.
+/// Acks only after commit; failures redeliver. History lags the JetStream ack by about
+/// one batch interval by design - never "fix" that (ARCHITECTURE.md, "Write path").
+/// </summary>
+public sealed class PostgresWriterService(
+    INatsJSContext js,
+    IOptions<NatsOptions> natsOptions,
+    [FromKeyedServices(PostgresDataSources.Write)] NpgsqlDataSource writeDataSource,
+    ILogger<PostgresWriterService> logger) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        var options = natsOptions.Value;
+        var consumer = await GetConsumerWithRetryAsync(options, stoppingToken);
+        var fetchOpts = new NatsJSFetchOpts
+        {
+            MaxMsgs = options.BatchMaxMessages,
+            Expires = TimeSpan.FromMilliseconds(options.BatchLingerMs),
+        };
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                var batch = new List<INatsJSMsg<byte[]>>(options.BatchMaxMessages);
+                await foreach (var msg in consumer.FetchAsync<byte[]>(fetchOpts, cancellationToken: stoppingToken))
+                    batch.Add(msg);
+
+                if (batch.Count == 0)
+                    continue;
+
+                await InsertBatchAsync(batch, stoppingToken);
+
+                foreach (var msg in batch)
+                    await msg.AckAsync(cancellationToken: stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                // No ack → JetStream redelivers. Ids/counts only . never content.
+                logger.LogError("Batch insert failed, awaiting redelivery: {Error}", ex.Message);
+                await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+            }
+        }
+    }
+
+    private async Task InsertBatchAsync(List<INatsJSMsg<byte[]>> batch, CancellationToken ct)
+    {
+        var sql = new StringBuilder(
+            "INSERT INTO messages (room_id, time, seq, sender_id, key_id, content) VALUES ");
+        await using var conn = await writeDataSource.OpenConnectionAsync(ct);
+        await using var cmd = new NpgsqlCommand { Connection = conn };
+
+        for (var i = 0; i < batch.Count; i++)
+        {
+            var message = JsonSerializer.Deserialize(
+                batch[i].Data!, DotwireJsonContext.Default.RoomMessage)
+                ?? throw new InvalidOperationException("Null payload on rooms stream.");
+            // The ordering token comes from JetStream metadata, never the payload.
+            var seq = (long)batch[i].Metadata!.Value.Sequence.Stream;
+
+            var p = i * 6;
+            if (i > 0) sql.Append(", ");
+            sql.Append($"(${p + 1}, ${p + 2}, ${p + 3}, ${p + 4}, ${p + 5}, ${p + 6})");
+            cmd.Parameters.AddWithValue(message.RoomId);
+            cmd.Parameters.AddWithValue(message.Time);
+            cmd.Parameters.AddWithValue(seq);
+            cmd.Parameters.AddWithValue(message.SenderId);
+            cmd.Parameters.AddWithValue(message.KeyId);
+            cmd.Parameters.AddWithValue(message.Content);
+        }
+
+        sql.Append(" ON CONFLICT DO NOTHING");
+        cmd.CommandText = sql.ToString();
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    private async Task<INatsJSConsumer> GetConsumerWithRetryAsync(NatsOptions options, CancellationToken ct)
+    {
+        const int maxAttempts = 30;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await js.GetConsumerAsync(options.RoomsStream, options.PostgresWriterConsumer, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && attempt < maxAttempts)
+            {
+                logger.LogWarning("Consumer {Consumer} not available yet (attempt {Attempt}/{Max}): {Message}",
+                    options.PostgresWriterConsumer, attempt, maxAttempts, ex.Message);
+                await Task.Delay(TimeSpan.FromSeconds(1), ct);
+            }
+        }
+    }
+}

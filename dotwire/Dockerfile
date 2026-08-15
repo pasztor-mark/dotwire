@@ -1,23 +1,21 @@
-﻿FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
-USER $APP_UID
-WORKDIR /app
-EXPOSE 8080
-EXPOSE 8081
-
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends clang zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
 ARG BUILD_CONFIGURATION=Release
 WORKDIR /src
 COPY ["dotwire/dotwire.csproj", "dotwire/"]
 RUN dotnet restore "dotwire/dotwire.csproj"
 COPY . .
 WORKDIR "/src/dotwire"
-RUN dotnet build "./dotwire.csproj" -c $BUILD_CONFIGURATION -o /app/build
+RUN dotnet publish "./dotwire.csproj" -c $BUILD_CONFIGURATION -o /app/publish
 
-FROM build AS publish
-ARG BUILD_CONFIGURATION=Release
-RUN dotnet publish "./dotwire.csproj" -c $BUILD_CONFIGURATION -o /app/publish /p:UseAppHost=false
-
-FROM base AS final
+FROM mcr.microsoft.com/dotnet/runtime-deps:10.0 AS final
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends wget \
+    && rm -rf /var/lib/apt/lists/*
+USER $APP_UID
 WORKDIR /app
-COPY --from=publish /app/publish .
-ENTRYPOINT ["dotnet", "dotwire.dll"]
+EXPOSE 8080
+COPY --from=build /app/publish .
+ENTRYPOINT ["./dotwire"]

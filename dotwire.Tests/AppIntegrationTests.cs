@@ -10,7 +10,16 @@ public class AppIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
 
     public AppIntegrationTests(WebApplicationFactory<Program> factory)
     {
-        _factory = factory;
+        // In-process tests run without Postgres or NATS; migrations and provisioning are
+        // covered by compose-based checks.
+        _factory = factory.WithWebHostBuilder(b =>
+        {
+            b.UseSetting("Postgres:Migrate", "false");
+            b.UseSetting("Nats:Enabled", "false");
+            b.UseSetting("Auth:Issuer", TestTokens.Issuer);
+            b.UseSetting("Auth:Audience", TestTokens.Audience);
+            b.UseSetting($"Auth:Keys:{TestKeys.Kid}", TestKeys.PublicPem);
+        });
     }
 
     [Fact]
@@ -18,8 +27,18 @@ public class AppIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
     {
         var client = _factory.CreateClient();
 
-        var response = await client.GetAsync("/");
+        var response = await client.GetAsync("/", TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task HealthzReturnsOk()
+    {
+        var client = _factory.CreateClient();
+
+        var response = await client.GetAsync("/healthz", TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 }

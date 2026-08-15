@@ -29,7 +29,12 @@ dotnet publish dotwire/dotwire.csproj -c Release   # Native AOT publish (Publish
 docker compose up                                  # compose.yaml at repo root, builds dotwire/Dockerfile
 ```
 
-No test project exists yet. When one is added, list its `dotnet test` command here.
+```
+dotnet test dotwire.slnx
+```
+
+Tests run without Postgres/NATS (the app factory disables startup migrations); verifying the
+schema end-to-end needs `docker compose up postgres` and a real run.
 
 ## Hard conventions
 
