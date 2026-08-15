@@ -1,0 +1,277 @@
+services:
+  # Load balancer
+  lb:
+    image: haproxy:2.9-alpine
+    restart: always
+    ports:
+      - "8080:8080"
+      - "8404:8404"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - dotwire-gateway-1
+      - dotwire-gateway-2
+      - dotwire-api-1
+
+  # WS holders
+  dotwire-gateway-1:
+    image: dotwire:latest
+    build:
+      context: .
+      dockerfile: dotwire/Dockerfile
+    restart: always
+    user: "1654:1654"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    environment:
+      DOTNET_gcServer: "1"
+      DOTNET_GCDynamicAdaptationMode: "1"
+      Dotwire__Role: "Gateway"
+      ConnectionStrings__PostgresMigrator: "Host=postgres-primary;Port=5432;Database=dotwire;Username=dotwire;Password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+      ConnectionStrings__PostgresWrite: "Host=postgres-primary;Port=5432;Database=dotwire;Username=dotwire_app;Password=${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env};Pooling=true;Minimum Pool Size=10;Maximum Pool Size=50"
+      ConnectionStrings__PostgresRead: "Host=postgres-replica;Port=5432;Database=dotwire;Username=dotwire_app;Password=${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env};Pooling=true;Minimum Pool Size=20;Maximum Pool Size=100"
+      Postgres__Migrate: "false"
+      Dotwire__Encryption__ActiveKeyId: "${Dotwire__Encryption__ActiveKeyId:-k1}"
+      Dotwire__Encryption__Keys__k1: "${Dotwire__Encryption__Keys__k1:?set Dotwire__Encryption__Keys__k1 in .env}"
+      Nats__Url: "nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222"
+      Auth__Issuer: "${Auth__Issuer:?set Auth__Issuer in .env}"
+      Auth__Audience: "${Auth__Audience:?set Auth__Audience in .env}"
+      Auth__Keys__dev: "${Auth__Keys__dev:?set Auth__Keys__dev in .env}"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+    depends_on:
+      nats-1:
+        condition: service_healthy
+      postgres-replica:
+        condition: service_healthy
+
+  dotwire-gateway-2:
+    image: dotwire:latest
+    build:
+      context: .
+      dockerfile: dotwire/Dockerfile
+    restart: always
+    user: "1654:1654"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    environment:
+      DOTNET_gcServer: "1"
+      DOTNET_GCDynamicAdaptationMode: "1"
+      Dotwire__Role: "Gateway"
+      ConnectionStrings__PostgresMigrator: "Host=postgres-primary;Port=5432;Database=dotwire;Username=dotwire;Password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+      ConnectionStrings__PostgresWrite: "Host=postgres-primary;Port=5432;Database=dotwire;Username=dotwire_app;Password=${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env};Pooling=true;Minimum Pool Size=10;Maximum Pool Size=50"
+      ConnectionStrings__PostgresRead: "Host=postgres-replica;Port=5432;Database=dotwire;Username=dotwire_app;Password=${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env};Pooling=true;Minimum Pool Size=20;Maximum Pool Size=100"
+      Postgres__Migrate: "false"
+      Dotwire__Encryption__ActiveKeyId: "${Dotwire__Encryption__ActiveKeyId:-k1}"
+      Dotwire__Encryption__Keys__k1: "${Dotwire__Encryption__Keys__k1:?set Dotwire__Encryption__Keys__k1 in .env}"
+      Nats__Url: "nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222"
+      Auth__Issuer: "${Auth__Issuer:?set Auth__Issuer in .env}"
+      Auth__Audience: "${Auth__Audience:?set Auth__Audience in .env}"
+      Auth__Keys__dev: "${Auth__Keys__dev:?set Auth__Keys__dev in .env}"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+    depends_on:
+      nats-1:
+        condition: service_healthy
+      postgres-replica:
+        condition: service_healthy
+
+  # Rest and postgres
+  dotwire-api-1:
+    image: dotwire:latest
+    build:
+      context: .
+      dockerfile: dotwire/Dockerfile
+    restart: always
+    user: "1654:1654"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    environment:
+      DOTNET_gcServer: "1"
+      DOTNET_GCDynamicAdaptationMode: "1"
+      Dotwire__Role: "Api"
+      ConnectionStrings__PostgresMigrator: "Host=postgres-primary;Port=5432;Database=dotwire;Username=dotwire;Password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+      ConnectionStrings__PostgresWrite: "Host=postgres-primary;Port=5432;Database=dotwire;Username=dotwire_app;Password=${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env};Pooling=true;Minimum Pool Size=10;Maximum Pool Size=50"
+      ConnectionStrings__PostgresRead: "Host=postgres-replica;Port=5432;Database=dotwire;Username=dotwire_app;Password=${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env};Pooling=true;Minimum Pool Size=10;Maximum Pool Size=50"
+      Postgres__AppRolePassword: "${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}"
+      Postgres__Migrate: "true"
+      Dotwire__Encryption__ActiveKeyId: "${Dotwire__Encryption__ActiveKeyId:-k1}"
+      Dotwire__Encryption__Keys__k1: "${Dotwire__Encryption__Keys__k1:?set Dotwire__Encryption__Keys__k1 in .env}"
+      Nats__Url: "nats://nats-1:4222,nats://nats-2:4222,nats://nats-3:4222"
+      Auth__Issuer: "${Auth__Issuer:?set Auth__Issuer in .env}"
+      Auth__Audience: "${Auth__Audience:?set Auth__Audience in .env}"
+      Auth__Keys__dev: "${Auth__Keys__dev:?set Auth__Keys__dev in .env}"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      nats-1:
+        condition: service_healthy
+
+  # Nats
+  nats-1:
+    image: nats:2.10-alpine
+    restart: always
+    ports:
+      - "8222:8222"
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-name"
+      - "nats-1"
+      - "-cluster_name"
+      - "dotwire_cluster"
+      - "-cluster"
+      - "nats://0.0.0.0:6222"
+      - "-routes=nats://nats-2:6222,nats://nats-3:6222"
+      - "-m"
+      - "8222"
+    volumes:
+      - natsdata-1:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  nats-2:
+    image: nats:2.10-alpine
+    restart: always
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-name"
+      - "nats-2"
+      - "-cluster_name"
+      - "dotwire_cluster"
+      - "-cluster"
+      - "nats://0.0.0.0:6222"
+      - "-routes=nats://nats-1:6222,nats://nats-3:6222"
+      - "-m"
+      - "8222"
+    volumes:
+      - natsdata-2:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  nats-3:
+    image: nats:2.10-alpine
+    restart: always
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-name"
+      - "nats-3"
+      - "-cluster_name"
+      - "dotwire_cluster"
+      - "-cluster"
+      - "nats://0.0.0.0:6222"
+      - "-routes=nats://nats-1:6222,nats://nats-2:6222"
+      - "-m"
+      - "8222"
+    volumes:
+      - natsdata-3:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  # Pg primary + replica
+  postgres-primary:
+    image: timescale/timescaledb:latest-pg17
+    restart: always
+    command: >
+      bash -c "
+        docker-entrypoint.sh postgres -c shared_buffers=256MB -c work_mem=16MB -c maintenance_work_mem=64MB -c max_connections=200 -c wal_level=replica -c max_wal_senders=10 -c max_replication_slots=10 -c synchronous_commit=off &
+        PID=$$!
+        until pg_isready -U dotwire -d dotwire -h 127.0.0.1; do sleep 0.5; done
+        if ! grep -q 'host replication all all' /var/lib/postgresql/data/pg_hba.conf; then
+          echo 'host replication all all scram-sha-256' >> /var/lib/postgresql/data/pg_hba.conf
+          echo 'host replication all all md5' >> /var/lib/postgresql/data/pg_hba.conf
+          psql -U dotwire -d dotwire -h 127.0.0.1 -c 'SELECT pg_reload_conf();'
+        fi
+        wait $$PID
+      "
+    environment:
+      POSTGRES_DB: dotwire
+      POSTGRES_USER: dotwire
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata-primary:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dotwire -d dotwire"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres-replica:
+    image: timescale/timescaledb:latest-pg17
+    restart: always
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    command: >
+      bash -c "
+        rm -rf /var/lib/postgresql/data/* &&
+        until pg_basebackup -h postgres-primary -D /var/lib/postgresql/data -U dotwire -vP -w -R; do
+          sleep 1
+        done &&
+        chown -R postgres:postgres /var/lib/postgresql/data &&
+        chmod 700 /var/lib/postgresql/data &&
+        exec gosu postgres postgres -c shared_buffers=256MB -c work_mem=16MB -c max_connections=200 -c hot_standby=on
+      "
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata-replica:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dotwire -d dotwire"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  natsdata-1:
+  natsdata-2:
+  natsdata-3:
+  pgdata-primary:
+  pgdata-replica:
