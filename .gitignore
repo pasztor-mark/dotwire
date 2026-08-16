@@ -13,3 +13,4 @@ CLAUDE.local.md
 # secrets
 .env
 dev-jwt.*
+.notes/

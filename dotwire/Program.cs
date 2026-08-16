@@ -4,6 +4,7 @@ using Dotwire.Configuration;
 using Dotwire.Crypto;
 using Dotwire.Data;
 using Dotwire.Nats;
+using Dotwire.Realtime;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
@@ -30,17 +31,27 @@ var keyRing = new SigningKeyRing(
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
-        options.MapInboundClaims = false; // keep "sub"/"dw:role" as-is, no legacy remapping
+        options.MapInboundClaims = false;
         options.TokenValidationParameters = new TokenValidationParameters
         {
             ValidIssuer = authOptions.Issuer,
             ValidAudience = authOptions.Audience,
-            ValidAlgorithms = [SecurityAlgorithms.RsaSha256], // RS256 only - never symmetric
+            ValidAlgorithms = [SecurityAlgorithms.RsaSha256],
             IssuerSigningKeyResolver = (_, _, kid, _) => keyRing.Resolve(kid),
             NameClaimType = "sub",
         };
         options.Events = new JwtBearerEvents
         {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+                var path = context.HttpContext.Request.Path;
+                if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hub/rooms"))
+                {
+                    context.Token = accessToken;
+                }
+                return Task.CompletedTask;
+            },
             OnTokenValidated = context =>
             {
                 var principal = context.Principal;
@@ -58,6 +69,15 @@ builder.Services.AddAuthorization();
 builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.TypeInfoResolverChain.Insert(0, DotwireJsonContext.Default));
 
+builder.Services.AddSignalR(options =>
+{
+    options.EnableDetailedErrors = false;
+    options.KeepAliveInterval = TimeSpan.FromSeconds(30);
+}).AddJsonProtocol(options =>
+{
+    options.PayloadSerializerOptions.TypeInfoResolverChain.Insert(0, DotwireJsonContext.Default);
+});
+
 builder.Services.AddKeyedSingleton<NpgsqlDataSource>(PostgresDataSources.Read,
     (_, _) => NpgsqlDataSource.Create(RequireConnectionString(builder.Configuration, "PostgresRead")));
 builder.Services.AddKeyedSingleton<NpgsqlDataSource>(PostgresDataSources.Write,
@@ -71,6 +91,10 @@ builder.Services.AddSingleton<INatsConnection>(sp =>
 builder.Services.AddSingleton<INatsJSContext>(sp =>
     new NatsJSContext(sp.GetRequiredService<INatsConnection>()));
 
+builder.Services.AddSingleton<RoomInterestManager>();
+builder.Services.AddSingleton<PresenceCoalescer>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<PresenceCoalescer>());
+
 var natsEnabled = builder.Configuration.GetSection(NatsOptions.SectionName).Get<NatsOptions>()?.Enabled ?? true;
 var nodeRole = builder.Configuration.GetSection(DotwireOptions.SectionName).Get<DotwireOptions>()?.Role ?? NodeRole.All;
 if (natsEnabled && nodeRole is NodeRole.All or NodeRole.Api)
@@ -81,7 +105,12 @@ var app = builder.Build();
 app.UseAuthentication();
 app.UseAuthorization();
 
-Messages.MapMessageEndpoints(app);
+if (nodeRole is NodeRole.All or NodeRole.Api)
+    Messages.MapMessageEndpoints(app);
+
+if (nodeRole is NodeRole.All or NodeRole.Gateway)
+    app.MapHub<RoomHub>("/hub/rooms");
+
 app.MapGet("/healthz", () => Results.Ok());
 
 var postgres = app.Services.GetRequiredService<IOptions<PostgresOptions>>().Value;

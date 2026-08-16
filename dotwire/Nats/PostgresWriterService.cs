@@ -67,25 +67,31 @@ public sealed class PostgresWriterService(
             "INSERT INTO messages (room_id, time, seq, sender_id, key_id, content) VALUES ");
         await using var conn = await writeDataSource.OpenConnectionAsync(ct);
         await using var cmd = new NpgsqlCommand { Connection = conn };
+        var validCount = 0;
 
         for (var i = 0; i < batch.Count; i++)
         {
             var message = JsonSerializer.Deserialize(
-                batch[i].Data!, DotwireJsonContext.Default.RoomMessage)
-                ?? throw new InvalidOperationException("Null payload on rooms stream.");
-            // The ordering token comes from JetStream metadata, never the payload.
+                batch[i].Data!, DotwireJsonContext.Default.RoomMessage);
+            if (message is null)
+                continue;
+
             var seq = (long)batch[i].Metadata!.Value.Sequence.Stream;
 
-            var p = i * 6;
-            if (i > 0) sql.Append(", ");
+            var p = validCount * 6;
+            if (validCount > 0) sql.Append(", ");
             sql.Append($"(${p + 1}, ${p + 2}, ${p + 3}, ${p + 4}, ${p + 5}, ${p + 6})");
             cmd.Parameters.AddWithValue(message.RoomId);
             cmd.Parameters.AddWithValue(message.Time);
             cmd.Parameters.AddWithValue(seq);
-            cmd.Parameters.AddWithValue(message.SenderId);
-            cmd.Parameters.AddWithValue(message.KeyId);
-            cmd.Parameters.AddWithValue(message.Content);
+            cmd.Parameters.AddWithValue((object?)message.SenderId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue((object?)message.KeyId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue((object?)message.Content ?? DBNull.Value);
+            validCount++;
         }
+
+        if (validCount == 0)
+            return;
 
         sql.Append(" ON CONFLICT DO NOTHING");
         cmd.CommandText = sql.ToString();

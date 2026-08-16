@@ -2,6 +2,7 @@
   <Folder Name="/Solution Items/">
     <File Path="compose.yaml" />
   </Folder>
+  <Project Path="Dotwire.Host/Dotwire.Host.csproj" />
   <Project Path="dotwire.Tests/dotwire.Tests.csproj" />
   <Project Path="dotwire/dotwire.csproj" />
 </Solution>

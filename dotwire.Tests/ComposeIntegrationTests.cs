@@ -3,7 +3,10 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using Dotwire.Api;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.SignalR.Client;
 using Npgsql;
 using Xunit;
 
@@ -14,6 +17,7 @@ namespace dotwire.Tests;
 /// postgres nats). Cleanly skipped when either service isn't reachable. The factory
 /// hosts the real app in-process: migrations on, provisioning on, real auth.
 /// </summary>
+[Collection("Compose")]
 public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
 {
     private const string PgConnectionString =
@@ -269,6 +273,162 @@ public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Progr
         var ex = await Assert.ThrowsAsync<PostgresException>(
             () => cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken));
         Assert.Equal("42501", ex.SqlState); // insufficient_privilege
+    }
+
+    private HubConnection BuildHubConnection(string token)
+    {
+        return new HubConnectionBuilder()
+            .WithUrl(new Uri(_factory.Server.BaseAddress, "/hub/rooms"), options =>
+            {
+                options.HttpMessageHandlerFactory = _ => _factory.Server.CreateHandler();
+                options.WebSocketFactory = async (context, ct) =>
+                {
+                    var wsClient = _factory.Server.CreateWebSocketClient();
+                    return await wsClient.ConnectAsync(context.Uri, ct);
+                };
+                options.AccessTokenProvider = () => Task.FromResult<string?>(token);
+            })
+            .Build();
+    }
+
+    [Fact]
+    public async Task LiveMessageFanout_IsReceivedAndDecrypted()
+    {
+        var roomId = Guid.NewGuid();
+        var subA = $"it-user-a-{Guid.NewGuid():N}";
+        var subB = $"it-user-b-{Guid.NewGuid():N}";
+        await SeedUserAsync(subA, "member", roomId);
+        await SeedUserAsync(subB, "member", roomId);
+
+        var tokenA = TestTokens.Mint(subA);
+        await using var connectionA = BuildHubConnection(tokenA);
+        await connectionA.StartAsync(TestContext.Current.CancellationToken);
+
+        var messageTcs = new TaskCompletionSource<RoomMessageDelivery>();
+        connectionA.On<RoomMessageDelivery>("ReceiveMessage", msg => messageTcs.TrySetResult(msg));
+
+        await connectionA.InvokeAsync("Subscribe", roomId, TestContext.Current.CancellationToken);
+
+        await Task.Delay(200, TestContext.Current.CancellationToken);
+
+        var clientB = Client(TestTokens.Mint(subB));
+        var response = await clientB.PostAsJsonAsync(
+            $"/rooms/{roomId}/messages", new { content = "live hello over nats" },
+            TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+            timeoutCts.Token, TestContext.Current.CancellationToken);
+
+        var received = await messageTcs.Task.WaitAsync(linkedCts.Token);
+        Assert.NotNull(received);
+        Assert.Equal(roomId, received.RoomId);
+        Assert.Equal(subB, received.SenderId);
+        Assert.Equal("live hello over nats", received.Content);
+
+        await connectionA.StopAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task TypingIndicator_IsReceivedByRoomMembers()
+    {
+        var roomId = Guid.NewGuid();
+        var subA = $"it-user-a-{Guid.NewGuid():N}";
+        var subB = $"it-user-b-{Guid.NewGuid():N}";
+        await SeedUserAsync(subA, "member", roomId);
+        await SeedUserAsync(subB, "member", roomId);
+
+        var tokenA = TestTokens.Mint(subA);
+        var tokenB = TestTokens.Mint(subB);
+        await using var connectionA = BuildHubConnection(tokenA);
+        await using var connectionB = BuildHubConnection(tokenB);
+
+        await connectionA.StartAsync(TestContext.Current.CancellationToken);
+        await connectionB.StartAsync(TestContext.Current.CancellationToken);
+
+        var typingTcs = new TaskCompletionSource<TypingNotification>();
+        connectionA.On<TypingNotification>("UserTyping", t => typingTcs.TrySetResult(t));
+
+        await connectionA.InvokeAsync("Subscribe", roomId, TestContext.Current.CancellationToken);
+        await connectionB.InvokeAsync("Subscribe", roomId, TestContext.Current.CancellationToken);
+
+        await Task.Delay(200, TestContext.Current.CancellationToken);
+
+        await connectionB.InvokeAsync("Typing", roomId, true, TestContext.Current.CancellationToken);
+
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+            timeoutCts.Token, TestContext.Current.CancellationToken);
+
+        var received = await typingTcs.Task.WaitAsync(linkedCts.Token);
+        Assert.NotNull(received);
+        Assert.Equal(roomId, received.RoomId);
+        Assert.Equal(subB, received.UserId);
+        Assert.True(received.IsTyping);
+
+        await connectionA.StopAsync(TestContext.Current.CancellationToken);
+        await connectionB.StopAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task PresenceCoalescing_DeliversDeltas()
+    {
+        var roomId = Guid.NewGuid();
+        var subA = $"it-user-a-{Guid.NewGuid():N}";
+        var subB = $"it-user-b-{Guid.NewGuid():N}";
+        await SeedUserAsync(subA, "member", roomId);
+        await SeedUserAsync(subB, "member", roomId);
+
+        var tokenA = TestTokens.Mint(subA);
+        var tokenB = TestTokens.Mint(subB);
+        await using var connectionA = BuildHubConnection(tokenA);
+        await using var connectionB = BuildHubConnection(tokenB);
+
+        await connectionA.StartAsync(TestContext.Current.CancellationToken);
+        await connectionB.StartAsync(TestContext.Current.CancellationToken);
+
+        var presenceTcs = new TaskCompletionSource<PresenceDelta>();
+        connectionA.On<PresenceDelta>("PresenceUpdated", p =>
+        {
+            if (p.Joined.Contains(subB))
+                presenceTcs.TrySetResult(p);
+        });
+
+        await connectionA.InvokeAsync("Subscribe", roomId, TestContext.Current.CancellationToken);
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+
+        await connectionB.InvokeAsync("Subscribe", roomId, TestContext.Current.CancellationToken);
+
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+            timeoutCts.Token, TestContext.Current.CancellationToken);
+
+        var delta = await presenceTcs.Task.WaitAsync(linkedCts.Token);
+        Assert.NotNull(delta);
+        Assert.Equal(roomId, delta.RoomId);
+        Assert.Contains(subB, delta.Joined);
+
+        await connectionA.StopAsync(TestContext.Current.CancellationToken);
+        await connectionB.StopAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task SignalR_Subscribe_WhenNonMember_ThrowsHubException()
+    {
+        var roomId = Guid.NewGuid();
+        var sub = $"it-user-{Guid.NewGuid():N}";
+        await SeedUserAsync(sub, "member");
+
+        var token = TestTokens.Mint(sub);
+        await using var connection = BuildHubConnection(token);
+        await connection.StartAsync(TestContext.Current.CancellationToken);
+
+        var ex = await Assert.ThrowsAsync<HubException>(() =>
+            connection.InvokeAsync("Subscribe", roomId, TestContext.Current.CancellationToken));
+        Assert.Contains("Forbidden", ex.Message);
+
+        await connection.StopAsync(TestContext.Current.CancellationToken);
     }
 
     private sealed record SendAck(ulong Seq, DateTimeOffset Time);

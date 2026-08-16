@@ -134,7 +134,7 @@ Requires the **.NET 10 SDK** (`global.json` pins `10.0.0`):
 # Build the solution
 dotnet build dotwire.slnx
 
-# Run unit and integration tests (43 in-memory tests, zero external dependencies needed)
+# Run unit and integration tests (50 in-memory tests, zero external dependencies needed)
 dotnet test dotwire.slnx
 
 # Publish standalone Native AOT binary

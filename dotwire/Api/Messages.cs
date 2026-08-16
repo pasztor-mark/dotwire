@@ -16,19 +16,21 @@ public sealed record SendMessageRequest(string? Content);
 /// <summary>The ack contract: seq/time from the JetStream ack, never from Postgres.</summary>
 public sealed record SendMessageResponse(ulong Seq, DateTimeOffset Time);
 
-/// <summary>
-/// The JetStream payload. Content is the AES-GCM envelope (STJ renders byte[] as
-/// base64). Time is the gateway clock at publish - it IS the message's time column;
-/// there is no second timestamp. The stream seq is NOT in the payload: the consumer
-/// reads it from JetStream message metadata.
-/// </summary>
 public sealed record RoomMessage(Guid RoomId, string SenderId, DateTimeOffset Time, string KeyId, byte[] Content);
 
-// AOT: every serialized type is source-generated (AGENTS.md hard convention).
+public sealed record RoomMessageDelivery(Guid RoomId, string SenderId, DateTimeOffset Time, string Content);
+
+public sealed record TypingNotification(Guid RoomId, string UserId, bool IsTyping);
+
+public sealed record PresenceDelta(Guid RoomId, string[] Joined, string[] Left);
+
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(SendMessageRequest))]
 [JsonSerializable(typeof(SendMessageResponse))]
 [JsonSerializable(typeof(RoomMessage))]
+[JsonSerializable(typeof(RoomMessageDelivery))]
+[JsonSerializable(typeof(TypingNotification))]
+[JsonSerializable(typeof(PresenceDelta))]
 public partial class DotwireJsonContext : JsonSerializerContext;
 
 public static class Messages
