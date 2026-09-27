@@ -1,0 +1,47 @@
+{
+  "name": "@dotwire/client",
+  "version": "0.2.0",
+  "description": "Browser/Node client SDK for dotwire: scoped room handles, SignalR subscription with sequence-based gap-fill, typing, presence, and history.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pasztor-mark/dotwire.git",
+    "directory": "packages/client"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/test/**/*.test.js"
+  },
+  "keywords": [
+    "dotwire",
+    "chat",
+    "sdk",
+    "client",
+    "signalr"
+  ],
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "@microsoft/signalr": "^8.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.8.0"
+  }
+}

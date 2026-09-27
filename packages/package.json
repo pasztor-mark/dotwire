@@ -1,0 +1,9 @@
+{
+  "name": "dotwire-packages",
+  "private": true,
+  "workspaces": [
+    "client",
+    "host",
+    "react"
+  ]
+}

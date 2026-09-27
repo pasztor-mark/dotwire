@@ -25,6 +25,9 @@ public sealed class PostgresWriterService(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var options = natsOptions.Value;
+        if (!options.Enabled)
+            return;
+
         var consumer = await GetConsumerWithRetryAsync(options, stoppingToken);
         var fetchOpts = new NatsJSFetchOpts
         {
@@ -54,8 +57,7 @@ public sealed class PostgresWriterService(
             }
             catch (Exception ex)
             {
-                // No ack → JetStream redelivers. Ids/counts only . never content.
-                logger.LogError("Batch insert failed, awaiting redelivery: {Error}", ex.Message);
+                logger.LogError(ex, "Batch insert failed, awaiting redelivery: {Error}", ex.Message);
                 await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
             }
         }
@@ -73,16 +75,17 @@ public sealed class PostgresWriterService(
         {
             var message = JsonSerializer.Deserialize(
                 batch[i].Data!, DotwireJsonContext.Default.RoomMessage);
-            if (message is null)
+            if (message is null || string.IsNullOrEmpty(message.SenderId) || string.IsNullOrEmpty(message.KeyId) || message.Content is null || message.Content.Length == 0)
                 continue;
 
             var seq = (long)batch[i].Metadata!.Value.Sequence.Stream;
+            var time = message.Time.Year >= 2020 ? message.Time.UtcDateTime : DateTime.UtcNow;
 
             var p = validCount * 6;
             if (validCount > 0) sql.Append(", ");
             sql.Append($"(${p + 1}, ${p + 2}, ${p + 3}, ${p + 4}, ${p + 5}, ${p + 6})");
             cmd.Parameters.AddWithValue(message.RoomId);
-            cmd.Parameters.AddWithValue(message.Time);
+            cmd.Parameters.AddWithValue(time);
             cmd.Parameters.AddWithValue(seq);
             cmd.Parameters.AddWithValue((object?)message.SenderId ?? DBNull.Value);
             cmd.Parameters.AddWithValue((object?)message.KeyId ?? DBNull.Value);

@@ -49,6 +49,10 @@ public class RealtimeLoadTests : IClassFixture<WebApplicationFactory<Program>>
                 b.UseSetting("Nats:Enabled", "false");
             }
 
+            // This suite drives raw fanout throughput from a single publisher, not the
+            // per-user send budget (spec §3.10 has its own dedicated tests) - disable it here.
+            b.UseSetting("Dotwire:RateLimits:Enabled", "false");
+
             b.UseSetting("Auth:Issuer", TestTokens.Issuer);
             b.UseSetting("Auth:Audience", TestTokens.Audience);
             b.UseSetting($"Auth:Keys:{TestKeys.Kid}", TestKeys.PublicPem);

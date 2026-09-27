@@ -17,5 +17,5 @@ RUN apt-get update \
 USER $APP_UID
 WORKDIR /app
 EXPOSE 8080
-COPY --from=build /app/publish .
+COPY --from=build /app/publish/dotwire ./dotwire
 ENTRYPOINT ["./dotwire"]

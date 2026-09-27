@@ -36,11 +36,31 @@ dotnet test dotwire.slnx
 Tests run without Postgres/NATS (the app factory disables startup migrations); verifying the
 schema end-to-end needs `docker compose up postgres` and a real run.
 
+### SDK packages (`packages/`)
+
+`packages/` is an npm workspace root (`packages/package.json`, workspaces: `client`, `host`,
+`react`) holding the TypeScript SDKs. From `packages/`:
+
+```
+npm ci                        # install once a package-lock.json exists (see note below)
+npm run build --workspaces    # tsup build for every package
+npm test --workspaces         # tsc -p tsconfig.test.json + node --test, per package
+npm pack --dry-run --workspaces   # sanity-check what each package would publish
+```
+
+`npm ci` requires a committed `packages/package-lock.json`; if the workspace was just
+introduced (or a package was just added) and no lockfile exists yet, run `npm install` once
+to generate it, and commit the result — that's a one-time step, not part of the normal
+build/test loop.
+
 ## Hard conventions
 
 These are binding, not stylistic preferences — violating them either breaks the AOT build or
 silently defeats a design decision documented in ARCHITECTURE.md/AUTH.md/COMPLIANCE.md.
 
+- **SDK parity.** Every endpoint or hub event ships with a matching method in both host SDKs
+  (`Dotwire.Host`, `@dotwire/host`), and in the client SDK (`@dotwire/client`) when
+  member-facing. Tables with compliance semantics get append-only grants and a guard trigger.
 - **Native AOT only.** `WebApplication.CreateSlimBuilder` — never `CreateBuilder`. Every type
   that gets serialized goes through the source-generated `JsonSerializerContext`; no
   reflection-based `System.Text.Json` serialization. SignalR uses the JSON hub protocol only —

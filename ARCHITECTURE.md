@@ -44,11 +44,52 @@ path. Agents must not "helpfully" start persisting them — that would silently 
 constant-cost broadcast mechanism into a storage and replay liability for data nobody needs to
 recover.
 
+**The live subject, and why the stream filter is `room.*` and not `room.>`.** Alongside the
+durable `room.{room_id}` JetStream subject, each room also has a core (non-JetStream) subject
+`room.{room_id}.live` used for seq-tagged live fanout, plus `room.{room_id}.ephemeral.*` for
+presence/typing/read-receipts. The `ROOMS` stream's subject filter (`Nats:RoomsSubjectFilter`,
+default `room.*`) matches exactly one token after `room.` — it captures `room.{room_id}`
+durable traffic and nothing else. It must not be widened to `room.>` (which would match every
+token, including `.live` and `.ephemeral.*`): that would pull ephemeral, by-design-unpersisted
+traffic onto the JetStream stream, silently violating the ephemeral traffic rule above. This
+is why the filter is a narrow single-token match rather than the more permissive wildcard that
+might look equivalent at a glance.
+
 **Rejected alternatives** (one line each, so they aren't relitigated):
 - *Postgres-first batched writes* — simpler consistency story, but batch linger sits in every
   send path and Postgres becomes a hard dependency for sending at all, not just for history.
 - *Transactional outbox* — strongest consistency guarantee available, but lowest throughput of
   the options considered; not worth the cost at this scale.
+
+## Webhooks (presend / postsend)
+
+PRODUCT.md's "AI moderation" out-of-scope carve-out names the presend hook as the designed
+extension point; that extension point now has a companion postsend hook and a server-side
+webhook call-out mode, not just an in-process SDK delegate. Two independent call-outs exist,
+each active only when its URL is configured (`Dotwire:Webhooks:Presend:Url` /
+`Dotwire:Webhooks:PostSend:Url` — unset means off, "defaults need nothing set"):
+
+- **Presend** (`Dotwire:Webhooks:Presend`) is synchronous and blocking, called before a
+  message is accepted, with its own timeout (`TimeoutMs`, default 500) and a configurable
+  fail policy: `Closed` (default — an unreachable/erroring webhook fails the send with `503
+  presend_unavailable`) or `Open` (lets the original content through unchanged). It can reject
+  the send or rewrite content.
+- **Postsend** (`Dotwire:Webhooks:PostSend`) is fire-and-forget from the send path's
+  perspective — the message is already accepted and has a `(roomId, seq)` — queued
+  (`QueueCapacity`, default 10,000; full queue drops the newest item with a warning rather than
+  blocking a send) and delivered with retries (`MaxAttempts`, default 3) and its own timeout
+  (`TimeoutMs`, default 2000). It never blocks or affects the send path itself.
+
+Both call-outs carry `X-Dotwire-Signature: sha256=<hex HMAC-SHA256 of the raw body>` when
+`Dotwire:Webhooks:Secret` is configured, so a host can verify the call genuinely came from
+dotwire before acting on it. `IncludeAdminSends` (both hooks, default `false`) controls whether
+admin message injection (see AUTH.md, "Message injection is audited...") also runs through
+presend/postsend — off by default, since injected messages are already host-authored and
+audited by construction. Both host SDKs (`Dotwire.Host`, `@dotwire/host`) ship matching
+webhook-handler methods (`HandlePresendWebhookAsync`/`handlePresendWebhook`,
+`HandlePostSendWebhookAsync`/`handlePostSendWebhook`) that verify the signature and run the
+same `Presend`/`PostSend` delegates used for direct SDK sends, so one implementation covers
+both the "call dotwire directly" and "point dotwire's webhook at my host" integration shapes.
 
 ## Realtime and node roles
 
@@ -78,6 +119,20 @@ afternoon project), `api` (REST + admin surface only), or `gateway` (holds socke
 NATS, and does nothing else). Nodes are stateless regardless of role, so a large deployment can
 scale socket capacity (more `gateway` nodes) independently of API/admin load (more `api`
 nodes) without changing the software, only the flag.
+
+## Membership revocation and live sockets
+
+Room membership can be revoked while a member holds a live connection. Revocation (via the
+admin API) does not wait for the connection to notice on its own: `RoomInterestManager`
+tracks, per connection, which rooms it is subscribed to (spec §3.5), so a revocation can find
+every locally-connected socket for that `(roomId, userId)` and act immediately — it sends
+`MembershipRevoked(RoomId, UserId)` to the affected connection(s), unsubscribes them from the
+room's SignalR group, and queues a presence-leave. `@dotwire/client` and `Dotwire.Host`/
+`@dotwire/host` both surface this as a first-class event (`onMembershipRevoked` /
+`MembershipRevoked`) rather than leaving hosts to infer revocation from a socket just going
+quiet. Revocation propagates across a multi-node deployment the same way regular fanout does —
+over the NATS-core backplane — so a revoked member is dropped from every node they happen to
+be connected to, not just the node that served the admin request.
 
 ## Data layout
 
@@ -127,6 +182,38 @@ own audit event, so "who looked at the audit trail" is always answerable from th
 what lets erasure never rewrite an audit entry, so the hash chain survives every redaction
 intact.
 
+**Canonical form.** Before hashing, each event is reduced to a fixed, order-stable canonical
+form (`AuditCanonicalForm.Compute`) — the same event must always serialize to the same bytes
+regardless of how it arrived, or the chain would be unverifiable against independently
+reconstructed events. Timestamps are truncated to microsecond precision
+(`TruncateToMicroseconds`) before hashing, so Postgres's own timestamp rounding can never
+produce a hash mismatch against a value computed elsewhere. The chain itself is
+`hash = SHA-256(prev_hash ‖ canonical_event)`; the very first event chains from a fixed genesis
+hash (`AuditCanonicalForm.GenesisHash()`) rather than a null or empty predecessor, so link 0 is
+verifiable the same way every later link is.
+
+**Checkpoints.** Once per day (tracked by `_latestCheckpointDay`, one checkpoint per calendar
+day), the writer inserts a row into the append-only `audit_checkpoints` table
+(`(day, last_id, hash)` — same revoked-grants-plus-guard-trigger protection as the audit table
+itself) recording the chain's tail id and hash at that point. `GET /audit/verify` can start
+verification from the most recent checkpoint at or before the requested range instead of
+walking the chain from genesis every time — checkpoints are anchors for cheap partial
+verification, not a replacement for the full chain, which remains available and verifiable in
+full at any time. Operationally, archiving checkpoints (e.g. exporting `audit_checkpoints`
+rows to cold storage on the same cadence as other compliance backups) gives an auditor a
+trusted, independently-held anchor to verify against, without depending on the live database
+being uncompromised.
+
+**Single-writer via Postgres advisory lock.** Exactly one process may run the audit writer at
+a time — required for the strict total order hash-chaining depends on (see WHY above) — and
+that exclusivity is enforced with a Postgres session-level advisory lock
+(`pg_try_advisory_lock`, held for the writer's lifetime on a fixed lock key), not by
+application-level coordination or a NATS durable-consumer property alone. A node that fails to
+acquire the lock (another node already holds it) goes into standby, retrying acquisition every
+`Nats:AuditWriter:StandbyRetrySeconds` (default 5s), so a multi-node deployment always has
+exactly one active writer and a hot standby ready to take over if the active writer's
+connection drops (which also releases the advisory lock, since it is session-scoped).
+
 ## Concurrency and fanout disciplines
 
 In a chat system, ingest is cheap; concurrency and fanout are where systems bleed — most
@@ -169,6 +256,17 @@ there is no excuse to relax them under schedule pressure.
   message volume at scale, so leaving it unthrottled would dwarf actual message traffic.
 - **Per-connection token-bucket rate limiting**, enforced in-process. WHY: bounds worst-case
   per-connection cost without a dependency on an external rate-limiting service.
+- **Per-route token-bucket rate limits** (`Dotwire:RateLimits`, on by default), keyed per user
+  (`sub`) for the `send`, `read` (history, SSE connect, `/audit`), and `admin` (every `/admin`
+  route, including DSAR and retention) buckets, and per connection for the `hub` bucket
+  (Subscribe/Unsubscribe — typing keeps its own separate cooldown, unaffected by this bucket).
+  Each is a standard ASP.NET Core token-bucket limiter (`PermitLimit`/`TokensPerPeriod`/
+  `PeriodSeconds`, independently tunable per bucket). WHY: in-process limiting needs no new
+  infrastructure component (PRODUCT.md's out-of-scope list rules out Redis) and is enough at
+  this scale contract; the documented cost is that with N API nodes behind a load balancer the
+  effective limit is N× the configured value, since nodes don't coordinate counters — stated
+  plainly here rather than solved with a shared store that would be redundant infrastructure
+  for the traffic this system targets.
 
 **Deployment posture (documented defaults, not code):**
 - **Server GC with DATAS**, plus raised file-descriptor limits and socket backlog, documented
@@ -213,9 +311,29 @@ behind is served "room X, seq > N" (see the write path's ordering token section)
 may be satisfied from either path depending on how far back the gap runs. Content is decrypted
 at the point of delivery in both cases — at the fanout edge for live messages, on the history
 read itself for stored ones — per "Encryption at rest & data lifecycle" below; neither Postgres
-nor the NATS file store ever hands back plaintext. SignalR hubs are the only way to receive live
-delivery in v1 (see "Realtime and node roles" above); history reads, by contrast, are ordinary
-REST calls and don't require a socket.
+nor the NATS file store ever hands back plaintext. SignalR hubs are the primary way to receive
+live delivery; history reads, by contrast, are ordinary REST calls and don't require a socket.
+
+**SSE read path.** `GET /rooms/{roomId}/events` (`Dotwire.Api.Events`, gated the same as any
+room-scoped route: authenticated, role-cross-checked, membership-checked, rate-limited under
+the `read` bucket) is a second, zero-dependency live-delivery path alongside SignalR, aimed at
+agents and harnesses that want plain HTTP rather than a full SignalR client (PRODUCT.md's
+"who it's for" — agents are a supported secondary audience). It streams
+`text/event-stream`, replaying history via `afterSeq` when given one (paged at
+`Dotwire:Sse:ReplayPageSize`, default 100) before switching to live delivery off the same NATS
+fanout SignalR uses, so ordering and gap-fill semantics match the SignalR path exactly — an
+SSE consumer is not a second, divergent notion of "what happened in this room." Each connection
+gets a bounded channel (`Dotwire:Sse:BufferSize`, default 256); a laggard consumer that fills
+it is disconnected, mirroring the bounded-queue/disconnect-the-laggard fanout discipline below.
+Periodic keep-alive comments (`Dotwire:Sse:KeepAliveSeconds`, default 15) keep idle connections
+from being reaped by intermediate proxies. Runs on the Gateway node role; toggled off entirely
+via `Dotwire:Sse:Enabled` for deployments that don't want the surface.
+
+**Participant IDs.** `GET /rooms/{roomId}/participants` reads `room_members` through the read
+pool and returns a sorted JSON array of user IDs. It uses the same JWT, role cross-check,
+room-membership check, and `read` rate limit as other member-facing room reads. It is a
+membership list, not a live presence snapshot. Usernames and avatars remain in the host
+application's user directory.
 
 ## Encryption at rest & data lifecycle
 
@@ -269,6 +387,20 @@ Redaction emits an audit event carrying ids only — never content. That contrac
 the audit log's ids-only invariant (see "Audit log" above), is what makes erasure and the audit
 chain compatible: redacting a message never requires rewriting an audit entry, so the hash
 chain survives every redaction intact.
+
+**Retention mechanics.** `set_message_retention(p_days)` / `get_message_retention()` are
+narrow `SECURITY DEFINER` Postgres functions (search_path pinned, same hardening pattern as
+`redact_message` — see "Redaction mechanics" — so a `SECURITY DEFINER` function can't be
+hijacked via a temp schema), granted to `dotwire_app` and nothing else, so the runtime role can
+manage retention without holding broad DDL/administrative privileges on the hypertable itself.
+Applying a retention window drops entire Timescale chunks (`drop_chunks`, chunk-level, not
+row-level `DELETE`) once every row in a chunk is older than the window — this is why retention
+is O(1) per chunk rather than an O(n) scan-and-delete, and why it produces zero vacuum bloat
+(there are no per-row tombstones to vacuum). Manage retention from exactly one place at a
+time — either `Dotwire:Retention:MessagesDays` at startup or the admin API/SDK retention
+methods, not both — since the config path only takes effect at startup and an unset config
+value means "leave whatever the API last set" rather than "clear it," so mixing the two is how
+an operator loses track of which one is authoritative.
 
 **DSAR export mechanics.** The DSAR export endpoint (also admin-only) is the GDPR Art. 15
 access mechanism: given a `sub`, it exports that user's messages, room memberships, and role

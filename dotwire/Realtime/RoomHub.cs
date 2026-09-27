@@ -20,7 +20,6 @@ public sealed class RoomHub(
     INatsConnection nats,
     IOptions<NatsOptions> natsOptions) : Hub
 {
-    private const string SubscribedRoomsKey = "dotwire_subscribed_rooms";
     private const string LastTypingTicksKey = "dotwire_last_typing_ticks";
     private static readonly long TypingCooldownTicks = Stopwatch.Frequency / 2;
 
@@ -53,14 +52,9 @@ public sealed class RoomHub(
 
         await Groups.AddToGroupAsync(Context.ConnectionId, roomId.ToString(), Context.ConnectionAborted);
 
-        var rooms = GetSubscribedRooms();
-        lock (rooms)
-        {
-            if (!rooms.Add(roomId))
-                return;
-        }
+        if (!interestManager.Subscribe(roomId, Context.ConnectionId, sub))
+            return;
 
-        interestManager.RegisterInterest(roomId, Context.ConnectionId);
         presenceCoalescer.QueueJoin(roomId, sub);
     }
 
@@ -70,17 +64,9 @@ public sealed class RoomHub(
         if (string.IsNullOrEmpty(sub))
             return;
 
-        var rooms = GetSubscribedRooms();
-        var wasSubscribed = false;
-        lock (rooms)
-        {
-            wasSubscribed = rooms.Remove(roomId);
-        }
-
-        if (wasSubscribed)
+        if (interestManager.Unsubscribe(roomId, Context.ConnectionId))
         {
             await Groups.RemoveFromGroupAsync(Context.ConnectionId, roomId.ToString());
-            interestManager.UnregisterInterest(roomId, Context.ConnectionId);
             presenceCoalescer.QueueLeave(roomId, sub);
         }
     }
@@ -91,14 +77,7 @@ public sealed class RoomHub(
         if (string.IsNullOrEmpty(sub))
             return;
 
-        var rooms = GetSubscribedRooms();
-        var isSubscribed = false;
-        lock (rooms)
-        {
-            isSubscribed = rooms.Contains(roomId);
-        }
-
-        if (!isSubscribed)
+        if (!interestManager.IsSubscribed(Context.ConnectionId, roomId))
             return;
 
         if (!natsOptions.Value.Enabled)
@@ -127,32 +106,14 @@ public sealed class RoomHub(
         var sub = Context.User?.FindFirstValue("sub");
         if (!string.IsNullOrEmpty(sub))
         {
-            var rooms = GetSubscribedRooms();
-            List<Guid> roomsToLeave;
-            lock (rooms)
+            var rooms = interestManager.DisconnectAll(Context.ConnectionId);
+            foreach (var roomId in rooms)
             {
-                roomsToLeave = [.. rooms];
-                rooms.Clear();
-            }
-
-            foreach (var roomId in roomsToLeave)
-            {
-                interestManager.UnregisterInterest(roomId, Context.ConnectionId);
                 presenceCoalescer.QueueLeave(roomId, sub);
             }
         }
 
         await base.OnDisconnectedAsync(exception);
-    }
-
-    private HashSet<Guid> GetSubscribedRooms()
-    {
-        if (!Context.Items.TryGetValue(SubscribedRoomsKey, out var obj) || obj is not HashSet<Guid> rooms)
-        {
-            rooms = [];
-            Context.Items[SubscribedRoomsKey] = rooms;
-        }
-        return rooms;
     }
 
     private Dictionary<Guid, long> GetLastTypingMap()

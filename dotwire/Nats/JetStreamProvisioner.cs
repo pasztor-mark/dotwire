@@ -54,13 +54,24 @@ public static class JetStreamProvisioner
                 Storage = StreamConfigStorage.File,
             }, ct);
 
-        // audit-writer is name-only until the audit slice is built (spec: name it now).
         await js.CreateOrUpdateConsumerAsync(
             options.RoomsStream,
             new ConsumerConfig
             {
                 Name = options.PostgresWriterConsumer,
                 DurableName = options.PostgresWriterConsumer,
+                AckPolicy = ConsumerConfigAckPolicy.Explicit,
+            }, ct);
+
+        // Single-writer hash chain: the durable pull consumer AuditWriterService fetches
+        // from, guarded by a Postgres advisory lock so every API node can compete but only
+        // one drains it at a time (spec §3.6).
+        await js.CreateOrUpdateConsumerAsync(
+            options.AuditStream,
+            new ConsumerConfig
+            {
+                Name = options.AuditWriterConsumer,
+                DurableName = options.AuditWriterConsumer,
                 AckPolicy = ConsumerConfigAckPolicy.Explicit,
             }, ct);
     }

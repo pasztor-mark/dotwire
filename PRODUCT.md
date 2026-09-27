@@ -109,16 +109,37 @@ These are deliberate exclusions. Do not add them "helpfully."
 - **Redis** — not part of the topology; NATS/JetStream already covers fanout, ephemeral
   pub/sub, and persistence-ack, so a second moving piece would be redundant infrastructure.
 
-## Roadmap extension points (documented, not built)
+## Shipped (formerly roadmap)
 
-- **Presend webhook hook.** A synchronous call to a host-configured URL before a message is
-  published, with a timeout budget and a configurable fail-open/fail-closed policy on
-  timeout or error. This is the designed extension point for host-side moderation — it is why
-  "AI moderation" can stay out of scope above without leaving hosts stranded.
-- **SSE read path.** A resumable Server-Sent Events subscribe endpoint aimed at agents and
-  harnesses that want a zero-dependency consumer without a full SignalR client. Deferred
-  because agents are a secondary audience (see "Who it's for"); SignalR remains the only
-  subscribe path in v1.
+These were designed and documented as extension points before they were built; they are now
+built, shipped in `dotwire`, and have matching methods in both host SDKs (`Dotwire.Host`,
+`@dotwire/host`), the client SDK where member-facing, and `@dotwire/react`:
+
+- **Presend/postsend webhook hooks.** A synchronous presend call to a host-configured URL
+  before a message is published (timeout budget, configurable fail-open/fail-closed policy),
+  plus an asynchronous postsend call-out after acceptance. This is the designed extension
+  point for host-side moderation — it is why "AI moderation" can stay out of scope above
+  without leaving hosts stranded. See ARCHITECTURE.md, "Webhooks (presend / postsend)."
+- **SSE read path.** A resumable Server-Sent Events subscribe endpoint (`GET
+  /rooms/{roomId}/events`) aimed at agents and harnesses that want a zero-dependency consumer
+  without a full SignalR client, alongside — not replacing — SignalR as the primary subscribe
+  path. See ARCHITECTURE.md, "Read path."
+- **Tamper-evident audit chain with checkpoints.** Hash-chained, append-only audit log with
+  daily checkpoint anchors and a `GET /audit/verify` endpoint, so integrity verification can
+  start from a recent anchor instead of walking the whole chain from genesis. See
+  ARCHITECTURE.md, "Audit log."
+- **DSAR export and configurable retention.** Admin-role endpoints for GDPR Art. 15 export and
+  for setting/reading a Postgres message-retention window (chunk-level `drop_chunks`, `O(1)`
+  per chunk, zero vacuum bloat). See ARCHITECTURE.md, "Encryption at rest & data lifecycle."
+- **Per-node rate limiting.** In-process token-bucket limits on send, read, admin, and hub
+  routes, requiring no new infrastructure component. See ARCHITECTURE.md, "Concurrency and
+  fanout disciplines."
+- **`@dotwire/react`.** Hooks and a provider (`DotwireProvider`, `useRoom`, `useTyping`,
+  `usePresence`, `useConnectionState`) over `@dotwire/client`, rounding out the SDK surface for
+  the React/Next.js hosts most of the primary audience already builds with.
+
+No further roadmap items are currently documented; new extension points get added here, in
+this same "documented before built" spirit, as they're designed.
 
 ## Related docs
 

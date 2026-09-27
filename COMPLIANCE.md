@@ -28,11 +28,17 @@ the doc section linked.
 - **TLS in transit.** Client and inter-service traffic is expected to run over TLS; TLS
   termination and certificate management are a host deployment concern (see "Shared
   responsibility matrix" below).
-- **Hash-chained, append-only audit log, with logged audit access.** A single durable
-  consumer computes `hash = SHA-256(prev_hash ‖ canonical_event)` over every audit event and
-  batch-inserts the results into an append-only Postgres table; UPDATE/DELETE are revoked at
-  the database level and backed by a guard trigger. Reading the audit log itself emits an
-  audit event, so audit access is self-documenting. See ARCHITECTURE.md, "Audit log."
+- **Hash-chained, append-only audit log, with logged audit access and a verify endpoint.** A
+  single durable consumer computes `hash = SHA-256(prev_hash ‖ canonical_event)` over every
+  audit event and batch-inserts the results into an append-only Postgres table; UPDATE/DELETE
+  are revoked at the database level and backed by a guard trigger. Daily checkpoints anchor
+  the chain, and `GET /audit/verify` (auditor role) walks the chain from the most recent
+  checkpoint at or before the requested range — rather than from genesis every time — and
+  reports whether it verifies intact. Reading the audit log itself emits an audit event, so
+  audit access is self-documenting. **Every admin mutation now emits an audit event** — role
+  changes, membership grants/revocations, redaction, message injection, and retention changes
+  all leave an ids-only trail, not just the message-lifecycle events the log originally
+  covered. See ARCHITECTURE.md, "Audit log."
 - **Role cross-check + membership authorization pipeline.** Every authenticated request
   verifies the JWT signature and standard claims, then cross-checks the token's `dw:role`
   claim against the service-side `user_roles` table — the table is authoritative, not the
@@ -46,13 +52,17 @@ the doc section linked.
 - **DSAR export endpoint** (admin role). For a given `sub`, exports that user's messages
   (decrypted), memberships, roles, and references to their audit entries. See ARCHITECTURE.md,
   "Encryption at rest & data lifecycle" ("DSAR export mechanics").
-- **Configurable retention (content and metadata).** Postgres history retention (Timescale
-  chunk drops) is host-configured and defaults to indefinite; JetStream stream retention
-  (`MaxAge`) defaults to roughly 48 hours, since it only needs to cover batch-writer lag and
-  reconnect gap-fill, not serve as long-term storage. Retention policy applies to metadata
-  too — who messaged whom and when live in plaintext columns, and a retention policy that only
-  touched encrypted content would not actually be a retention policy. See ARCHITECTURE.md,
-  "Encryption at rest & data lifecycle."
+- **Configurable retention (content and metadata), API and startup config.** Postgres history
+  retention (Timescale chunk drops, `O(1)` per chunk) is host-configured and defaults to
+  indefinite, settable either at startup (`Dotwire:Retention:MessagesDays`) or live via the
+  admin API/SDK retention methods (`GET`/`PUT /admin/retention`) — manage it from one of the
+  two, not both, per ARCHITECTURE.md's "Retention mechanics." Every retention change emits a
+  `retention.set` audit event. JetStream stream retention (`MaxAge`) defaults to roughly 48
+  hours, since it only needs to cover batch-writer lag and reconnect gap-fill, not serve as
+  long-term storage. Retention policy applies to metadata too — who messaged whom and when
+  live in plaintext columns, and a retention policy that only touched encrypted content would
+  not actually be a retention policy. See ARCHITECTURE.md, "Encryption at rest & data
+  lifecycle."
 - **Key rotation (both key systems).** dotwire's AES-256-GCM at-rest encryption keys rotate by
   introducing a new key id for new messages while old keys are retained to decrypt old
   messages — no mass re-encryption. The host's RS256 JWT signing keys rotate independently, via
@@ -91,7 +101,7 @@ full control environment, of which dotwire's technical controls are one input.
 |---|---|---|
 | §164.312(a) — access control | Role cross-check + membership authorization pipeline (AUTH.md) | Assign unique user identities on the host side; manage emergency access procedures |
 | §164.312(b) — audit controls | Hash-chained audit log (ARCHITECTURE.md) | Review audit log output as part of an operational compliance program |
-| §164.312(c)(1) — integrity | Hash chain (`hash = SHA-256(prev_hash ‖ canonical_event)`) with daily checkpoint anchors, enabling tamper detection via chain verification | Act on integrity-verification failures; retain checkpoint verification records |
+| §164.312(c)(1) — integrity | Hash chain (`hash = SHA-256(prev_hash ‖ canonical_event)`) with daily checkpoint anchors and a `GET /audit/verify` endpoint, enabling tamper detection via chain verification | Act on integrity-verification failures; archive `audit_checkpoints` rows to independent cold storage on a regular cadence so a verification anchor survives even if the live database is compromised, and retain checkpoint verification records |
 | §164.312(e) — transmission security | TLS in transit + AES-256-GCM at-rest encryption for content that traverses JetStream | Terminate and configure TLS correctly for the deployment's network topology |
 | *(not addressed by dotwire)* | — | Business Associate Agreement (BAA), and all administrative and physical safeguards, are entirely host obligations — dotwire is software, not a covered entity or business associate |
 

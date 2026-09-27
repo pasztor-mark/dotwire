@@ -13,6 +13,9 @@ public static class TestKeys
     public const string Kid = "test-key-1";
     public static readonly RSA Rsa = RSA.Create(2048);
     public static string PublicPem { get; } = Rsa.ExportSubjectPublicKeyInfoPem();
+
+    /// <summary>PKCS#8 private key PEM - what a host app would load into <c>Dotwire.Host.DotwireHostOptions.PrivateKeyPem</c>.</summary>
+    public static string PrivatePem { get; } = Rsa.ExportPkcs8PrivateKeyPem();
 }
 
 public static class TestTokens

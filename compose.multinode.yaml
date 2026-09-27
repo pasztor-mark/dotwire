@@ -42,6 +42,14 @@ services:
       Auth__Issuer: "${Auth__Issuer:?set Auth__Issuer in .env}"
       Auth__Audience: "${Auth__Audience:?set Auth__Audience in .env}"
       Auth__Keys__dev: "${Auth__Keys__dev:?set Auth__Keys__dev in .env}"
+      # Optional — webhooks, SSE, rate limits, retention. Defaults need nothing set; these are
+      # illustrative only. See .env.example for the full list.
+      # Dotwire__Webhooks__Presend__Url: "https://my-host.example.com/webhooks/dotwire/presend"
+      # Dotwire__Webhooks__PostSend__Url: "https://my-host.example.com/webhooks/dotwire/postsend"
+      # Dotwire__Webhooks__Secret: "${Dotwire__Webhooks__Secret:-}"
+      # Dotwire__Sse__Enabled: "true"
+      # Dotwire__RateLimits__Enabled: "true"
+      # Dotwire__Retention__MessagesDays: "90"
     ulimits:
       nofile:
         soft: 65536
@@ -85,6 +93,14 @@ services:
       Auth__Issuer: "${Auth__Issuer:?set Auth__Issuer in .env}"
       Auth__Audience: "${Auth__Audience:?set Auth__Audience in .env}"
       Auth__Keys__dev: "${Auth__Keys__dev:?set Auth__Keys__dev in .env}"
+      # Optional — webhooks, SSE, rate limits, retention. Defaults need nothing set; these are
+      # illustrative only. See .env.example for the full list.
+      # Dotwire__Webhooks__Presend__Url: "https://my-host.example.com/webhooks/dotwire/presend"
+      # Dotwire__Webhooks__PostSend__Url: "https://my-host.example.com/webhooks/dotwire/postsend"
+      # Dotwire__Webhooks__Secret: "${Dotwire__Webhooks__Secret:-}"
+      # Dotwire__Sse__Enabled: "true"
+      # Dotwire__RateLimits__Enabled: "true"
+      # Dotwire__Retention__MessagesDays: "90"
     ulimits:
       nofile:
         soft: 65536
@@ -130,6 +146,14 @@ services:
       Auth__Issuer: "${Auth__Issuer:?set Auth__Issuer in .env}"
       Auth__Audience: "${Auth__Audience:?set Auth__Audience in .env}"
       Auth__Keys__dev: "${Auth__Keys__dev:?set Auth__Keys__dev in .env}"
+      # Optional — webhooks, SSE, rate limits, retention. Defaults need nothing set; these are
+      # illustrative only. See .env.example for the full list.
+      # Dotwire__Webhooks__Presend__Url: "https://my-host.example.com/webhooks/dotwire/presend"
+      # Dotwire__Webhooks__PostSend__Url: "https://my-host.example.com/webhooks/dotwire/postsend"
+      # Dotwire__Webhooks__Secret: "${Dotwire__Webhooks__Secret:-}"
+      # Dotwire__Sse__Enabled: "true"
+      # Dotwire__RateLimits__Enabled: "true"
+      # Dotwire__Retention__MessagesDays: "90"
     deploy:
       resources:
         limits:

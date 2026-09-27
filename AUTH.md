@@ -89,6 +89,29 @@ service (roles, room membership, redaction, DSAR exports) but participates in ro
 also listed in `room_members` like anyone else. The three roles are independent axes, not a
 hierarchy where a higher role silently subsumes a lower one's room access.
 
+**Audit is auditor-only.** The `GET /audit`/`GET /audit/verify` surface checks for the
+`auditor` role specifically — `admin` does **not** get audit access by holding the `admin`
+role alone. An admin who also needs to read the audit trail needs the `auditor` role granted
+separately, same as any other user. This is a deliberate separation-of-duties boundary, not
+an oversight: the role that can mutate the service (admin) is not automatically the role that
+can review the tamper-evident record of what happened.
+
+**Message injection is audited, and does not grant room read access.** The admin API lets an
+admin inject a message into any room as an asserted sender (`SendSystemMessageAsync` /
+`sendSystemMessage`), without needing membership in that room. The sender id on the wire is
+whatever the admin asserts — dotwire does not verify that id is a real member. Every
+injection emits an audit event (ids only, never content, per "Audit log" in ARCHITECTURE.md).
+Injecting into a room still does not let the admin *read* that room's history or live
+traffic; write-by-injection and read access remain separate grants, consistent with "Audit
+access is not room access" above.
+
+**History reads follow room membership, not role.** Fetching a room's message history is
+gated the same way live delivery is — by `room_members`, checked at the point of the
+request — regardless of whether the caller is `member`, `auditor`, or `admin`. There is no
+role-based bypass of the membership check for history: an `auditor` or `admin` who wants to
+read a room's messages needs to actually be a member of that room, same as anyone else.
+`GET /rooms/{roomId}/participants` follows the same rule and returns only member user IDs.
+
 ## Roles
 
 **`member`** is the default role for ordinary chat participants. A member's room access is
@@ -107,6 +130,10 @@ via the admin API, and operating the compliance surface (redact/delete messages,
 exports — see COMPLIANCE.md). Admin is a service-management role, not an automatic room
 membership or audit-read grant; an admin who needs to read a room's messages or the audit log
 needs those separately, same as any other role.
+
+Migration 0004 seeds `host-admin` with `admin`; migration 0007 seeds `host-auditor` with
+`auditor`, so a host has a working auditor identity to mint tokens for (or reuse for its own
+compliance tooling) without first having to grant itself the role via the admin API.
 
 All three roles live in the service-side `user_roles` table, **preseeded with sensible
 defaults but fully configurable** — an operator can rename the boundary of what each role can

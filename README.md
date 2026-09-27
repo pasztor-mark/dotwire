@@ -1,6 +1,6 @@
 # dotwire
 
-**High-Throughput, Self-Hosted Realtime Chat Infrastructure**
+**Self-Hosted Realtime Chat Infrastructure**
 
 [![.NET 10](https://img.shields.io/badge/.NET-10.0%20Native%20AOT-512BD4?style=flat&logo=dotnet)](https://dotnet.microsoft.com/)
 [![TimescaleDB](https://img.shields.io/badge/TimescaleDB-PostgreSQL%2017-336791?style=flat&logo=postgresql)](https://www.timescale.com/)
@@ -8,18 +8,23 @@
 [![Encryption](https://img.shields.io/badge/At--Rest-AES--256--GCM-blueviolet?style=flat)]()
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)]()
 
-dotwire is a high-performance, self-hostable messaging infrastructure layer designed to be embedded into existing applications. It delivers real-time chat persistence, monotonic ordering guarantees, and compliance audit chains while keeping resource utilization sub-50 MB RAM per node.
+dotwire is a self-hostable messaging infrastructure layer designed to be embedded into existing applications. It provides real-time chat persistence, monotonic ordering, and an auditable event history while leaving identity management with the host application.
+
+> **Early development — not production-ready.** dotwire is under active development. Features, APIs, and deployment guidance may change without notice. Do not use it for production workloads.
 
 ---
 
 ## Key Highlights
 
-* **Native AOT Performance:** Compiled ahead-of-time with .NET 10 Native AOT into an 18 MB standalone binary with zero JIT runtime overhead.
+* **Native AOT:** Compiled ahead-of-time with .NET 10 Native AOT into a standalone binary.
 * **Stateless Host-Owned Identity:** Authenticates via host-signed RS256 JWTs with authoritative database role cross-checks. dotwire owns zero user tables.
-* **Decoupled Persistence Pipeline:** Client send acks (`202 Accepted`) confirm NATS JetStream file-backed persistence in `< 10ms`, decoupled from background TimescaleDB batch ingestion.
-* **Shard-Key Discipline:** Every hot-path query is sharded by `room_id`, leveraging TimescaleDB hypertables for $O(1)$ constant-time chunk pruning (`drop_chunks`) with zero PostgreSQL vacuum bloat.
+* **Decoupled Persistence Pipeline:** Client send acknowledgements (`202 Accepted`) confirm NATS JetStream persistence, independently of background TimescaleDB batch ingestion.
+* **Shard-Key Discipline:** Hot-path queries include `room_id`; TimescaleDB hypertables support time-based retention through chunk drops.
 * **Envelope Encryption at Rest:** Payloads are encrypted with AES-256-GCM (`nonce(12) ‖ ciphertext ‖ tag(16)`) at the gateway before publishing to JetStream or writing to disk. Key IDs travel alongside envelopes for zero-downtime key rotation.
-* **Tamper-Evident Audit Chain:** Append-only compliance log hash-chained with SHA-256 and protected with database-level revoked grants and guard triggers.
+* **Tamper-Evident Audit Chain:** Append-only compliance log hash-chained with SHA-256, anchored by periodic checkpoints, verifiable via `GET /audit/verify`, and protected with database-level revoked grants and guard triggers.
+* **Compliance Surface:** Redaction, DSAR export, and configurable retention (Postgres chunk drops + JetStream `MaxAge`) via the admin API and both host SDKs.
+* **Webhooks & SSE:** Optional presend/postsend webhook call-outs for host-side moderation, and a resumable Server-Sent Events read path alongside SignalR.
+* **Per-Node Rate Limiting:** In-process token-bucket limits on send, read, admin, and hub routes — no external dependency.
 
 ---
 
@@ -59,22 +64,6 @@ dotwire is a high-performance, self-hostable messaging infrastructure layer desi
 
 ---
 
-## Benchmark Performance
-
-Empirical metrics measured under continuous concurrent load (single-node Docker deployment):
-
-| Workload Preset | Ingest Throughput | Simulated Audience | Broadcast Fanout | Total Cluster RAM | Total Cluster CPU |
-|---|---|---|---|---|---|
-| 👥 **Small Team** | `30 msgs/s` | `500 subs` | `15,000 deliv/s` | **`178 MB`** | **`12.5% (⅛ core)`** |
-| 🏢 **Enterprise Fleet** | `150 msgs/s` | `10,000 subs` | `1,500,000 deliv/s` | **`181 MB`** | **`36.8% (⅓ core)`** |
-| 🏟️ **Stadium Event** | `500 msgs/s` | `50,000 subs` | `25,000,000 deliv/s` | **`170 MB`** | **`49.3% (< ½ core)`** |
-| ⚡ **Max Saturation** | **`1,314 msgs/s`** | `250,000 subs` | **`328,500,000 deliv/s`** | **`~191 MB`** | **`~80% of 1 core`** |
-
-* Tail Latency: $p_{50} = \mathbf{76\text{ ms}}$, $p_{95} = \mathbf{107\text{ ms}}$, $p_{99} = \mathbf{142\text{ ms}}$ across 100 concurrent parallel workers.
-* Stream Integrity: **100% Contiguous & Monotonic** JetStream sequence allocation with zero drops.
-
----
-
 ## Quickstart (Docker Compose)
 
 ### 1. Prerequisites
@@ -84,7 +73,7 @@ Empirical metrics measured under continuous concurrent load (single-node Docker 
 ### 2. Configure Environment
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/dotwire.git
+git clone https://github.com/pasztor-mark/dotwire.git
 cd dotwire
 
 # Create .env from template
@@ -134,7 +123,7 @@ Requires the **.NET 10 SDK** (`global.json` pins `10.0.0`):
 # Build the solution
 dotnet build dotwire.slnx
 
-# Run unit and integration tests (50 in-memory tests, zero external dependencies needed)
+# Run the test suite (Compose integration tests use Postgres and NATS when available)
 dotnet test dotwire.slnx
 
 # Publish standalone Native AOT binary
@@ -143,14 +132,20 @@ dotnet publish dotwire/dotwire.csproj -c Release
 
 ---
 
-## Roadmap
+---
 
-* **SignalR Realtime Subscribe Path:** Full-duplex WebSocket hub for live room subscriptions, presence, typing indicators, and ephemeral fanout.
-* **Presend Moderation Webhook:** Synchronous host callback hook before message publish with configurable fail-open/fail-closed timeouts for content moderation.
-* **Resumable SSE (Server-Sent Events) Stream:** Zero-dependency HTTP stream for AI agent harnesses and observability workers.
-* **Host SDKs:** Official client SDKs for .NET, TypeScript/JavaScript, and Python to simplify token signing and SignalR consumption.
-* **Compliance Export & Verification CLI:** Offline verification tool for validating SHA-256 audit log hash chains.
-* **DSAR & Right-to-be-Forgotten APIs:** Message redaction endpoints that cryptographically erase content while preserving hash-chain integrity.
+## Official SDKs
+
+Coding agents integrating chat into a host app can start with the [SDK guide](docs/SDK_AGENT_GUIDE.md), which maps each package to its responsibility and shows the participant lookup flow.
+
+| Package | Environment | Purpose | Documentation |
+|---|---|---|---|
+| [`@dotwire/client`](packages/client) | Browser / Web / React / Vue / Node.js | Real-time chat, scoped rooms, SignalR subscription with gap-fill, typing, presence, history | [Client README](packages/client/README.md) |
+| [`@dotwire/host`](packages/host) | Node.js / Next.js / Express Backend | RS256 JWT minting, zero-SQL room provisioning, role administration, system messages, webhooks, moderation, audit, retention, DSAR | [Host README](packages/host/README.md) |
+| [`@dotwire/react`](packages/react) | React 18+ | `DotwireProvider`, `useRoom`, `useTyping`, `usePresence`, `useConnectionState` hooks over `@dotwire/client` | [React README](packages/react/README.md) |
+| [`Dotwire.Host`](Dotwire.Host) | .NET 8/9/10 C# Backend | C# RS256 JWT minting, `Presend`/`PostSend` moderation hooks, batched async review, redaction, webhooks, audit, retention, DSAR | [.NET Host README](Dotwire.Host/README.md) |
+
+---
 
 ## Normative Specifications & Documentation
 

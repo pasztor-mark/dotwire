@@ -21,6 +21,7 @@
 
     <ItemGroup>
       <ProjectReference Include="..\dotwire\dotwire.csproj" />
+      <ProjectReference Include="..\Dotwire.Host\Dotwire.Host.csproj" />
     </ItemGroup>
 
 </Project>

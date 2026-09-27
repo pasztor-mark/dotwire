@@ -1,0 +1,41 @@
+{
+  "name": "@dotwire/host",
+  "version": "0.2.0",
+  "description": "Server-side SDK for dotwire: mint tokens, manage roles and membership, send/inject/redact messages, read audit logs, and run moderation, all from a host backend.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pasztor-mark/dotwire.git",
+    "directory": "packages/host"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/test/**/*.test.js"
+  },
+  "keywords": ["dotwire", "chat", "sdk", "host"],
+  "license": "Apache-2.0",
+  "type": "module",
+  "dependencies": {
+    "jose": "^6.2.9"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.8.0"
+  }
+}
