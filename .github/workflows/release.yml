@@ -28,6 +28,7 @@ jobs:
 
     - name: Check tag matches package versions
       run: |
+        set -x
         version="${GITHUB_REF_NAME#v}"
         test "$(dotnet msbuild Dotwire.Host/Dotwire.Host.csproj -getProperty:Version)" = "$version"
         for p in client host react; do
