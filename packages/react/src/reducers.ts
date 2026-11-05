@@ -42,6 +42,8 @@ export const initialRoomMessagesState: RoomMessagesState = {
  */
 function mergeMessages(existing: RoomMessage[], incoming: RoomMessage[]): RoomMessage[] {
   if (incoming.length === 0) return existing;
+  const last = existing[existing.length - 1];
+  if (incoming.length === 1 && (last === undefined || incoming[0].seq > last.seq)) return [...existing, incoming[0]];
   const bySeq = new Map<number, RoomMessage>();
   for (const message of existing) bySeq.set(message.seq, message);
   for (const message of incoming) bySeq.set(message.seq, message);

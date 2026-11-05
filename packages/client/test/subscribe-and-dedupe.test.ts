@@ -112,3 +112,11 @@ test('membership revocation unsubscribes the room and blocks resubscribe on reco
     'must not resubscribe a room the user was revoked from'
   );
 });
+
+test('released and disposed room handles are no longer retained by the client', () => {
+  const { client } = createTestClient();
+  for (let i = 0; i < 100; i++) client.room(ROOM_ID).dispose();
+  for (let i = 0; i < 100; i++) client.room(ROOM_ID).release();
+  const retained = (client as unknown as { activeRoomHandles: Set<unknown> }).activeRoomHandles;
+  assert.equal(retained.size, 0);
+});

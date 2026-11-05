@@ -39,7 +39,7 @@
   "type": "module",
   "peerDependencies": {
     "react": ">=18",
-    "@dotwire/client": "*"
+    "@dotwire/client": "^0.2.0"
   },
   "devDependencies": {
     "@dotwire/client": "*",

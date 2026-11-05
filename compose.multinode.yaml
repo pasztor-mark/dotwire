@@ -15,7 +15,7 @@ services:
 
   # WS holders
   dotwire-gateway-1:
-    image: dotwire:latest
+    image: ghcr.io/pasztor-mark/dotwire:latest
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -66,7 +66,7 @@ services:
         condition: service_healthy
 
   dotwire-gateway-2:
-    image: dotwire:latest
+    image: ghcr.io/pasztor-mark/dotwire:latest
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -118,7 +118,7 @@ services:
 
   # Rest and postgres
   dotwire-api-1:
-    image: dotwire:latest
+    image: ghcr.io/pasztor-mark/dotwire:latest
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -170,7 +170,7 @@ services:
     image: nats:2.10-alpine
     restart: always
     ports:
-      - "8222:8222"
+      - "127.0.0.1:8222:8222"
     command:
       - "-js"
       - "-sd"

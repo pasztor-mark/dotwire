@@ -1,6 +1,6 @@
 # @dotwire/client
 
-For coding agents adding dotwire to an application, see the [SDK integration guide](../../docs/SDK_AGENT_GUIDE.md).
+For coding agents adding dotwire to an application, see the [SDK integration guide](https://github.com/pasztor-mark/dotwire/blob/main/docs/SDK_AGENT_GUIDE.md).
 
 Official TypeScript/JavaScript client SDK for **dotwire**, the high-throughput, self-hosted real-time messaging infrastructure.
 
@@ -295,7 +295,8 @@ reconnect) happen internally; consumers just see `onMessage` fire once per new s
 | `onTyping(handler)` | `() => void` | Room-scoped typing indicator listener. |
 | `onTypingWithExpiry(handler, ms)` | `() => void` | Room-scoped typing listener that auto-resets after inactivity. |
 | `onPresence(handler)` | `() => void` | Room-scoped presence update listener. |
-| `dispose()` | `void` | Cancels timers, unbinds listeners, and leaves the room. |
+| `release()` | `void` | Cancels timers, unbinds listeners, and lets the client drop the handle, without leaving the room (for handles that share a subscription). |
+| `dispose()` | `void` | `release()`, then leaves the room. |
 
 ### Errors
 

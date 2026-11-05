@@ -1,10 +1,14 @@
 # Dotwire.Host (.NET)
 
-For coding agents adding dotwire to an application, see the [SDK integration guide](../docs/SDK_AGENT_GUIDE.md).
+For coding agents adding dotwire to an application, see the [SDK integration guide](https://github.com/pasztor-mark/dotwire/blob/main/docs/SDK_AGENT_GUIDE.md).
 
 Host-side SDK: mints RS256 tokens with the host's private key and talks to dotwire over
 HTTP. Every message reaches dotwire *through the host backend*, which is what makes the
 moderation hooks below both cheap and complete. Targets `net8.0`, `net9.0` and `net10.0`.
+
+```bash
+dotnet add package Dotwire.Host
+```
 
 ```csharp
 var options = new DotwireHostOptions
@@ -191,7 +195,7 @@ await worker.RunAsync(stoppingToken);
 ```
 
 A Claude Message Batches reference classifier lives in
-[`samples/Moderation`](../samples/Moderation) (needs the `Anthropic` NuGet package). It runs
+[`samples/Moderation`](https://github.com/pasztor-mark/dotwire/tree/main/samples/Moderation) (needs the `Anthropic` NuGet package). It runs
 `claude-haiku-4-5` with a cached policy prompt and structured output - the cheapest way to
 get an LLM verdict per message, at the cost of verdicts arriving in minutes rather than
 seconds. That is the right trade for a second line of defense behind `Presend`.

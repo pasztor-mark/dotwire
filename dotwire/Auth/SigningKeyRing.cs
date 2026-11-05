@@ -9,8 +9,6 @@ namespace Dotwire.Auth;
 /// JWKS document. The JWKS cache refreshes on an interval and . rate-limited . when an
 /// unrecognized kid shows up (rotation propagation). Fetch failures keep the last good
 /// key set: losing the JWKS endpoint must not immediately log every user out.
-/// The resolver contract is synchronous, so the rare refresh blocks; steady-state
-/// requests hit only the cached array.
 /// </summary>
 public sealed class SigningKeyRing
 {
@@ -24,6 +22,7 @@ public sealed class SigningKeyRing
     private readonly object _gate = new();
 
     private volatile IReadOnlyList<SecurityKey> _jwksKeys = [];
+    private Task _refresh = Task.CompletedTask;
 
     // UTC ticks of the last JWKS fetch attempt (successful or not). A plain DateTimeOffset
     // field here would be a multi-field struct read outside the lock in Resolve while
@@ -81,7 +80,12 @@ public sealed class SigningKeyRing
                          && now - lastFetch >= UnknownKidRefreshFloor;
 
         if (stale || unknownKid)
-            jwks = Refresh();
+        {
+            var refresh = StartRefresh();
+            if (unknownKid)
+                refresh.Wait(_http.Timeout);
+            jwks = _jwksKeys;
+        }
 
         return FilterByKid(_inlineKeys, kid).Concat(FilterByKid(jwks, kid));
     }
@@ -89,29 +93,37 @@ public sealed class SigningKeyRing
     private static IEnumerable<SecurityKey> FilterByKid(IReadOnlyList<SecurityKey> keys, string kid) =>
         keys.Where(k => k.KeyId == kid);
 
-    private IReadOnlyList<SecurityKey> Refresh()
+    private Task StartRefresh()
     {
         lock (_gate)
         {
-            // Another request may have refreshed while this one waited on the lock.
+            if (!_refresh.IsCompleted)
+                return _refresh;
+
             var lastFetch = new DateTimeOffset(Interlocked.Read(ref _lastFetchTicks), TimeSpan.Zero);
             if (DateTimeOffset.UtcNow - lastFetch < UnknownKidRefreshFloor)
-                return _jwksKeys;
+                return _refresh;
 
-            try
-            {
-                var json = _http.GetStringAsync(_jwksUrl!).GetAwaiter().GetResult();
-                var set = new JsonWebKeySet(json);
-                _jwksKeys = set.GetSigningKeys().ToList();
-                _logger?.LogInformation("JWKS refreshed: {Count} keys", _jwksKeys.Count);
-            }
-            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or ArgumentException)
-            {
-                _logger?.LogWarning("JWKS refresh failed, keeping previous keys: {Message}", ex.Message);
-            }
+            return _refresh = FetchAsync();
+        }
+    }
 
+    private async Task FetchAsync()
+    {
+        try
+        {
+            var json = await _http.GetStringAsync(_jwksUrl!);
+            var set = new JsonWebKeySet(json);
+            _jwksKeys = set.GetSigningKeys().ToList();
+            _logger?.LogInformation("JWKS refreshed: {Count} keys", _jwksKeys.Count);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or ArgumentException)
+        {
+            _logger?.LogWarning("JWKS refresh failed, keeping previous keys: {Message}", ex.Message);
+        }
+        finally
+        {
             Volatile.Write(ref _lastFetchTicks, DateTimeOffset.UtcNow.UtcTicks);
-            return _jwksKeys;
         }
     }
 }

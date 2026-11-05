@@ -109,4 +109,15 @@ public class MigrationScriptTests
         Assert.Matches(new Regex(@"actor_id\s+text"), all);
         Assert.DoesNotMatch(new Regex(@"actor_id\s+uuid"), all);
     }
+
+    [Fact]
+    public void RedactionAndInsertShareALockAndTombstonesAreGuarded()
+    {
+        var script = MigrationRunner.LoadScripts().Single(s => s.Name.Contains("erasure_serialization")).Sql;
+
+        Assert.Matches(new Regex(@"messages_skip_redacted[\s\S]*?pg_advisory_xact_lock_shared\(hashtextextended\(NEW\.room_id::text, 0\)\)[\s\S]*?FROM message_redactions", RegexOptions.IgnoreCase), script);
+        Assert.Matches(new Regex(@"redact_message[\s\S]*?SECURITY\s+DEFINER[\s\S]*?SET\s+search_path\s*=\s*public,\s*pg_temp[\s\S]*?pg_advisory_xact_lock\(hashtextextended\(p_room_id::text, 0\)\)[\s\S]*?INSERT INTO message_redactions[\s\S]*?DELETE FROM messages", RegexOptions.IgnoreCase), script);
+        Assert.Matches(new Regex(@"BEFORE\s+UPDATE\s+OR\s+DELETE\s+ON\s+message_redactions", RegexOptions.IgnoreCase), script);
+        Assert.Matches(new Regex(@"BEFORE\s+TRUNCATE\s+ON\s+message_redactions", RegexOptions.IgnoreCase), script);
+    }
 }

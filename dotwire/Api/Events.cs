@@ -8,6 +8,7 @@ using Dotwire.Data;
 using Dotwire.Realtime;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
+using NATS.Client.JetStream;
 using Npgsql;
 
 namespace Dotwire.Api;
@@ -29,6 +30,8 @@ public static class Events
             HttpContext http,
             [FromKeyedServices(PostgresDataSources.Read)] NpgsqlDataSource readDataSource,
             MessageCipher cipher,
+            INatsJSContext js,
+            IOptions<NatsOptions> natsOptions,
             RoomInterestManager interestManager,
             Dotwire.Realtime.PresenceCoalescer presenceCoalescer,
             IOptions<SseOptions> sseOptionsAccessor,
@@ -44,7 +47,6 @@ public static class Events
             var roomGuid = Guid.Parse(roomId);
             var userId = http.User.FindFirstValue("sub")!;
             var logger = loggerFactory.CreateLogger("Dotwire.Api.Events");
-            var ct = http.RequestAborted;
 
             ulong? resumeSeq = null;
             if (http.Request.Headers.TryGetValue("Last-Event-ID", out var lastEventId) &&
@@ -60,24 +62,33 @@ public static class Events
             http.Response.Headers.CacheControl = "no-cache";
             http.Response.Headers["X-Accel-Buffering"] = "no";
             http.Response.ContentType = "text/event-stream";
-            await http.Response.StartAsync(ct);
+            await http.Response.StartAsync(http.RequestAborted);
 
-            // Register the live subscription FIRST (spec §3.9) so live events start
-            // accumulating in this connection's channel while replay runs below.
             var connectionId = $"sse-{Guid.NewGuid()}";
-            var reader = interestManager.RegisterSseConnection(roomGuid, connectionId, userId, sseOptions.BufferSize);
-            presenceCoalescer.QueueJoin(roomGuid, userId);
-
             var lastReplayedSeq = resumeSeq ?? 0;
+            var revoked = CancellationToken.None;
             try
             {
+                // Register the live subscription FIRST (spec §3.9) so live events start
+                // accumulating in this connection's channel while replay runs below.
+                (var reader, revoked) = await interestManager.RegisterSseConnectionAsync(roomGuid, connectionId, userId, sseOptions.BufferSize);
+                presenceCoalescer.QueueJoin(roomGuid, userId);
+
+                using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(http.RequestAborted, revoked);
+                if (long.TryParse(http.User.FindFirstValue("exp"), out var exp))
+                {
+                    var remaining = DateTimeOffset.FromUnixTimeSeconds(exp) - DateTimeOffset.UtcNow;
+                    lifetime.CancelAfter(TimeSpan.FromMilliseconds(Math.Clamp(remaining.TotalMilliseconds, 0, int.MaxValue)));
+                }
+                var ct = lifetime.Token;
+
                 if (resumeSeq.HasValue)
                 {
                     var current = resumeSeq;
                     while (true)
                     {
                         var (rows, hasMore) = await Messages.QueryHistoryPageAsync(
-                            readDataSource, roomGuid, current, null, sseOptions.ReplayPageSize, ct);
+                            readDataSource, js, natsOptions.Value, logger, roomGuid, current, null, sseOptions.ReplayPageSize, ct);
 
                         foreach (var row in rows)
                         {
@@ -128,7 +139,6 @@ public static class Events
                     if (!await readTask)
                         break; // channel completed - laggard disconnect or normal teardown.
 
-                    var closeAfterThisBatch = false;
                     while (reader.TryRead(out var evt))
                     {
                         // Drain-and-dedupe: drop anything at or below the last replayed seq
@@ -138,15 +148,9 @@ public static class Events
                             continue;
 
                         await WriteEventAsync(http.Response, evt.EventName, evt.Data, evt.Id, ct);
-
-                        if (evt.EventName == "revoked")
-                            closeAfterThisBatch = true;
                     }
 
                     readTask = reader.WaitToReadAsync(ct).AsTask();
-
-                    if (closeAfterThisBatch)
-                        break;
                 }
             }
             catch (Exception ex)
@@ -154,8 +158,22 @@ public static class Events
                 // Response headers are already flushed by this point, so nothing can turn
                 // into an error status any more - cancellation (client gone) and any
                 // mid-stream I/O fault both just end the connection cleanly.
-                if (ex is not OperationCanceledException)
+                if (revoked.IsCancellationRequested && !http.RequestAborted.IsCancellationRequested)
+                {
+                    try
+                    {
+                        var payload = JsonSerializer.SerializeToUtf8Bytes(new SseRevokedPayload(roomGuid), DotwireJsonContext.Default.SseRevokedPayload);
+                        await WriteEventAsync(http.Response, "revoked", payload, null, http.RequestAborted);
+                    }
+                    catch (Exception writeEx)
+                    {
+                        logger.LogDebug("SSE revoked event for room {RoomId} not delivered: {Error}", roomGuid, writeEx.Message);
+                    }
+                }
+                else if (ex is not OperationCanceledException)
+                {
                     logger.LogDebug("SSE connection for room {RoomId} ended: {Error}", roomGuid, ex.Message);
+                }
             }
             finally
             {

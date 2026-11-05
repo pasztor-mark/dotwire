@@ -235,7 +235,7 @@ public class AuditWriterComposeTests : IClassFixture<WebApplicationFactory<Progr
         // (spec §10.2): a writer that already committed+acked a batch, then is torn down
         // and replaced by a fresh instance (as a restarted process would be), must not
         // reprocess anything - JetStream won't redeliver already-acked messages, and even
-        // if it did, the stream_seq <= tail.stream_seq guard would drop them.
+        // if it did, the already-committed stream_seq check would drop them.
         var actorId = $"it-restart-{Guid.NewGuid():N}";
         var js = _factory.Services.GetRequiredService<INatsJSContext>();
         var natsOptions = _factory.Services.GetRequiredService<IOptions<NatsOptions>>();

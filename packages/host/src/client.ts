@@ -477,6 +477,9 @@ export class DotwireHostClient {
       if (err instanceof DotwireApiError) {
         return { status: err.status, body: { error: err.code ?? 'unknown', reason: err.reason } };
       }
+      if (err instanceof PostSendError) {
+        return { status: 202, body: err.sent };
+      }
       throw err;
     }
   }

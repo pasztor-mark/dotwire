@@ -6,6 +6,7 @@ using Dotwire.Data;
 using Dotwire.Nats;
 using Dotwire.Realtime;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
@@ -128,6 +129,8 @@ builder.Services.AddSingleton<INatsConnection>(sp =>
 builder.Services.AddSingleton<INatsJSContext>(sp =>
     new NatsJSContext(sp.GetRequiredService<INatsConnection>()));
 
+builder.Services.AddSingleton<RoomHubLifetimeManager>();
+builder.Services.AddSingleton<HubLifetimeManager<RoomHub>>(sp => sp.GetRequiredService<RoomHubLifetimeManager>());
 builder.Services.AddSingleton<RoomInterestManager>();
 builder.Services.AddSingleton<PresenceCoalescer>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PresenceCoalescer>());
@@ -167,7 +170,11 @@ if (nodeRole is NodeRole.All or NodeRole.Api)
 
 if (nodeRole is NodeRole.All or NodeRole.Gateway)
 {
-    app.MapHub<RoomHub>("/hub/rooms");
+    app.MapHub<RoomHub>("/hub/rooms", options =>
+    {
+        options.Transports = HttpTransportType.WebSockets;
+        options.CloseOnAuthenticationExpiration = true;
+    });
     Events.MapEventEndpoints(app);
 }
 

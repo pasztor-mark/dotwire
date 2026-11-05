@@ -6,6 +6,7 @@ using Dotwire.Api;
 using Dotwire.Configuration;
 using Dotwire.Crypto;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.SignalR.Protocol;
 using Microsoft.Extensions.Options;
 using NATS.Client.Core;
 
@@ -18,45 +19,97 @@ public readonly record struct SseOutboundEvent(string EventName, byte[] Data, ul
 /// The single owner of per-room fanout on a node (spec §3.9). Tracks, per connection, which
 /// rooms it's subscribed to and as which user - moved here from <see cref="RoomHub"/>'s
 /// <c>Context.Items</c> so membership revocation (spec §3.5) can find and drop a connection
-/// without going through the hub. Fanout to SignalR is still one group-send per event; the
-/// per-connection map exists for revocation/<see cref="IsSubscribed"/>, not to fan out
-/// per-connection.
+/// without going through the hub.
 /// </summary>
 public sealed class RoomInterestManager : IAsyncDisposable
 {
+    private const int HubSendQueueCapacity = 256;
+
     private sealed record RoomSubscription(
-        Dictionary<string, string> ConnectionUsers,
+        ConcurrentDictionary<string, ConnectionInfo> Connections,
         CancellationTokenSource Cts,
+        Task Ready,
         Task MessageTask,
         Task EphemeralTask);
 
-    private sealed class ConnectionInfo(string userId)
+    private sealed class ConnectionInfo(string userId, HubOutbox? outbox)
     {
         public string UserId { get; } = userId;
+        public HubOutbox? Outbox { get; } = outbox;
         public HashSet<Guid> Rooms { get; } = [];
     }
 
+    private sealed record SseConnection(Channel<SseOutboundEvent> Channel, CancellationTokenSource Revoked);
+
+    private sealed class HubOutbox
+    {
+        private readonly HubConnectionContext _connection;
+        private readonly Channel<SerializedHubMessage> _channel = Channel.CreateBounded<SerializedHubMessage>(
+            new BoundedChannelOptions(HubSendQueueCapacity)
+            {
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleReader = true,
+                SingleWriter = false,
+            });
+        private volatile bool _closed;
+
+        public HubOutbox(HubConnectionContext connection)
+        {
+            _connection = connection;
+            _ = Task.Run(PumpAsync);
+        }
+
+        public void Post(SerializedHubMessage message)
+        {
+            if (_channel.Writer.TryWrite(message) || _closed)
+                return;
+
+            _closed = true;
+            _channel.Writer.TryComplete();
+            _connection.Abort();
+        }
+
+        public void Complete()
+        {
+            _closed = true;
+            _channel.Writer.TryComplete();
+        }
+
+        private async Task PumpAsync()
+        {
+            var ct = _connection.ConnectionAborted;
+            try
+            {
+                await foreach (var message in _channel.Reader.ReadAllAsync(ct))
+                    await _connection.WriteAsync(message, ct);
+            }
+            catch
+            {
+            }
+        }
+    }
+
     private readonly INatsConnection _nats;
-    private readonly IHubContext<RoomHub> _hubContext;
+    private readonly RoomHubLifetimeManager _lifetimeManager;
     private readonly MessageCipher _cipher;
     private readonly PresenceCoalescer _presenceCoalescer;
     private readonly NatsOptions _natsOptions;
     private readonly ILogger<RoomInterestManager> _logger;
     private readonly ConcurrentDictionary<Guid, RoomSubscription> _subscriptions = new();
     private readonly ConcurrentDictionary<string, ConnectionInfo> _connections = new();
-    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, Channel<SseOutboundEvent>>> _sseChannels = new();
+    private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, SseConnection>> _sseChannels = new();
     private readonly Lock _gate = new();
 
     public RoomInterestManager(
         INatsConnection nats,
-        IHubContext<RoomHub> hubContext,
+        RoomHubLifetimeManager lifetimeManager,
         MessageCipher cipher,
         PresenceCoalescer presenceCoalescer,
         IOptions<NatsOptions> natsOptions,
         ILogger<RoomInterestManager> logger)
     {
         _nats = nats;
-        _hubContext = hubContext;
+        _lifetimeManager = lifetimeManager;
         _cipher = cipher;
         _presenceCoalescer = presenceCoalescer;
         _natsOptions = natsOptions.Value;
@@ -64,22 +117,34 @@ public sealed class RoomInterestManager : IAsyncDisposable
     }
 
     /// <summary>Returns false if the connection was already subscribed to this room.</summary>
-    public bool Subscribe(Guid roomId, string connectionId, string userId)
+    public async Task<bool> SubscribeAsync(Guid roomId, string connectionId, string userId)
     {
+        Task ready;
         lock (_gate)
         {
-            var info = _connections.GetOrAdd(connectionId, _ => new ConnectionInfo(userId));
+            var info = _connections.GetOrAdd(connectionId, id => new ConnectionInfo(userId, CreateOutbox(id)));
             if (!info.Rooms.Add(roomId))
                 return false;
 
-            if (_natsOptions.Enabled)
-            {
-                var subscription = _subscriptions.GetOrAdd(roomId, CreateSubscription);
-                subscription.ConnectionUsers[connectionId] = userId;
-            }
+            if (!_natsOptions.Enabled)
+                return true;
 
-            return true;
+            var subscription = _subscriptions.GetOrAdd(roomId, CreateSubscription);
+            subscription.Connections[connectionId] = info;
+            ready = subscription.Ready;
         }
+
+        try
+        {
+            await ready;
+        }
+        catch
+        {
+            Unsubscribe(roomId, connectionId);
+            throw;
+        }
+
+        return true;
     }
 
     /// <summary>Returns false if the connection wasn't subscribed to this room.</summary>
@@ -90,13 +155,13 @@ public sealed class RoomInterestManager : IAsyncDisposable
         lock (_gate)
         {
             removed = _connections.TryGetValue(connectionId, out var info) && info.Rooms.Remove(roomId);
-            if (removed && info!.Rooms.Count == 0)
+            if (removed && info!.Rooms.Count == 0 && info.Outbox is null)
                 _connections.TryRemove(connectionId, out _);
 
             if (removed && _natsOptions.Enabled && _subscriptions.TryGetValue(roomId, out var existing))
             {
-                existing.ConnectionUsers.Remove(connectionId);
-                if (existing.ConnectionUsers.Count == 0)
+                existing.Connections.TryRemove(connectionId, out _);
+                if (existing.Connections.IsEmpty)
                     _subscriptions.TryRemove(roomId, out toDispose);
             }
         }
@@ -113,6 +178,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
         {
             if (!_connections.TryRemove(connectionId, out var info))
                 return [];
+            info.Outbox?.Complete();
             rooms = [.. info.Rooms];
         }
 
@@ -123,8 +189,8 @@ public sealed class RoomInterestManager : IAsyncDisposable
             {
                 if (_natsOptions.Enabled && _subscriptions.TryGetValue(roomId, out var existing))
                 {
-                    existing.ConnectionUsers.Remove(connectionId);
-                    if (existing.ConnectionUsers.Count == 0)
+                    existing.Connections.TryRemove(connectionId, out _);
+                    if (existing.Connections.IsEmpty)
                         _subscriptions.TryRemove(roomId, out toDispose);
                 }
             }
@@ -137,20 +203,23 @@ public sealed class RoomInterestManager : IAsyncDisposable
     /// <summary>
     /// Registers an SSE connection as a room subscriber (spec §3.9) and returns the reader it
     /// should forward to the response body. A synthetic connection id keeps it in the same
-    /// bookkeeping as hub connections, so <see cref="RevokeAsync"/> can find and close it too.
+    /// bookkeeping as hub connections, so <see cref="Revoke"/> can find and close it too.
     /// </summary>
-    public ChannelReader<SseOutboundEvent> RegisterSseConnection(Guid roomId, string connectionId, string userId, int bufferSize)
+    public async Task<(ChannelReader<SseOutboundEvent> Reader, CancellationToken Revoked)> RegisterSseConnectionAsync(
+        Guid roomId, string connectionId, string userId, int bufferSize)
     {
-        var channel = Channel.CreateBounded<SseOutboundEvent>(new BoundedChannelOptions(bufferSize)
-        {
-            FullMode = BoundedChannelFullMode.DropWrite,
-            SingleReader = true,
-            SingleWriter = false,
-        });
-        var perRoom = _sseChannels.GetOrAdd(roomId, _ => new ConcurrentDictionary<string, Channel<SseOutboundEvent>>());
-        perRoom[connectionId] = channel;
-        Subscribe(roomId, connectionId, userId);
-        return channel.Reader;
+        var connection = new SseConnection(
+            Channel.CreateBounded<SseOutboundEvent>(new BoundedChannelOptions(bufferSize)
+            {
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleReader = true,
+                SingleWriter = false,
+            }),
+            new CancellationTokenSource());
+        var perRoom = _sseChannels.GetOrAdd(roomId, _ => new ConcurrentDictionary<string, SseConnection>());
+        perRoom[connectionId] = connection;
+        await SubscribeAsync(roomId, connectionId, userId);
+        return (connection.Channel.Reader, connection.Revoked.Token);
     }
 
     /// <summary>Tears down an SSE connection's registration; safe to call more than once.</summary>
@@ -158,8 +227,8 @@ public sealed class RoomInterestManager : IAsyncDisposable
     {
         if (_sseChannels.TryGetValue(roomId, out var perRoom))
         {
-            if (perRoom.TryRemove(connectionId, out var channel))
-                channel.Writer.TryComplete();
+            if (perRoom.TryRemove(connectionId, out var connection))
+                connection.Channel.Writer.TryComplete();
             if (perRoom.IsEmpty)
                 _sseChannels.TryRemove(roomId, out _);
         }
@@ -177,15 +246,25 @@ public sealed class RoomInterestManager : IAsyncDisposable
         if (!_sseChannels.TryGetValue(roomId, out var perRoom))
             return;
 
-        foreach (var (connectionId, channel) in perRoom)
+        foreach (var (connectionId, connection) in perRoom)
         {
-            if (!channel.Writer.TryWrite(evt))
+            if (!connection.Channel.Writer.TryWrite(evt))
             {
-                channel.Writer.TryComplete();
+                connection.Channel.Writer.TryComplete();
                 perRoom.TryRemove(connectionId, out _);
             }
         }
     }
+
+    private static void PublishToHub(ConcurrentDictionary<string, ConnectionInfo> connections, string method, object payload)
+    {
+        var message = new SerializedHubMessage(new InvocationMessage(method, [payload]));
+        foreach (var (_, info) in connections)
+            info.Outbox?.Post(message);
+    }
+
+    private HubOutbox? CreateOutbox(string connectionId) =>
+        _natsOptions.Enabled && _lifetimeManager.Find(connectionId) is { } connection ? new HubOutbox(connection) : null;
 
     public bool IsSubscribed(string connectionId, Guid roomId)
     {
@@ -197,45 +276,33 @@ public sealed class RoomInterestManager : IAsyncDisposable
 
     /// <summary>
     /// Drops every local connection subscribed to <paramref name="roomId"/> as
-    /// <paramref name="userId"/>: removes it from the SignalR group and its own bookkeeping,
-    /// sends it <c>MembershipRevoked</c>, and queues a presence leave (spec §3.5).
+    /// <paramref name="userId"/>: sends it <c>MembershipRevoked</c>, removes it from its own
+    /// bookkeeping, and queues a presence leave (spec §3.5).
     /// </summary>
-    public async Task RevokeAsync(Guid roomId, string userId, CancellationToken ct = default)
+    public void Revoke(Guid roomId, string userId)
     {
-        List<string> affected = [];
+        List<(string ConnectionId, ConnectionInfo Info)> affected = [];
         lock (_gate)
         {
             if (_subscriptions.TryGetValue(roomId, out var subscription))
             {
-                foreach (var (connectionId, subscribedUserId) in subscription.ConnectionUsers)
+                foreach (var (connectionId, info) in subscription.Connections)
                 {
-                    if (subscribedUserId == userId)
-                        affected.Add(connectionId);
+                    if (info.UserId == userId)
+                        affected.Add((connectionId, info));
                 }
             }
         }
-        foreach (var connectionId in affected)
-        {
-            // Notify first, with a token independent of this room's subscription: dropping
-            // the last subscriber below cancels the room's own CTS (the very `ct` this loop
-            // iteration runs on), which would otherwise cancel the notification too.
-            try
-            {
-                await _hubContext.Groups.RemoveFromGroupAsync(connectionId, roomId.ToString(), CancellationToken.None);
-                await _hubContext.Clients.Client(connectionId)
-                    .SendAsync("MembershipRevoked", new MembershipRevoked(roomId, userId), CancellationToken.None);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogWarning("Failed to notify connection {ConnectionId} of revocation: {Error}", connectionId, ex.Message);
-            }
 
-            // SSE: send `revoked`, then close the stream (spec §3.5/§3.9's "server closes the stream").
-            if (_sseChannels.TryGetValue(roomId, out var perRoom) && perRoom.TryRemove(connectionId, out var channel))
+        var revoked = new SerializedHubMessage(new InvocationMessage("MembershipRevoked", [new MembershipRevoked(roomId, userId)]));
+        foreach (var (connectionId, info) in affected)
+        {
+            info.Outbox?.Post(revoked);
+
+            if (_sseChannels.TryGetValue(roomId, out var perRoom) && perRoom.TryRemove(connectionId, out var sse))
             {
-                var payload = JsonSerializer.SerializeToUtf8Bytes(new SseRevokedPayload(roomId), DotwireJsonContext.Default.SseRevokedPayload);
-                channel.Writer.TryWrite(new SseOutboundEvent("revoked", payload, null));
-                channel.Writer.TryComplete();
+                sse.Channel.Writer.TryComplete();
+                sse.Revoked.Cancel();
             }
 
             Unsubscribe(roomId, connectionId);
@@ -245,21 +312,28 @@ public sealed class RoomInterestManager : IAsyncDisposable
 
     private RoomSubscription CreateSubscription(Guid roomId)
     {
+        var connections = new ConcurrentDictionary<string, ConnectionInfo>();
         var cts = new CancellationTokenSource();
-        var messageTask = Task.Run(() => SubscribeMessagesLoopAsync(roomId, cts.Token));
-        var ephemeralTask = Task.Run(() => SubscribeEphemeralLoopAsync(roomId, cts.Token));
-        return new RoomSubscription(new Dictionary<string, string>(), cts, messageTask, ephemeralTask);
+        var messageReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ephemeralReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var messageTask = Task.Run(() => SubscribeMessagesLoopAsync(roomId, connections, messageReady, cts.Token));
+        var ephemeralTask = Task.Run(() => SubscribeEphemeralLoopAsync(roomId, connections, ephemeralReady, cts.Token));
+        return new RoomSubscription(connections, cts, Task.WhenAll(messageReady.Task, ephemeralReady.Task), messageTask, ephemeralTask);
     }
 
-    private async Task SubscribeMessagesLoopAsync(Guid roomId, CancellationToken ct)
+    private async Task SubscribeMessagesLoopAsync(
+        Guid roomId, ConcurrentDictionary<string, ConnectionInfo> connections, TaskCompletionSource ready, CancellationToken ct)
     {
-        var roomIdStr = roomId.ToString();
         // Live fanout rides NATS core, not JetStream (spec §3.1/§3.2): the send path
         // republishes each acked message here with its stream seq attached.
         var subject = $"{_natsOptions.RoomSubjectPrefix}{roomId}{_natsOptions.RoomLiveSubjectSuffix}";
         try
         {
-            await foreach (var msg in _nats.SubscribeAsync<byte[]>(subject, cancellationToken: ct))
+            await using var sub = await _nats.SubscribeCoreAsync<byte[]>(subject, cancellationToken: ct);
+            await _nats.PingAsync(ct);
+            ready.TrySetResult();
+
+            await foreach (var msg in sub.Msgs.ReadAllAsync(ct))
             {
                 if (msg.Data is null)
                     continue;
@@ -274,7 +348,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
                     var plaintext = Encoding.UTF8.GetString(decrypted);
                     var delivery = new RoomMessageDelivery(roomMessage.RoomId, roomMessage.Seq, roomMessage.SenderId, roomMessage.Time, plaintext);
 
-                    await _hubContext.Clients.Group(roomIdStr).SendAsync("ReceiveMessage", delivery, ct);
+                    PublishToHub(connections, "ReceiveMessage", delivery);
 
                     var ssePayload = new SseMessagePayload(roomMessage.RoomId, roomMessage.Seq, roomMessage.SenderId, roomMessage.Time, plaintext, Replayed: false);
                     var sseData = JsonSerializer.SerializeToUtf8Bytes(ssePayload, DotwireJsonContext.Default.SseMessagePayload);
@@ -288,20 +362,26 @@ public sealed class RoomInterestManager : IAsyncDisposable
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            ready.TrySetCanceled(ct);
         }
         catch (Exception ex)
         {
+            ready.TrySetException(ex);
             _logger.LogError("Message subscription loop error for room {RoomId}: {Error}", roomId, ex.Message);
         }
     }
 
-    private async Task SubscribeEphemeralLoopAsync(Guid roomId, CancellationToken ct)
+    private async Task SubscribeEphemeralLoopAsync(
+        Guid roomId, ConcurrentDictionary<string, ConnectionInfo> connections, TaskCompletionSource ready, CancellationToken ct)
     {
-        var roomIdStr = roomId.ToString();
         var subject = $"room.{roomId}.ephemeral.>";
         try
         {
-            await foreach (var msg in _nats.SubscribeAsync<byte[]>(subject, cancellationToken: ct))
+            await using var sub = await _nats.SubscribeCoreAsync<byte[]>(subject, cancellationToken: ct);
+            await _nats.PingAsync(ct);
+            ready.TrySetResult();
+
+            await foreach (var msg in sub.Msgs.ReadAllAsync(ct))
             {
                 if (msg.Data is null)
                     continue;
@@ -313,7 +393,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
                         var typing = JsonSerializer.Deserialize(msg.Data, DotwireJsonContext.Default.TypingNotification);
                         if (typing is not null)
                         {
-                            await _hubContext.Clients.Group(roomIdStr).SendAsync("UserTyping", typing, ct);
+                            PublishToHub(connections, "UserTyping", typing);
                             PublishToSse(roomId, new SseOutboundEvent("typing", msg.Data, null));
                         }
                     }
@@ -322,7 +402,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
                         var presence = JsonSerializer.Deserialize(msg.Data, DotwireJsonContext.Default.PresenceDelta);
                         if (presence is not null)
                         {
-                            await _hubContext.Clients.Group(roomIdStr).SendAsync("PresenceUpdated", presence, ct);
+                            PublishToHub(connections, "PresenceUpdated", presence);
                             PublishToSse(roomId, new SseOutboundEvent("presence", msg.Data, null));
                         }
                     }
@@ -331,7 +411,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
                         var retracted = JsonSerializer.Deserialize(msg.Data, DotwireJsonContext.Default.MessageRetracted);
                         if (retracted is not null)
                         {
-                            await _hubContext.Clients.Group(roomIdStr).SendAsync("MessageRetracted", retracted, ct);
+                            PublishToHub(connections, "MessageRetracted", retracted);
                             PublishToSse(roomId, new SseOutboundEvent("retracted", msg.Data, null));
                         }
                     }
@@ -340,7 +420,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
                         var revoked = JsonSerializer.Deserialize(msg.Data, DotwireJsonContext.Default.MembershipRevoked);
                         if (revoked is not null)
                         {
-                            await RevokeAsync(revoked.RoomId, revoked.UserId, ct);
+                            Revoke(revoked.RoomId, revoked.UserId);
                         }
                     }
                 }
@@ -352,9 +432,11 @@ public sealed class RoomInterestManager : IAsyncDisposable
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            ready.TrySetCanceled(ct);
         }
         catch (Exception ex)
         {
+            ready.TrySetException(ex);
             _logger.LogError("Ephemeral subscription loop error for room {RoomId}: {Error}", roomId, ex.Message);
         }
     }

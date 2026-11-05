@@ -84,3 +84,42 @@ test('gapFillOnReconnect: false skips replay but still resubscribes', async (t) 
   assert.equal(fetchCalled, false);
   assert.ok(fake.invokeCalls.some((c) => c.method === 'Subscribe'));
 });
+
+test('reconnect gap-fill keeps its own cursor when live delivery advances lastSeq mid-replay', async (t) => {
+  const { client, fake } = createTestClient({ gapFillPageSize: 2 });
+  await client.connect();
+  const room = client.room(ROOM_ID);
+  await room.subscribe();
+
+  const received: number[] = [];
+  room.onMessage((message) => received.push(message.seq));
+  fake.emit('ReceiveMessage', { roomId: ROOM_ID, seq: 10, senderId: 'alice', time: 't', content: 'before drop' });
+
+  const afterSeqs: number[] = [];
+  t.mock.method(globalThis, 'fetch', async (url: string) => {
+    const afterSeq = Number(new URL(url.toString()).searchParams.get('afterSeq'));
+    afterSeqs.push(afterSeq);
+    if (afterSeq === 10) {
+      fake.emit('ReceiveMessage', { roomId: ROOM_ID, seq: 20, senderId: 'alice', time: 't', content: 'live' });
+      return jsonResponse({
+        roomId: ROOM_ID,
+        messages: [
+          { seq: 11, time: 't', senderId: 'bob', content: 'gap-1' },
+          { seq: 12, time: 't', senderId: 'bob', content: 'gap-2' }
+        ],
+        hasMore: true
+      });
+    }
+    const messages = [];
+    for (let seq = afterSeq + 1; seq <= 19; seq++) messages.push({ seq, time: 't', senderId: 'bob', content: 'gap' });
+    return jsonResponse({ roomId: ROOM_ID, messages, hasMore: false });
+  });
+
+  await fake.simulateReconnected();
+
+  assert.deepEqual(afterSeqs, [10, 12]);
+  assert.deepEqual(
+    [...received].sort((a, b) => a - b),
+    [10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+  );
+});

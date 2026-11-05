@@ -219,12 +219,17 @@ export class DotwireRoomHandle {
     return unsub;
   }
 
-  public dispose(): void {
+  public release(): void {
     this.clearTypingTimer();
     for (const cleanup of this.listeners) {
       cleanup();
     }
     this.listeners.length = 0;
+    this.client.releaseRoomHandle(this);
+  }
+
+  public dispose(): void {
+    this.release();
     this.unsubscribe().catch(() => {});
   }
 }

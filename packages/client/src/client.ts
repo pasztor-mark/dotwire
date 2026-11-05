@@ -58,6 +58,7 @@ export class DotwireClient {
   private readonly roomState = new Map<string, RoomState>();
   private readonly activeRoomHandles = new Set<DotwireRoomHandle>();
   private unloadListener: (() => void) | null = null;
+  private pendingConnect: Promise<void> | null = null;
 
   constructor(public readonly options: DotwireClientOptions) {
     if (!options.tokenUrl && !options.getAccessToken) {
@@ -151,14 +152,15 @@ export class DotwireClient {
     this.connection.onreconnected(async () => {
       this.notifyStateChange('connected');
       for (const roomId of Array.from(this.subscribedRooms)) {
+        const resumeFrom = this.roomState.get(roomId)?.lastSeq ?? null;
         try {
           await this.connection.invoke('Subscribe', roomId);
         } catch {
           continue;
         }
-        if (this.options.gapFillOnReconnect === false) continue;
+        if (this.options.gapFillOnReconnect === false || resumeFrom === null) continue;
         try {
-          await this.gapFill(roomId);
+          await this.gapFill(roomId, resumeFrom);
         } catch {
           // Best-effort: a failed gap-fill leaves lastSeq as-is; a later reconnect retries.
         }
@@ -211,20 +213,18 @@ export class DotwireClient {
     }
   }
 
-  private async gapFill(roomId: string): Promise<void> {
-    const state = this.roomState.get(roomId);
-    if (!state || state.lastSeq === null) return;
-
+  private async gapFill(roomId: string, fromSeq: number): Promise<void> {
     const pageSize = this.options.gapFillPageSize ?? 100;
+    let afterSeq = fromSeq;
     let hasMore = true;
 
     while (hasMore) {
-      const afterSeq = state.lastSeq ?? undefined;
       const page = await this.getHistory(roomId, { afterSeq, limit: pageSize });
       if (page.messages.length === 0) break;
 
       for (const message of page.messages) {
         this.deliverMessage({ ...message, replayed: true });
+        afterSeq = Math.max(afterSeq, message.seq);
       }
 
       hasMore = page.hasMore;
@@ -250,9 +250,16 @@ export class DotwireClient {
     if (this.connection.state === HubConnectionState.Connected) {
       return;
     }
-    this.notifyStateChange('connecting');
-    await this.connection.start();
-    this.notifyStateChange('connected');
+    if (!this.pendingConnect) {
+      this.pendingConnect = (async () => {
+        this.notifyStateChange('connecting');
+        await this.connection.start();
+        this.notifyStateChange('connected');
+      })().finally(() => {
+        this.pendingConnect = null;
+      });
+    }
+    return this.pendingConnect;
   }
 
   public async disconnect(): Promise<void> {
@@ -269,6 +276,10 @@ export class DotwireClient {
     const handle = new DotwireRoomHandle(roomId, this);
     this.activeRoomHandles.add(handle);
     return handle;
+  }
+
+  public releaseRoomHandle(handle: DotwireRoomHandle): void {
+    this.activeRoomHandles.delete(handle);
   }
 
   public async subscribe(roomId: string): Promise<void> {

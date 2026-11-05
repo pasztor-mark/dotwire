@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.IdentityModel.JsonWebTokens;
@@ -23,15 +24,18 @@ public class RealtimeHubAuthTests : IClassFixture<WebApplicationFactory<Program>
         });
     }
 
-    private HubConnection BuildConnection(string? token = null)
+    private HubConnection BuildConnection(string? token = null, HttpTransportType transports = HttpTransportType.WebSockets)
     {
         return new HubConnectionBuilder()
             .WithUrl(new Uri(_factory.Server.BaseAddress, "/hub/rooms"), options =>
             {
+                options.Transports = transports;
                 options.HttpMessageHandlerFactory = _ => _factory.Server.CreateHandler();
                 options.WebSocketFactory = async (context, ct) =>
                 {
                     var wsClient = _factory.Server.CreateWebSocketClient();
+                    if (token is not null)
+                        wsClient.ConfigureRequest = request => request.Headers.Authorization = $"Bearer {token}";
                     return await wsClient.ConnectAsync(context.Uri, ct);
                 };
                 if (token is not null)
@@ -81,5 +85,13 @@ public class RealtimeHubAuthTests : IClassFixture<WebApplicationFactory<Program>
         await connection.StartAsync(TestContext.Current.CancellationToken);
         Assert.Equal(HubConnectionState.Connected, connection.State);
         await connection.StopAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task LongPollingTransport_IsRejected()
+    {
+        var token = TestTokens.Mint("user-1");
+        await using var connection = BuildConnection(token, HttpTransportType.LongPolling);
+        await Assert.ThrowsAnyAsync<Exception>(() => connection.StartAsync(TestContext.Current.CancellationToken));
     }
 }

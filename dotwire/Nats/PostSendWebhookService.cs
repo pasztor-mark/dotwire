@@ -26,7 +26,7 @@ public sealed class PostSendWebhookService : BackgroundService
         _logger = logger;
         _channel = Channel.CreateBounded<PostSendWebhookRequest>(new BoundedChannelOptions(Math.Max(1, options.Value.PostSend.QueueCapacity))
         {
-            FullMode = BoundedChannelFullMode.DropWrite,
+            FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
             SingleWriter = false,
         });

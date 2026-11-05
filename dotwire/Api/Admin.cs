@@ -28,6 +28,8 @@ public sealed record UserRoomsResponse(string UserId, Guid[] RoomIds);
 
 public static class Admin
 {
+    private const int DsarFlushThresholdBytes = 16 * 1024;
+
     public static void MapAdminEndpoints(WebApplication app)
     {
         var group = app.MapGroup("/admin")
@@ -49,8 +51,10 @@ public static class Admin
             if (request.Role is not ("member" or "auditor" or "admin"))
                 return Results.BadRequest();
 
-            await using (var cmd = writeDataSource.CreateCommand(
-                "INSERT INTO user_roles (user_id, role) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role"))
+            await using var conn = await writeDataSource.OpenConnectionAsync(http.RequestAborted);
+            await using var tx = await conn.BeginTransactionAsync(http.RequestAborted);
+            await using (var cmd = new NpgsqlCommand(
+                "INSERT INTO user_roles (user_id, role) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role", conn, tx))
             {
                 cmd.Parameters.AddWithValue(userId);
                 cmd.Parameters.AddWithValue(request.Role);
@@ -69,6 +73,8 @@ public static class Admin
                     .LogError("Audit publish failed for role set of {UserId}: {Error}", userId, ex.Message);
                 return ApiResults.AuditUnavailable();
             }
+
+            await tx.CommitAsync(CancellationToken.None);
 
             return Results.Ok(new UserRoleResponse(userId, request.Role));
         });
@@ -95,7 +101,6 @@ public static class Admin
         group.MapDelete("/users/{userId}/role", async (
             string userId,
             [FromKeyedServices(PostgresDataSources.Write)] NpgsqlDataSource writeDataSource,
-            [FromKeyedServices(PostgresDataSources.Read)] NpgsqlDataSource readDataSource,
             Dotwire.Nats.AuditPublisher auditPublisher,
             INatsConnection nats,
             ILoggerFactory loggerFactory,
@@ -106,24 +111,16 @@ public static class Admin
 
             var logger = loggerFactory.CreateLogger("Dotwire.Api.Admin");
 
-            // Read the user's rooms before deleting so we know who to revoke live (spec §3.5).
-            var roomIds = new List<Guid>();
-            await using (var roomsCmd = readDataSource.CreateCommand(
-                "SELECT room_id FROM room_members WHERE user_id = $1"))
-            {
-                roomsCmd.Parameters.AddWithValue(userId);
-                await using var reader = await roomsCmd.ExecuteReaderAsync(http.RequestAborted);
-                while (await reader.ReadAsync(http.RequestAborted))
-                    roomIds.Add(reader.GetGuid(0));
-            }
-
             await using var conn = await writeDataSource.OpenConnectionAsync(http.RequestAborted);
             await using var tx = await conn.BeginTransactionAsync(http.RequestAborted);
 
-            await using (var delMembers = new NpgsqlCommand("DELETE FROM room_members WHERE user_id = $1", conn, tx))
+            var roomIds = new List<Guid>();
+            await using (var delMembers = new NpgsqlCommand("DELETE FROM room_members WHERE user_id = $1 RETURNING room_id", conn, tx))
             {
                 delMembers.Parameters.AddWithValue(userId);
-                await delMembers.ExecuteNonQueryAsync(http.RequestAborted);
+                await using var reader = await delMembers.ExecuteReaderAsync(http.RequestAborted);
+                while (await reader.ReadAsync(http.RequestAborted))
+                    roomIds.Add(reader.GetGuid(0));
             }
 
             await using (var delRoles = new NpgsqlCommand("DELETE FROM user_roles WHERE user_id = $1", conn, tx))
@@ -131,8 +128,6 @@ public static class Admin
                 delRoles.Parameters.AddWithValue(userId);
                 await delRoles.ExecuteNonQueryAsync(http.RequestAborted);
             }
-
-            await tx.CommitAsync(http.RequestAborted);
 
             var actorId = http.User.FindFirstValue("sub")!;
             var audit = new AuditEvent("role.deleted", null, null, actorId, userId, null, DateTimeOffset.UtcNow);
@@ -146,9 +141,11 @@ public static class Admin
                 return ApiResults.AuditUnavailable();
             }
 
+            await tx.CommitAsync(CancellationToken.None);
+
             foreach (var roomId in roomIds)
             {
-                await PublishRevocationAsync(nats, logger, roomId, userId, http.RequestAborted);
+                await PublishRevocationAsync(nats, logger, roomId, userId);
             }
 
             return Results.NoContent();
@@ -199,21 +196,21 @@ public static class Admin
                     }
                 }
 
-                await tx.CommitAsync(http.RequestAborted);
-            }
+                var actorId = http.User.FindFirstValue("sub")!;
+                foreach (var userId in request.UserIds)
+                {
+                    var audit = new AuditEvent("member.added", roomGuid, null, actorId, userId, null, DateTimeOffset.UtcNow);
+                    try
+                    {
+                        await auditPublisher.PublishAsync(audit, http.RequestAborted);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        return ApiResults.AuditUnavailable();
+                    }
+                }
 
-            var actorId = http.User.FindFirstValue("sub")!;
-            foreach (var userId in request.UserIds)
-            {
-                var audit = new AuditEvent("member.added", roomGuid, null, actorId, userId, null, DateTimeOffset.UtcNow);
-                try
-                {
-                    await auditPublisher.PublishAsync(audit, http.RequestAborted);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    return ApiResults.AuditUnavailable();
-                }
+                await tx.CommitAsync(CancellationToken.None);
             }
 
             return Results.Ok(new RoomMembersResponse(roomGuid, request.UserIds));
@@ -235,8 +232,10 @@ public static class Admin
 
             var logger = loggerFactory.CreateLogger("Dotwire.Api.Admin");
 
-            await using (var cmd = writeDataSource.CreateCommand(
-                "DELETE FROM room_members WHERE room_id = $1 AND user_id = $2"))
+            await using var conn = await writeDataSource.OpenConnectionAsync(http.RequestAborted);
+            await using var tx = await conn.BeginTransactionAsync(http.RequestAborted);
+            await using (var cmd = new NpgsqlCommand(
+                "DELETE FROM room_members WHERE room_id = $1 AND user_id = $2", conn, tx))
             {
                 cmd.Parameters.AddWithValue(roomGuid);
                 cmd.Parameters.AddWithValue(userId);
@@ -255,7 +254,9 @@ public static class Admin
                 return ApiResults.AuditUnavailable();
             }
 
-            await PublishRevocationAsync(nats, logger, roomGuid, userId, http.RequestAborted);
+            await tx.CommitAsync(CancellationToken.None);
+
+            await PublishRevocationAsync(nats, logger, roomGuid, userId);
 
             return Results.NoContent();
         });
@@ -409,6 +410,40 @@ public static class Admin
             var ct = http.RequestAborted;
             var actorId = http.User.FindFirstValue("sub")!;
             var logger = loggerFactory.CreateLogger("Dotwire.Api.Admin");
+            var options = natsOptions.Value;
+
+            INatsJSStream? stream = null;
+            if (options.Enabled)
+            {
+                try
+                {
+                    stream = await js.GetStreamAsync(options.RoomsStream, cancellationToken: ct);
+                    var stored = await stream.GetAsync(new StreamMsgGetRequest { Seq = seq }, ct);
+                    if (stored.Message.Subject != $"{options.RoomSubjectPrefix}{roomGuid}")
+                        return Results.NotFound();
+                }
+                catch (NatsJSApiException ex) when (ex.Error.ErrCode == 10037)
+                {
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogError("JetStream lookup failed for room {RoomId} seq {Seq}: {Error}", roomGuid, seq, ex.Message);
+                    return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+                }
+            }
+
+            // Audit: ids only, never content. Durable (JetStream) so the audit-writer
+            // consumer can chain it.
+            var audit = new AuditEvent("message.redacted", roomGuid, seq, actorId, SubjectId: null, Value: null, DateTimeOffset.UtcNow);
+            try
+            {
+                await auditPublisher.PublishAsync(audit, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError("Audit publish failed for redaction of room {RoomId} seq {Seq}: {Error}", roomGuid, seq, ex.Message);
+                return ApiResults.AuditUnavailable();
+            }
 
             // 1. Postgres: tombstone + delete via the SECURITY DEFINER path (0006_redaction.sql).
             //    The tombstone is what makes this safe against the batch-writer lag.
@@ -420,8 +455,7 @@ public static class Admin
                 removedRows = (int)(await cmd.ExecuteScalarAsync(ct))!;
             }
 
-            var options = natsOptions.Value;
-            if (!options.Enabled)
+            if (stream is null)
                 return Results.Ok(new RedactMessageResponse(roomGuid, seq, removedRows > 0, false));
 
             // 2. JetStream: per-message secure erase by stream sequence. 404 means it is
@@ -429,7 +463,6 @@ public static class Admin
             var removedFromStream = false;
             try
             {
-                var stream = await js.GetStreamAsync(options.RoomsStream, cancellationToken: ct);
                 await stream.DeleteMessageAsync(new StreamMsgDeleteRequest { Seq = seq, NoErase = false }, ct);
                 removedFromStream = true;
             }
@@ -445,21 +478,7 @@ public static class Admin
                 return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
             }
 
-            // 3. Audit: ids only, never content. Durable (JetStream) so the audit-writer
-            //    consumer can chain it; a failed publish is a 503 so the caller retries
-            //    (the redaction above is idempotent, so retrying re-publishes safely).
-            var audit = new AuditEvent("message.redacted", roomGuid, seq, actorId, SubjectId: null, Value: null, DateTimeOffset.UtcNow);
-            try
-            {
-                await auditPublisher.PublishAsync(audit, ct);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                logger.LogError("Audit publish failed for redaction of room {RoomId} seq {Seq}: {Error}", roomGuid, seq, ex.Message);
-                return ApiResults.AuditUnavailable();
-            }
-
-            // 4. Retraction to live subscribers rides NATS core (ephemeral traffic rule):
+            // 3. Retraction to live subscribers rides NATS core (ephemeral traffic rule):
             //    never persisted, never on an ack path. The erasure above is the durable
             //    fact; a client that misses this simply never sees the row on gap-fill.
             var retracted = new MessageRetracted(roomGuid, seq);
@@ -497,7 +516,9 @@ public static class Admin
             if (request.MessagesDays < 0 || request.MessagesDays > 36500)
                 return ApiResults.InvalidRequest("messagesDays must be between 0 and 36500");
 
-            await using (var cmd = writeDataSource.CreateCommand("SELECT set_message_retention($1)"))
+            await using var conn = await writeDataSource.OpenConnectionAsync(http.RequestAborted);
+            await using var tx = await conn.BeginTransactionAsync(http.RequestAborted);
+            await using (var cmd = new NpgsqlCommand("SELECT set_message_retention($1)", conn, tx))
             {
                 cmd.Parameters.AddWithValue(request.MessagesDays);
                 await cmd.ExecuteScalarAsync(http.RequestAborted);
@@ -515,6 +536,8 @@ public static class Admin
                     .LogError("Audit publish failed for retention.set: {Error}", ex.Message);
                 return ApiResults.AuditUnavailable();
             }
+
+            await tx.CommitAsync(CancellationToken.None);
 
             return Results.Ok(new RetentionResponse(request.MessagesDays));
         });
@@ -610,6 +633,8 @@ public static class Admin
                         writer.WriteBoolean("undecryptable", true);
                     }
                     writer.WriteEndObject();
+                    if (writer.BytesPending > DsarFlushThresholdBytes)
+                        await writer.FlushAsync(ct);
                 }
             }
             writer.WriteEndArray();
@@ -633,6 +658,8 @@ public static class Admin
                     if (reader.IsDBNull(6)) writer.WriteNull("value"); else writer.WriteNumber("value", reader.GetInt64(6));
                     writer.WriteString("time", reader.GetFieldValue<DateTimeOffset>(7));
                     writer.WriteEndObject();
+                    if (writer.BytesPending > DsarFlushThresholdBytes)
+                        await writer.FlushAsync(ct);
                 }
             }
             writer.WriteEndArray();
@@ -646,15 +673,15 @@ public static class Admin
     // Best-effort ephemeral broadcast so whichever gateway node holds the live connection
     // can revoke it locally (spec §3.5); never fails the request.
     private static async Task PublishRevocationAsync(
-        INatsConnection nats, ILogger logger, Guid roomId, string userId, CancellationToken ct)
+        INatsConnection nats, ILogger logger, Guid roomId, string userId)
     {
         var revoked = new MembershipRevoked(roomId, userId);
         var payload = JsonSerializer.SerializeToUtf8Bytes(revoked, DotwireJsonContext.Default.MembershipRevoked);
         try
         {
-            await nats.PublishAsync<byte[]>($"room.{roomId}.ephemeral.revoked", payload, cancellationToken: ct);
+            await nats.PublishAsync<byte[]>($"room.{roomId}.ephemeral.revoked", payload);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
             logger.LogWarning("Revocation broadcast failed for room {RoomId} user {UserId}: {Error}", roomId, userId, ex.Message);
         }

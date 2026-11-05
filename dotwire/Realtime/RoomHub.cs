@@ -50,25 +50,20 @@ public sealed class RoomHub(
                 throw new HubException("Forbidden");
         }
 
-        await Groups.AddToGroupAsync(Context.ConnectionId, roomId.ToString(), Context.ConnectionAborted);
-
-        if (!interestManager.Subscribe(roomId, Context.ConnectionId, sub))
+        if (!await interestManager.SubscribeAsync(roomId, Context.ConnectionId, sub))
             return;
 
         presenceCoalescer.QueueJoin(roomId, sub);
     }
 
-    public async Task Unsubscribe(Guid roomId)
+    public void Unsubscribe(Guid roomId)
     {
         var sub = Context.User?.FindFirstValue("sub");
         if (string.IsNullOrEmpty(sub))
             return;
 
         if (interestManager.Unsubscribe(roomId, Context.ConnectionId))
-        {
-            await Groups.RemoveFromGroupAsync(Context.ConnectionId, roomId.ToString());
             presenceCoalescer.QueueLeave(roomId, sub);
-        }
     }
 
     public async Task Typing(Guid roomId, bool isTyping)
@@ -83,16 +78,14 @@ public sealed class RoomHub(
         if (!natsOptions.Value.Enabled)
             return;
 
-        if (isTyping)
+        var now = Stopwatch.GetTimestamp();
+        var lastTypingMap = GetLastTypingMap();
+        lock (lastTypingMap)
         {
-            var now = Stopwatch.GetTimestamp();
-            var lastTypingMap = GetLastTypingMap();
-            lock (lastTypingMap)
-            {
-                if (lastTypingMap.TryGetValue(roomId, out var last) && now - last < TypingCooldownTicks)
-                    return;
-                lastTypingMap[roomId] = now;
-            }
+            var found = lastTypingMap.TryGetValue(roomId, out var last);
+            if (isTyping ? found && now - last.TrueTicks < TypingCooldownTicks : !(found && last.IsTyping))
+                return;
+            lastTypingMap[roomId] = (isTyping ? now : last.TrueTicks, isTyping);
         }
 
         var notification = new TypingNotification(roomId, sub, isTyping);
@@ -116,9 +109,9 @@ public sealed class RoomHub(
         await base.OnDisconnectedAsync(exception);
     }
 
-    private Dictionary<Guid, long> GetLastTypingMap()
+    private Dictionary<Guid, (long TrueTicks, bool IsTyping)> GetLastTypingMap()
     {
-        if (!Context.Items.TryGetValue(LastTypingTicksKey, out var obj) || obj is not Dictionary<Guid, long> map)
+        if (!Context.Items.TryGetValue(LastTypingTicksKey, out var obj) || obj is not Dictionary<Guid, (long TrueTicks, bool IsTyping)> map)
         {
             map = [];
             Context.Items[LastTypingTicksKey] = map;

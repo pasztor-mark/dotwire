@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
+using NATS.Client.JetStream.Models;
 using Npgsql;
 
 namespace Dotwire.Api;
@@ -221,6 +222,8 @@ public static class Messages
             int? limit,
             [FromKeyedServices(PostgresDataSources.Read)] NpgsqlDataSource readDataSource,
             MessageCipher cipher,
+            INatsJSContext js,
+            IOptions<NatsOptions> natsOptions,
             HttpContext http,
             ILoggerFactory loggerFactory) =>
         {
@@ -229,14 +232,15 @@ public static class Messages
             var ct = http.RequestAborted;
             var isAscending = afterSeq.HasValue;
 
-            var (rawRows, hasMore) = await QueryHistoryPageAsync(readDataSource, roomGuid, afterSeq, beforeSeq, pageSize, ct);
+            var logger = loggerFactory.CreateLogger("Dotwire.Api.Messages");
+            var (rawRows, hasMore) = await QueryHistoryPageAsync(
+                readDataSource, js, natsOptions.Value, logger, roomGuid, afterSeq, beforeSeq, pageSize, ct);
 
             if (!isAscending)
             {
                 rawRows.Reverse();
             }
 
-            var logger = loggerFactory.CreateLogger("Dotwire.Api.Messages");
             var messages = new List<HistoryMessage>(rawRows.Count);
             foreach (var row in rawRows)
             {
@@ -258,7 +262,8 @@ public static class Messages
 
     /// <summary>Shared history-page query, reused by the REST history endpoint and SSE replay (spec §3.9).</summary>
     internal static async Task<(List<(ulong Seq, DateTimeOffset Time, string SenderId, string KeyId, byte[] Content)> Rows, bool HasMore)> QueryHistoryPageAsync(
-        NpgsqlDataSource readDataSource, Guid roomGuid, ulong? afterSeq, ulong? beforeSeq, int pageSize, CancellationToken ct)
+        NpgsqlDataSource readDataSource, INatsJSContext js, NatsOptions natsOptions, ILogger logger,
+        Guid roomGuid, ulong? afterSeq, ulong? beforeSeq, int pageSize, CancellationToken ct)
     {
         string sql;
         if (afterSeq.HasValue)
@@ -312,6 +317,96 @@ public static class Messages
             rawRows.RemoveAt(rawRows.Count - 1);
         }
 
+        if (!natsOptions.Enabled || beforeSeq.HasValue || (afterSeq.HasValue && hasMore))
+            return (rawRows, hasMore);
+
+        var newest = !afterSeq.HasValue;
+        var persistedTail = newest
+            ? rawRows.Count > 0 ? rawRows[0].Seq : 0
+            : rawRows.Count > 0 ? rawRows[^1].Seq : afterSeq!.Value;
+
+        List<(ulong Seq, DateTimeOffset Time, string SenderId, string KeyId, byte[] Content)> tail;
+        try
+        {
+            tail = await ReadUnpersistedTailAsync(
+                readDataSource, js, natsOptions, roomGuid, persistedTail, newest ? pageSize + 1 : pageSize - rawRows.Count + 1, newest, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning("JetStream tail read failed for room {RoomId}, serving Postgres history only: {Error}", roomGuid, ex.Message);
+            return (rawRows, hasMore);
+        }
+
+        if (tail.Count == 0)
+            return (rawRows, hasMore);
+
+        if (newest)
+        {
+            tail.Reverse();
+            rawRows.InsertRange(0, tail);
+        }
+        else
+        {
+            rawRows.AddRange(tail);
+        }
+
+        if (rawRows.Count > pageSize)
+        {
+            rawRows.RemoveRange(pageSize, rawRows.Count - pageSize);
+            hasMore = true;
+        }
+
         return (rawRows, hasMore);
+    }
+
+    private static async Task<List<(ulong Seq, DateTimeOffset Time, string SenderId, string KeyId, byte[] Content)>> ReadUnpersistedTailAsync(
+        NpgsqlDataSource readDataSource, INatsJSContext js, NatsOptions natsOptions,
+        Guid roomGuid, ulong afterSeq, int limit, bool keepNewest, CancellationToken ct)
+    {
+        var rows = new List<(ulong Seq, DateTimeOffset Time, string SenderId, string KeyId, byte[] Content)>();
+        var subject = $"{natsOptions.RoomSubjectPrefix}{roomGuid}";
+        var stream = await js.GetStreamAsync(natsOptions.RoomsStream, cancellationToken: ct);
+        var maxReads = keepNewest ? limit * 10 : limit;
+        var next = afterSeq + 1;
+
+        for (var reads = 0; reads < maxReads; reads++)
+        {
+            StreamMsgGetResponse response;
+            try
+            {
+                response = await stream.GetAsync(new StreamMsgGetRequest { Seq = next, NextBySubj = subject }, ct);
+            }
+            catch (NatsJSApiException ex) when (ex.Error.ErrCode == 10037)
+            {
+                break;
+            }
+
+            var stored = response.Message;
+            next = stored.Seq + 1;
+            var message = JsonSerializer.Deserialize(stored.Data.Span, DotwireJsonContext.Default.RoomMessage);
+            if (message is null || message.RoomId != roomGuid || string.IsNullOrEmpty(message.KeyId) || message.Content is not { Length: > 0 })
+                continue;
+
+            rows.Add((stored.Seq, message.Time, message.SenderId, message.KeyId, message.Content));
+            if (keepNewest && rows.Count > limit)
+                rows.RemoveAt(0);
+        }
+
+        if (rows.Count == 0)
+            return rows;
+
+        await using var cmd = readDataSource.CreateCommand(
+            "SELECT seq FROM message_redactions WHERE room_id = $1 AND seq = ANY($2)");
+        cmd.Parameters.AddWithValue(roomGuid);
+        cmd.Parameters.AddWithValue(rows.Select(r => (long)r.Seq).ToArray());
+        var redacted = new HashSet<ulong>();
+        await using (var reader = await cmd.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+                redacted.Add((ulong)reader.GetInt64(0));
+        }
+
+        rows.RemoveAll(r => redacted.Contains(r.Seq));
+        return rows;
     }
 }

@@ -14,7 +14,7 @@
     <Description>Host-side .NET SDK for dotwire: mints RS256 tokens with the host's own key and talks to dotwire over HTTP - roles/membership, send/history/redact, audit, retention, DSAR export, SSE event streaming, presend/postsend moderation hooks, and client-send/webhook handlers.</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <RepositoryUrl>https://github.com/dotwire/dotwire</RepositoryUrl>
+    <RepositoryUrl>https://github.com/pasztor-mark/dotwire</RepositoryUrl>
   </PropertyGroup>
 
   <ItemGroup>

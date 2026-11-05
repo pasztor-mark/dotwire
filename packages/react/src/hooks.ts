@@ -61,10 +61,13 @@ export function useRoom(roomId: string, options: UseRoomOptions = {}): UseRoomRe
   const [state, dispatch] = useReducer(roomMessagesReducer, initialRoomMessagesState);
   const stateRef = useRef<RoomMessagesState>(state);
   stateRef.current = state;
+  const scopeRef = useRef<object | null>(null);
 
   useEffect(() => {
     if (!client) return undefined;
 
+    const scope = {};
+    scopeRef.current = scope;
     dispatch({ type: 'reset' });
     const room = client.room(roomId);
     retainRoom(client, roomId);
@@ -88,7 +91,9 @@ export function useRoom(roomId: string, options: UseRoomOptions = {}): UseRoomRe
 
     return () => {
       cancelled = true;
+      if (scopeRef.current === scope) scopeRef.current = null;
       for (const unsub of unsubscribers) unsub();
+      room.release();
       // Only the last interested hook for this (client, roomId) actually leaves the hub
       // group — see `src/subscription.ts`. We deliberately do NOT call `room.dispose()`
       // here: it would unconditionally unsubscribe, which is exactly what the refcount
@@ -103,11 +108,12 @@ export function useRoom(roomId: string, options: UseRoomOptions = {}): UseRoomRe
     if (!client) return;
     const oldest = stateRef.current.messages[0];
     if (!oldest) return;
+    const scope = scopeRef.current;
     try {
       const page = await client.getHistory(roomId, { beforeSeq: oldest.seq, limit: history });
-      dispatch({ type: 'olderLoaded', page });
+      if (scopeRef.current === scope) dispatch({ type: 'olderLoaded', page });
     } catch (error) {
-      dispatch({ type: 'error', error });
+      if (scopeRef.current === scope) dispatch({ type: 'error', error });
     }
   }, [client, roomId, history]);
 
@@ -181,6 +187,7 @@ export function useTyping(roomId: string): UseTypingResult {
       unsub();
       clearInterval(interval);
       roomHandleRef.current = null;
+      room.release();
       if (releaseRoom(client, roomId)) {
         client.unsubscribe(roomId).catch(() => {});
       }
@@ -228,6 +235,7 @@ export function usePresence(roomId: string): UsePresenceResult {
 
     return () => {
       unsub();
+      room.release();
       if (releaseRoom(client, roomId)) {
         client.unsubscribe(roomId).catch(() => {});
       }

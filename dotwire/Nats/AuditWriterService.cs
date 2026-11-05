@@ -14,9 +14,8 @@ namespace Dotwire.Nats;
 /// nodes can compete without racing the chain. The winner drains the durable
 /// <c>audit-writer</c> pull consumer in batches, chains <c>hash = SHA256(prev_hash ‖
 /// canonical)</c> per row (<see cref="AuditCanonicalForm"/>), and inserts each batch in one
-/// transaction before acking - so a crash before ack simply redelivers, and the
-/// `stream_seq &lt;= tail.stream_seq` prefix check on redelivery makes that redelivery a
-/// no-op rather than a duplicate row.
+/// transaction before acking - so a crash before ack simply redelivers, and a redelivered
+/// event whose stream_seq is already in audit_log is skipped rather than duplicated.
 /// </summary>
 public sealed class AuditWriterService(
     INatsJSContext js,
@@ -88,7 +87,7 @@ public sealed class AuditWriterService(
 
     private async Task RunWhileLockedAsync(NpgsqlConnection conn, NatsOptions options, CancellationToken ct)
     {
-        var (tailId, tailHash, tailStreamSeq) = await LoadTailAsync(conn, ct);
+        var (tailId, tailHash) = await LoadTailAsync(conn, ct);
         _latestCheckpointDay = await LoadLatestCheckpointDayAsync(conn, ct);
 
         var consumer = await GetConsumerWithRetryAsync(options, ct);
@@ -107,7 +106,7 @@ public sealed class AuditWriterService(
             if (batch.Count == 0)
                 continue;
 
-            var result = await InsertBatchAsync(conn, batch, tailHash, tailStreamSeq, ct);
+            var result = await InsertBatchAsync(conn, batch, tailHash, ct);
 
             foreach (var msg in batch)
                 await msg.AckAsync(cancellationToken: ct);
@@ -115,20 +114,20 @@ public sealed class AuditWriterService(
             if (result is null)
                 continue; // every message in the batch was already committed by a prior run.
 
-            (tailId, tailHash, tailStreamSeq) = (result.Value.TailId, result.Value.TailHash, result.Value.TailStreamSeq);
+            (tailId, tailHash) = (result.Value.TailId, result.Value.TailHash);
             await MaybeCheckpointAsync(conn, tailId, tailHash, ct);
         }
     }
 
-    private static async Task<(long Id, byte[] Hash, long StreamSeq)> LoadTailAsync(NpgsqlConnection conn, CancellationToken ct)
+    private static async Task<(long Id, byte[] Hash)> LoadTailAsync(NpgsqlConnection conn, CancellationToken ct)
     {
         await using var cmd = new NpgsqlCommand(
-            "SELECT id, hash, stream_seq FROM audit_log ORDER BY id DESC LIMIT 1", conn);
+            "SELECT id, hash FROM audit_log ORDER BY id DESC LIMIT 1", conn);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         if (await reader.ReadAsync(ct))
-            return (reader.GetInt64(0), (byte[])reader.GetValue(1), reader.GetInt64(2));
+            return (reader.GetInt64(0), (byte[])reader.GetValue(1));
 
-        return (0, AuditCanonicalForm.GenesisHash(), 0);
+        return (0, AuditCanonicalForm.GenesisHash());
     }
 
     private static async Task<DateOnly?> LoadLatestCheckpointDayAsync(NpgsqlConnection conn, CancellationToken ct)
@@ -138,21 +137,31 @@ public sealed class AuditWriterService(
         return result is DateTime dt ? DateOnly.FromDateTime(dt) : null;
     }
 
-    private async Task<(long TailId, byte[] TailHash, long TailStreamSeq)?> InsertBatchAsync(
+    private async Task<(long TailId, byte[] TailHash)?> InsertBatchAsync(
         NpgsqlConnection conn,
         List<INatsJSMsg<byte[]>> batch,
         byte[] tailHash,
-        long tailStreamSeq,
         CancellationToken ct)
     {
+        batch.Sort((a, b) => a.Metadata!.Value.Sequence.Stream.CompareTo(b.Metadata!.Value.Sequence.Stream));
+
+        var committed = new HashSet<long>();
+        await using (var existing = new NpgsqlCommand("SELECT stream_seq FROM audit_log WHERE stream_seq = ANY($1)", conn))
+        {
+            existing.Parameters.AddWithValue(batch.Select(m => (long)m.Metadata!.Value.Sequence.Stream).ToArray());
+            await using var reader = await existing.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                committed.Add(reader.GetInt64(0));
+        }
+
         var rows = new List<(AuditEvent Event, byte[] Hash, byte[] PrevHash, long StreamSeq)>();
         var prevHash = tailHash;
 
         foreach (var msg in batch)
         {
             var streamSeq = (long)msg.Metadata!.Value.Sequence.Stream;
-            if (streamSeq <= tailStreamSeq)
-                continue; // already committed by a previous run; batches commit atomically.
+            if (!committed.Add(streamSeq))
+                continue;
 
             var evt = JsonSerializer.Deserialize(msg.Data!, DotwireJsonContext.Default.AuditEvent);
             if (evt is null)
@@ -168,35 +177,43 @@ public sealed class AuditWriterService(
             return null;
 
         await using var tx = await conn.BeginTransactionAsync(ct);
-        long lastId = 0;
+        await using var insert = new NpgsqlBatch(conn, tx);
         foreach (var row in rows)
         {
-            var time = AuditCanonicalForm.TruncateToMicroseconds(row.Event.Time);
-            await using var cmd = new NpgsqlCommand(
+            var cmd = new NpgsqlBatchCommand(
                 """
                 INSERT INTO audit_log
                     (event_type, room_id, message_seq, actor_id, subject_id, value, event_time, prev_hash, hash, stream_seq)
                 VALUES
                     ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 RETURNING id
-                """, conn, tx);
+                """);
             cmd.Parameters.AddWithValue(row.Event.EventType);
             cmd.Parameters.AddWithValue((object?)row.Event.RoomId ?? DBNull.Value);
             cmd.Parameters.AddWithValue(row.Event.MessageSeq.HasValue ? (object)(long)row.Event.MessageSeq.Value : DBNull.Value);
             cmd.Parameters.AddWithValue((object?)row.Event.ActorId ?? DBNull.Value);
             cmd.Parameters.AddWithValue((object?)row.Event.SubjectId ?? DBNull.Value);
             cmd.Parameters.AddWithValue((object?)row.Event.Value ?? DBNull.Value);
-            cmd.Parameters.AddWithValue(time);
+            cmd.Parameters.AddWithValue(AuditCanonicalForm.TruncateToMicroseconds(row.Event.Time));
             cmd.Parameters.AddWithValue(row.PrevHash);
             cmd.Parameters.AddWithValue(row.Hash);
             cmd.Parameters.AddWithValue(row.StreamSeq);
-            lastId = (long)(await cmd.ExecuteScalarAsync(ct))!;
+            insert.BatchCommands.Add(cmd);
+        }
+
+        long lastId = 0;
+        await using (var reader = await insert.ExecuteReaderAsync(ct))
+        {
+            do
+            {
+                while (await reader.ReadAsync(ct))
+                    lastId = reader.GetInt64(0);
+            } while (await reader.NextResultAsync(ct));
         }
 
         await tx.CommitAsync(ct);
 
-        var last = rows[^1];
-        return (lastId, last.Hash, last.StreamSeq);
+        return (lastId, rows[^1].Hash);
     }
 
     private async Task MaybeCheckpointAsync(NpgsqlConnection conn, long tailId, byte[] tailHash, CancellationToken ct)

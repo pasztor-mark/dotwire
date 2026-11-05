@@ -99,6 +99,8 @@ echo "Auth__Keys__dev=$(cat dev-jwt.pub)" >> .env
 docker compose up -d --build
 ```
 
+Omit `--build` to run the published image, `ghcr.io/pasztor-mark/dotwire:latest` (`linux/amd64` and `linux/arm64`).
+
 ### 4. Verify Health
 ```bash
 curl http://localhost:8080/healthz

@@ -523,3 +523,20 @@ test('handlePostSendWebhookBody rejects a bad signature with 401', async () => {
   const result = await client.handlePostSendWebhookBody(body, 'sha256=nope');
   assert.equal(result.status, 401);
 });
+
+test('handleClientSend returns the ack (202) when only the local postSend hook fails', async () => {
+  const { fetchImpl } = createRoutedFetch({
+    'POST /rooms/room1/messages': () => jsonRes(202, { seq: 9, time: 't' })
+  });
+  const client = new DotwireHostClient(
+    baseConfig({
+      fetch: fetchImpl,
+      postSend: () => {
+        throw new Error('moderation queue full');
+      }
+    })
+  );
+  const result = await client.handleClientSendBody({ roomId: 'room1', content: 'hi' }, 'dave');
+  assert.equal(result.status, 202);
+  assert.deepEqual(result.body, { seq: 9, time: 't' });
+});

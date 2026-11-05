@@ -1,6 +1,6 @@
 services:
   dotwire:
-    image: dotwire
+    image: ghcr.io/pasztor-mark/dotwire:latest
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -68,7 +68,7 @@ services:
       POSTGRES_USER: dotwire
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -86,8 +86,8 @@ services:
     cap_drop:
       - ALL
     ports:
-      - "4222:4222"
-      - "8222:8222"
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
     volumes:
       - natsdata:/data
     healthcheck:

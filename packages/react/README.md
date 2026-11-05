@@ -1,8 +1,8 @@
 # @dotwire/react
 
-For coding agents adding dotwire to an application, see the [SDK integration guide](../../docs/SDK_AGENT_GUIDE.md).
+For coding agents adding dotwire to an application, see the [SDK integration guide](https://github.com/pasztor-mark/dotwire/blob/main/docs/SDK_AGENT_GUIDE.md).
 
-React hooks and a provider for [`@dotwire/client`](../client), the TypeScript/JavaScript SDK
+React hooks and a provider for [`@dotwire/client`](https://www.npmjs.com/package/@dotwire/client), the TypeScript/JavaScript SDK
 for **dotwire**, the high-throughput, self-hosted real-time messaging infrastructure.
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](https://github.com/pasztor-mark/dotwire)
