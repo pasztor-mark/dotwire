@@ -20,6 +20,10 @@ public class AdminInjectEndpointTests : IClassFixture<WebApplicationFactory<Prog
         _factory = factory.WithWebHostBuilder(b =>
         {
             b.UseSetting("Postgres:Migrate", "false");
+            b.UseSetting("ConnectionStrings:PostgresRead", "Host=localhost;Database=dotwire");
+            b.UseSetting("ConnectionStrings:PostgresWrite", "Host=localhost;Database=dotwire");
+            b.UseSetting("Dotwire:Encryption:ActiveKeyId", "it");
+            b.UseSetting("Dotwire:Encryption:Keys:it", Convert.ToBase64String(new byte[32]));
             b.UseSetting("Nats:Enabled", "false");
             b.UseSetting("Auth:Issuer", TestTokens.Issuer);
             b.UseSetting("Auth:Audience", TestTokens.Audience);

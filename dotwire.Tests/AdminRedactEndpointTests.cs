@@ -18,6 +18,8 @@ public class AdminRedactEndpointTests : IClassFixture<WebApplicationFactory<Prog
         _factory = factory.WithWebHostBuilder(b =>
         {
             b.UseSetting("Postgres:Migrate", "false");
+            b.UseSetting("ConnectionStrings:PostgresRead", "Host=localhost;Database=dotwire");
+            b.UseSetting("ConnectionStrings:PostgresWrite", "Host=localhost;Database=dotwire");
             b.UseSetting("Nats:Enabled", "false");
             b.UseSetting("Auth:Issuer", TestTokens.Issuer);
             b.UseSetting("Auth:Audience", TestTokens.Audience);
