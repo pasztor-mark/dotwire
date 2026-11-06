@@ -25,10 +25,11 @@ consumer batch-inserts messages into Postgres behind that ack path, on its own s
 WHY: this decouples send latency from Postgres entirely. Postgres batching never sits in the
 critical path of an ack, and Postgres downtime does not stop chat — messages keep flowing
 through JetStream and fanout even if the batch-insert consumer is stalled or the database is
-down. The costs of that decoupling are accepted deliberately: history reads can lag live
-delivery by roughly one batch interval, so "in Postgres" is not synonymous with "sent," and
-any reconnect/replay story has to be built on sequence numbers rather than on Postgres being
-current.
+down. The costs of that decoupling are accepted deliberately: Postgres can lag live delivery
+by roughly one batch interval, so "in Postgres" is not synonymous with "sent," and any
+reconnect/replay story has to be built on sequence numbers rather than on Postgres being
+current. (The history endpoint hides most of that lag by topping its page up from the
+JetStream tail — see "Read path.")
 
 **Ordering token:** the JetStream stream sequence, monotonic within a room (each room has its
 own subject on the stream, so ordering is per-room, not global). **Gap-fill contract:** a
@@ -98,9 +99,9 @@ SignalR runs behind an L4 load balancer. Connections are **WebSockets-only with
 sticky-session requirement** at the load balancer at all; a dumb TCP proxy is sufficient (see
 "Concurrency and fanout disciplines" below for the full deployment posture).
 
-SignalR hubs are the **only subscribe path in v1** — there is no SSE or other read-side
-alternative yet; that's a deferred roadmap item (see PRODUCT.md's roadmap extension points),
-not a v1 feature. Sending, though, does not require holding a socket at all: a **REST send
+SignalR hubs are the **primary subscribe path**. The one alternative is the SSE read path
+(`GET /rooms/{roomId}/events`, see "Read path"), a plain-HTTP consumer for agents and
+harnesses that rides the same NATS fanout. Sending does not require holding a socket at all: a **REST send
 endpoint exists regardless of SignalR**, specifically so host backends can inject system
 messages (bot replies, notifications, moderation actions) without maintaining a live
 connection just to publish.
@@ -274,7 +275,10 @@ there is no excuse to relax them under schedule pressure.
   OS limits tuned away from their interactive-workload defaults.
 - **L4/TCP passthrough load-balancer guidance.** WHY: WebSockets-only with no sticky sessions
   permits a dumb TCP proxy, which minimizes per-connection proxy overhead compared to an L7
-  proxy terminating and inspecting every connection.
+  proxy terminating and inspecting every connection. The bundled `haproxy.cfg` runs in HTTP
+  mode only because it serves both node roles from one listener and routes by path (hub and
+  SSE to `gateway`, everything else to `api`); give each role its own listener or hostname
+  and a pure L4 proxy works.
 
 **Expected effect:** these disciplines move the per-node ceiling from a naive ~50k toward
 roughly **100,000–200,000 concurrent connections per node** (PRODUCT.md's scale contract), and
@@ -304,7 +308,10 @@ for network blips.
 
 Reading is two distinct paths, not one, and the distinction matters. **History reads** —
 fetching past messages — go against Postgres via the dedicated read pool (see "Data layout"),
-never the write pool. **Live delivery** — messages as they're sent — comes through SignalR
+never the write pool. Because Postgres trails the JetStream ack by up to one batch interval,
+the newest page and `afterSeq` pages are topped up from the `ROOMS` stream's tail (redaction
+tombstones still apply), so a just-acked message is normally readable at once; if that
+JetStream read fails, the endpoint serves Postgres rows alone. **Live delivery** — messages as they're sent — comes through SignalR
 fanout off NATS, not through Postgres at all; a connected client never polls the database for
 new messages. The two paths reconnect at gap-fill: a client rejoining after a blip or falling
 behind is served "room X, seq > N" (see the write path's ordering token section), which itself
@@ -347,12 +354,11 @@ Ciphertext envelopes are **key-id-tagged**: rotation means introducing a new key
 messages while old keys are retained to decrypt old messages — there is no mass re-encryption
 step, ever, on rotation.
 
-**Key source:** an environment variable or external secret is the preferred, production-grade
-source; if neither is configured, a key is auto-generated on first run as a plug-and-play
-fallback — **this fallback is dev/eval posture only, not a production key-management story** —
-accompanied by a loud logged warning that the key must be backed up and moved off the data
-volume. A config off-switch exists for deployments that prefer to rely on volume-level
-encryption only instead.
+**Key source:** keys come from configuration (`Dotwire:Encryption:Keys:<id>`, base64, exactly
+32 bytes), supplied through an environment variable or an external secret store.
+`Dotwire:Encryption:ActiveKeyId` must name one of them. **There is no auto-generated fallback
+and no off-switch:** dotwire refuses to start without a valid active key, so a deployment can
+never silently write plaintext or depend on a key that only ever lived on the data volume.
 
 **Threat model, stated plainly:** this protects against stolen disks, stolen backups, and
 direct SQL/`pg_dump` access. It is explicitly **not** a defense against a malicious server —

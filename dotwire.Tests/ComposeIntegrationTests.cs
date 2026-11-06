@@ -5,10 +5,15 @@ using System.Net.Http.Json;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using Dotwire.Api;
+using Dotwire.Configuration;
+using Dotwire.Nats;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using NATS.Client.Core;
 using NATS.Client.JetStream;
 using Npgsql;
 using Xunit;
@@ -329,6 +334,7 @@ public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Progr
                 options.WebSocketFactory = async (context, ct) =>
                 {
                     var wsClient = _factory.Server.CreateWebSocketClient();
+                    wsClient.ConfigureRequest = request => request.Headers.Authorization = $"Bearer {token}";
                     return await wsClient.ConnectAsync(context.Uri, ct);
                 };
                 options.AccessTokenProvider = () => Task.FromResult<string?>(token);
@@ -781,6 +787,52 @@ public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Progr
             Assert.Equal((long)ack.Seq, reader.GetInt64(1));
             Assert.Equal("system", reader.GetString(2));
         }
+
+        await connection.StopAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task AdminInjection_AuditFailure_Returns503_AndNeverDeliversTheMessage()
+    {
+        var roomId = Guid.NewGuid();
+        var member = $"it-user-{Guid.NewGuid():N}";
+        var admin = $"it-admin-{Guid.NewGuid():N}";
+        await SeedUserAsync(member, "member", roomId);
+        await SeedUserAsync(admin, "admin");
+
+        await using var failingAudit = _factory.WithWebHostBuilder(b => b.ConfigureTestServices(services =>
+            services.AddSingleton(sp => new AuditPublisher(
+                new NatsJSContext(new NatsConnection(new NatsOpts { Url = "nats://127.0.0.1:1" })),
+                sp.GetRequiredService<IOptions<NatsOptions>>()))));
+
+        await using var connection = BuildHubConnection(TestTokens.Mint(member));
+        await connection.StartAsync(TestContext.Current.CancellationToken);
+        var received = 0;
+        connection.On<RoomMessageDelivery>("ReceiveMessage", _ => Interlocked.Increment(ref received));
+        await connection.InvokeAsync("Subscribe", roomId, TestContext.Current.CancellationToken);
+        await Task.Delay(200, TestContext.Current.CancellationToken);
+
+        var adminClient = failingAudit.CreateClient();
+        adminClient.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", TestTokens.Mint(admin, role: "admin"));
+        var inject = await adminClient.PostAsJsonAsync(
+            $"/admin/rooms/{roomId}/messages", new { content = "never audited" },
+            TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, inject.StatusCode);
+        var error = (await inject.Content.ReadFromJsonAsync<ApiErrorResponse>(TestContext.Current.CancellationToken))!;
+        Assert.Equal("audit_unavailable", error.Error);
+
+        await Task.Delay(2500, TestContext.Current.CancellationToken);
+        Assert.Equal(0, Volatile.Read(ref received));
+
+        var history = await Client(TestTokens.Mint(member))
+            .GetFromJsonAsync<RoomHistoryResponse>($"/rooms/{roomId}/messages", TestContext.Current.CancellationToken);
+        Assert.Empty(history!.Messages);
+
+        await using var conn = await OpenOwnerConnectionAsync();
+        await using var cmd = new NpgsqlCommand("SELECT count(*) FROM messages WHERE room_id = $1", conn);
+        cmd.Parameters.AddWithValue(roomId);
+        Assert.Equal(0L, (long)(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken))!);
 
         await connection.StopAsync(TestContext.Current.CancellationToken);
     }

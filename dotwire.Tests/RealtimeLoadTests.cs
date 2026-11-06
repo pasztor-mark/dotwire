@@ -88,6 +88,7 @@ public class RealtimeLoadTests : IClassFixture<WebApplicationFactory<Program>>
                 options.WebSocketFactory = async (context, ct) =>
                 {
                     var wsClient = _factory.Server.CreateWebSocketClient();
+                    wsClient.ConfigureRequest = request => request.Headers.Authorization = $"Bearer {token}";
                     return await wsClient.ConnectAsync(context.Uri, ct);
                 };
                 options.AccessTokenProvider = () => Task.FromResult<string?>(token);

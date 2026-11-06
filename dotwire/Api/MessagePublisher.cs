@@ -26,6 +26,20 @@ public static class MessagePublisher
         ILogger logger,
         CancellationToken ct)
     {
+        var live = await PublishDurableAsync(roomId, senderId, plaintext, cipher, js, natsOptions, ct);
+        await PublishLiveAsync(live, nats, natsOptions, logger, ct);
+        return new PublishResult(live.Seq, live.Time);
+    }
+
+    public static async Task<RoomLiveMessage> PublishDurableAsync(
+        Guid roomId,
+        string senderId,
+        byte[] plaintext,
+        MessageCipher cipher,
+        INatsJSContext js,
+        NatsOptions natsOptions,
+        CancellationToken ct)
+    {
         var time = DateTimeOffset.UtcNow;
         var keyId = cipher.ActiveKeyId;
         var encrypted = cipher.Encrypt(plaintext);
@@ -39,20 +53,27 @@ public static class MessagePublisher
         if (ack.Error is not null)
             throw new InvalidOperationException($"JetStream publish error {ack.Error.Code}");
 
+        return new RoomLiveMessage(roomId, ack.Seq, senderId, time, keyId, encrypted);
+    }
+
+    public static async Task PublishLiveAsync(
+        RoomLiveMessage live,
+        INatsConnection nats,
+        NatsOptions natsOptions,
+        ILogger logger,
+        CancellationToken ct)
+    {
         try
         {
-            var live = new RoomLiveMessage(roomId, ack.Seq, senderId, time, keyId, encrypted);
             var livePayload = JsonSerializer.SerializeToUtf8Bytes(live, DotwireJsonContext.Default.RoomLiveMessage);
             await nats.PublishAsync(
-                $"{natsOptions.RoomSubjectPrefix}{roomId}{natsOptions.RoomLiveSubjectSuffix}",
+                $"{natsOptions.RoomSubjectPrefix}{live.RoomId}{natsOptions.RoomLiveSubjectSuffix}",
                 livePayload,
                 cancellationToken: ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            logger.LogWarning("Live republish failed for room {RoomId} seq {Seq}: {Error}", roomId, ack.Seq, ex.Message);
+            logger.LogWarning("Live republish failed for room {RoomId} seq {Seq}: {Error}", live.RoomId, live.Seq, ex.Message);
         }
-
-        return new PublishResult(ack.Seq, time);
     }
 }

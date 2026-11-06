@@ -56,7 +56,7 @@ the full `presend`/`postSend`/webhook handler wiring; the classifier plugs into 
 
 ```typescript
 host.presend = async (ctx) =>
-  Blocklist.hits(ctx.content) ? { action: 'reject', reason: 'blocked term' } : { action: 'accept' };
+  Blocklist.hits(ctx.content) ? PresendResult.reject('blocked term') : PresendResult.accept();
 
 const queue = new ModerationQueue();
 host.postSend = queue.postSendHook;

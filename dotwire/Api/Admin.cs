@@ -310,6 +310,7 @@ public static class Admin
             InjectMessageRequest request,
             HttpContext http,
             MessageCipher cipher,
+            [FromKeyedServices(PostgresDataSources.Write)] NpgsqlDataSource writeDataSource,
             INatsJSContext js,
             INatsConnection nats,
             Dotwire.Nats.AuditPublisher auditPublisher,
@@ -360,11 +361,11 @@ public static class Admin
 
             var plaintext = Encoding.UTF8.GetBytes(content);
 
-            MessagePublisher.PublishResult result;
+            RoomLiveMessage published;
             try
             {
-                result = await MessagePublisher.PublishAsync(
-                    roomGuid, senderId, plaintext, cipher, js, nats, natsOptions.Value, logger, http.RequestAborted);
+                published = await MessagePublisher.PublishDurableAsync(
+                    roomGuid, senderId, plaintext, cipher, js, natsOptions.Value, http.RequestAborted);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -372,21 +373,24 @@ public static class Admin
                 return ApiResults.StreamUnavailable();
             }
 
-            if (webhooksOptions.Value.PostSend.IncludeAdminSends)
-                postSendService.Enqueue(new PostSendWebhookRequest(roomGuid, result.Seq, senderId, content, result.Time, "admin"));
-
-            var audit = new AuditEvent("message.injected", roomGuid, result.Seq, actorId, senderId, null, DateTimeOffset.UtcNow);
+            var audit = new AuditEvent("message.injected", roomGuid, published.Seq, actorId, senderId, null, DateTimeOffset.UtcNow);
             try
             {
-                await auditPublisher.PublishAsync(audit, http.RequestAborted);
+                await auditPublisher.PublishAsync(audit, CancellationToken.None);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex)
             {
-                logger.LogError("Audit publish failed for injection in room {RoomId}: {Error}", roomGuid, ex.Message);
+                logger.LogError("Audit publish failed for injection in room {RoomId} seq {Seq}: {Error}", roomGuid, published.Seq, ex.Message);
+                await EraseUnauditedInjectionAsync(writeDataSource, js, natsOptions.Value, logger, roomGuid, published.Seq);
                 return ApiResults.AuditUnavailable();
             }
 
-            return Results.Accepted(value: new SendMessageResponse(result.Seq, result.Time));
+            await MessagePublisher.PublishLiveAsync(published, nats, natsOptions.Value, logger, http.RequestAborted);
+
+            if (webhooksOptions.Value.PostSend.IncludeAdminSends)
+                postSendService.Enqueue(new PostSendWebhookRequest(roomGuid, published.Seq, senderId, content, published.Time, "admin"));
+
+            return Results.Accepted(value: new SendMessageResponse(published.Seq, published.Time));
         });
 
         // Redact/delete message (ARCHITECTURE.md, "Redaction mechanics"; GDPR Art. 17).
@@ -672,6 +676,32 @@ public static class Admin
 
     // Best-effort ephemeral broadcast so whichever gateway node holds the live connection
     // can revoke it locally (spec §3.5); never fails the request.
+    private static async Task EraseUnauditedInjectionAsync(
+        NpgsqlDataSource writeDataSource, INatsJSContext js, NatsOptions options, ILogger logger, Guid roomId, ulong seq)
+    {
+        try
+        {
+            await using var cmd = writeDataSource.CreateCommand("SELECT redact_message($1, $2)");
+            cmd.Parameters.AddWithValue(roomId);
+            cmd.Parameters.AddWithValue((long)seq);
+            await cmd.ExecuteScalarAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogCritical("Could not tombstone unaudited injection in room {RoomId} seq {Seq}: {Error}", roomId, seq, ex.Message);
+        }
+
+        try
+        {
+            var stream = await js.GetStreamAsync(options.RoomsStream, cancellationToken: CancellationToken.None);
+            await stream.DeleteMessageAsync(new StreamMsgDeleteRequest { Seq = seq, NoErase = false }, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            logger.LogCritical("Could not erase unaudited injection from JetStream in room {RoomId} seq {Seq}: {Error}", roomId, seq, ex.Message);
+        }
+    }
+
     private static async Task PublishRevocationAsync(
         INatsConnection nats, ILogger logger, Guid roomId, string userId)
     {

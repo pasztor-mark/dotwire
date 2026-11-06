@@ -1,16 +1,16 @@
 # dotwire
 
-**Self-Hosted Realtime Chat Infrastructure**
+**Self-hosted alternative to Stream and Sendbird: no per-MAU bill and no second user table.**
 
 [![.NET 10](https://img.shields.io/badge/.NET-10.0%20Native%20AOT-512BD4?style=flat&logo=dotnet)](https://dotnet.microsoft.com/)
 [![TimescaleDB](https://img.shields.io/badge/TimescaleDB-PostgreSQL%2017-336791?style=flat&logo=postgresql)](https://www.timescale.com/)
 [![NATS JetStream](https://img.shields.io/badge/NATS-JetStream%202.10-27AAE1?style=flat&logo=natsdotio)](https://nats.io/)
 [![Encryption](https://img.shields.io/badge/At--Rest-AES--256--GCM-blueviolet?style=flat)]()
-[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)]()
+[![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 
-dotwire is a self-hostable messaging infrastructure layer designed to be embedded into existing applications. It provides real-time chat persistence, monotonic ordering, and an auditable event history while leaving identity management with the host application.
+dotwire is a free, open-source chat layer you embed in your own application. Your app keeps owning its users and signs the JWTs; dotwire verifies them and handles realtime delivery, message persistence and ordering, and a tamper-evident audit log. It ships APIs and SDKs, not a chat UI, so you build the interface your product needs.
 
-> **Early development — not production-ready.** dotwire is under active development. Features, APIs, and deployment guidance may change without notice. Do not use it for production workloads.
+> **Early release (v0.2).** APIs and deployment guidance may still change, and dotwire isn't production-hardened yet, so evaluate it carefully before relying on it. Feedback and issues are welcome.
 
 ---
 
@@ -91,7 +91,7 @@ echo "POSTGRES_PASSWORD=dotwire_dev_password" >> .env
 echo "POSTGRES_APP_PASSWORD=dotwire_app_password" >> .env
 echo "Auth__Issuer=dev-host" >> .env
 echo "Auth__Audience=dotwire" >> .env
-echo "Auth__Keys__dev=$(cat dev-jwt.pub)" >> .env
+echo "Auth__Keys__dev=\"$(awk '{printf "%s\\n",$0}' dev-jwt.pub)\"" >> .env
 ```
 
 ### 3. Launch Stack
@@ -115,6 +115,9 @@ docker compose exec postgres psql -U dotwire -d dotwire -c "
 "
 ```
 
+### 6. Send Your First Message
+Follow the [`@dotwire/host`](packages/host/README.md) and [`@dotwire/client`](packages/client/README.md) quickstarts to mint a token and connect. For this stack, use `dev-jwt.key` as the private key, with key ID `dev`, issuer `dev-host`, and audience `dotwire`.
+
 ---
 
 ## Building & Testing Locally
@@ -131,8 +134,6 @@ dotnet test dotwire.slnx
 # Publish standalone Native AOT binary
 dotnet publish dotwire/dotwire.csproj -c Release
 ```
-
----
 
 ---
 

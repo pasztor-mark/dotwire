@@ -37,7 +37,8 @@ the loop — for example, routing agent-to-agent traffic through rooms a human o
 watch, join, or interrupt. This is supported, but by explicit decision it is an afterthought:
 where a design choice would trade off primary-audience quality for agent ergonomics, the
 primary audience wins. (The one exception carved out for agents — a resumable SSE read path —
-is a deferred roadmap item, not a v1 feature, precisely because agents are secondary.)
+was deferred past v1 precisely because agents are secondary, and has since shipped; see
+"Shipped" below.)
 
 ## Scale contract
 

@@ -301,8 +301,8 @@ public sealed class RoomInterestManager : IAsyncDisposable
 
             if (_sseChannels.TryGetValue(roomId, out var perRoom) && perRoom.TryRemove(connectionId, out var sse))
             {
-                sse.Channel.Writer.TryComplete();
                 sse.Revoked.Cancel();
+                sse.Channel.Writer.TryComplete();
             }
 
             Unsubscribe(roomId, connectionId);

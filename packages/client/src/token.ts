@@ -17,7 +17,7 @@ export class TokenManager {
   constructor(
     private readonly tokenUrl: string,
     private readonly marginMs: number,
-    private readonly fetchImpl: typeof fetch = fetch
+    private readonly fetchImpl: typeof fetch = (input, init) => fetch(input, init)
   ) {}
 
   public async getToken(): Promise<string> {

@@ -119,7 +119,7 @@ full control environment, of which dotwire's technical controls are one input.
 
 | dotwire provides | Host must do |
 |---|---|
-| AES-256-GCM at-rest encryption, on by default, both stores | Custody and back up the encryption key (external secret in production — the auto-generated fallback is dev/eval posture only) |
+| AES-256-GCM at-rest encryption, on by default, both stores | Custody and back up the encryption key (external secret in production; dotwire won't start without one) |
 | TLS-capable transport | Terminate TLS and manage certificates |
 | Hash-chained, append-only audit log with self-logged audit access | Custody and rotate the host's RS256 JWT private key; set the token TTL policy |
 | Role cross-check + membership authorization pipeline | Grant and revoke roles/memberships correctly via the admin API; keep `user_roles` and `room_members` accurate |

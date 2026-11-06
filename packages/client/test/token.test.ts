@@ -48,6 +48,17 @@ test('TokenManager refetches once the cached token is within the refresh margin'
   assert.notEqual(first, second);
 });
 
+test('TokenManager calls the global fetch unbound, as browsers require', async (t) => {
+  t.mock.method(globalThis, 'fetch', async function (this: unknown) {
+    if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation');
+    return jsonResponse({ token: fakeJwt({ exp: Math.floor(Date.now() / 1000) + 3600 }) });
+  });
+
+  const manager = new TokenManager('https://dotwire.test/token', 30_000);
+
+  assert.ok(await manager.getToken());
+});
+
 test('TokenManager surfaces a DotwireClientError when the token endpoint fails', async (t) => {
   t.mock.method(globalThis, 'fetch', async () =>
     new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 })

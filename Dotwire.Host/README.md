@@ -100,8 +100,8 @@ public static class DotwireHostServiceCollectionExtensions
 
 - Roles/membership/injection/redaction/DSAR/retention are minted as `AdminUserId`
   (default `host-admin`, preseeded by migration 0004 with the `admin` role).
-- Audit read/verify/checkpoints are minted as `AuditorUserId` (default `host-auditor` -
-  give it the `auditor` role yourself, e.g. `await client.SetUserRoleAsync("host-auditor", "auditor")`).
+- Audit read/verify/checkpoints are minted as `AuditorUserId` (default `host-auditor`,
+  preseeded by migration 0007 with the `auditor` role).
 - Send-as-user / history-as-user / SSE-as-user / `HandleClientSendAsync` mint as that user
   id and resolve role automatically: try `member` first, and on a `403` look the role up via
   `GET /admin/users/{userId}/role`, cache it for `RoleCacheTtl`, and retry once. A second
@@ -110,6 +110,18 @@ public static class DotwireHostServiceCollectionExtensions
 
 Admin and auditor tokens are cached internally and re-minted one minute before their own
 expiry, so calling admin/auditor-scoped methods in a hot loop doesn't re-mint a token per call.
+
+## System messages
+
+```csharp
+var ack = await client.SendSystemMessageAsync(roomId, "system announcement");
+var botAck = await client.SendSystemMessageAsync(roomId, "build finished", senderId: "bot:ci");
+```
+
+Calls `POST /admin/rooms/{roomId}/messages` as `AdminUserId`. The sender id defaults to
+`system`; the admin doesn't need to be a room member, and every injection is audited. If the
+audit event can't be written, dotwire erases the message before anyone sees it and the call
+throws `DotwireApiException` with `Kind == Unavailable`, so retrying is safe.
 
 ## Moderation: two hooks, two speeds
 

@@ -164,16 +164,23 @@ public class DotwireHostClientComposeTests
     /// 1s by default), not synchronously with the send ack - poll rather than sleep a fixed
     /// amount so this isn't flaky under load.
     /// </summary>
-    private static async Task<RoomHistory> WaitForMessageAsync(DotwireHostClient client, Guid roomId, string asUserId, ulong seq, CancellationToken ct)
+    private async Task<RoomHistory> WaitForMessageAsync(DotwireHostClient client, Guid roomId, string asUserId, ulong seq, CancellationToken ct)
     {
         var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
-        while (true)
+        await using var conn = new NpgsqlConnection(PgConnectionString + _pgPassword);
+        await conn.OpenAsync(ct);
+        while (DateTimeOffset.UtcNow < deadline)
         {
-            var history = await client.GetMessagesAsync(roomId, asUserId, ct: ct);
-            if (history.Messages.Any(m => m.Seq == seq) || DateTimeOffset.UtcNow > deadline)
-                return history;
+            await using var cmd = new NpgsqlCommand(
+                "SELECT EXISTS (SELECT 1 FROM messages WHERE room_id = $1 AND seq = $2)", conn);
+            cmd.Parameters.AddWithValue(roomId);
+            cmd.Parameters.AddWithValue((long)seq);
+            if ((bool)(await cmd.ExecuteScalarAsync(ct))!)
+                break;
             await Task.Delay(150, ct);
         }
+
+        return await client.GetMessagesAsync(roomId, asUserId, ct: ct);
     }
 
     // ---- send / history / redact -------------------------------------------------------

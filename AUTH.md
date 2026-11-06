@@ -41,9 +41,10 @@ incidental.
 
 ## Key exchange & rotation
 
-dotwire's config accepts **either** of two sources for the host's public key material, and
-both are natively supported by ASP.NET's `JwtBearer` handler — no custom verification code is
-needed on dotwire's side for either path:
+dotwire's config accepts **either** of two sources for the host's public key material (or
+both). Verification itself is ASP.NET's `JwtBearer` handler; dotwire's only custom piece is a
+small key ring (`SigningKeyRing`) that hands the handler the public key matching each token's
+`kid`, from either source:
 
 - **JWKS URL** — a standard JSON Web Key Set endpoint, polled and cached by dotwire, with the
   verification key selected per-token by its `kid` header. This is the recommended path for
@@ -91,8 +92,10 @@ hierarchy where a higher role silently subsumes a lower one's room access.
 
 **Audit is auditor-only.** The `GET /audit`/`GET /audit/verify` surface checks for the
 `auditor` role specifically — `admin` does **not** get audit access by holding the `admin`
-role alone. An admin who also needs to read the audit trail needs the `auditor` role granted
-separately, same as any other user. This is a deliberate separation-of-duties boundary, not
+role alone. `user_roles` holds exactly one role per `sub`, so the same `sub` can never be both:
+an operator who also needs to read the audit trail uses a second identity that holds
+`auditor` (the host SDKs use `host-admin` and `host-auditor` for exactly this). This is a
+deliberate separation-of-duties boundary, not
 an oversight: the role that can mutate the service (admin) is not automatically the role that
 can review the tamper-evident record of what happened.
 
@@ -101,7 +104,10 @@ admin inject a message into any room as an asserted sender (`SendSystemMessageAs
 `sendSystemMessage`), without needing membership in that room. The sender id on the wire is
 whatever the admin asserts — dotwire does not verify that id is a real member. Every
 injection emits an audit event (ids only, never content, per "Audit log" in ARCHITECTURE.md).
-Injecting into a room still does not let the admin *read* that room's history or live
+The event is written after the JetStream ack but before live fanout: if it can't be written,
+dotwire erases the injected message from both stores (the same tombstone-and-delete path as
+redaction) and answers `503 audit_unavailable`, so no client ever sees an unaudited injection
+and retrying the call can't duplicate the message. Injecting into a room still does not let the admin *read* that room's history or live
 traffic; write-by-injection and read access remain separate grants, consistent with "Audit
 access is not room access" above.
 
@@ -128,8 +134,9 @@ reads.
 **`admin`** manages the service: populating and editing `user_roles`, managing `room_members`
 via the admin API, and operating the compliance surface (redact/delete messages, DSAR
 exports — see COMPLIANCE.md). Admin is a service-management role, not an automatic room
-membership or audit-read grant; an admin who needs to read a room's messages or the audit log
-needs those separately, same as any other role.
+membership or audit-read grant. An admin who needs to read a room's messages must be added to
+`room_members`, same as any other role; reading the audit log takes a separate identity with
+the `auditor` role, since one `sub` holds one role.
 
 Migration 0004 seeds `host-admin` with `admin`; migration 0007 seeds `host-auditor` with
 `auditor`, so a host has a working auditor identity to mint tokens for (or reuse for its own
