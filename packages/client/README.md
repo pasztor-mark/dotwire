@@ -2,6 +2,8 @@
 
 For coding agents adding dotwire to an application, see the [SDK integration guide](https://github.com/pasztor-mark/dotwire/blob/main/docs/SDK_AGENT_GUIDE.md).
 
+Full documentation: [https://dotwire.pasztormark.dev/docs](https://dotwire.pasztormark.dev/docs)
+
 Official TypeScript/JavaScript client SDK for **dotwire**, the high-throughput, self-hosted real-time messaging infrastructure.
 
 [![npm version](https://img.shields.io/npm/v/@dotwire/client.svg)](https://www.npmjs.com/package/@dotwire/client)

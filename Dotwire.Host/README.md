@@ -2,6 +2,8 @@
 
 For coding agents adding dotwire to an application, see the [SDK integration guide](https://github.com/pasztor-mark/dotwire/blob/main/docs/SDK_AGENT_GUIDE.md).
 
+Full documentation: [https://dotwire.pasztormark.dev/docs](https://dotwire.pasztormark.dev/docs)
+
 Host-side SDK: mints RS256 tokens with the host's private key and talks to dotwire over
 HTTP. Every message reaches dotwire *through the host backend*, which is what makes the
 moderation hooks below both cheap and complete. Targets `net8.0`, `net9.0` and `net10.0`.

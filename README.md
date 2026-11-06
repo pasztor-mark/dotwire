@@ -135,6 +135,8 @@ dotnet test dotwire.slnx
 dotnet publish dotwire/dotwire.csproj -c Release
 ```
 
+Full documentation: **[https://dotwire.pasztormark.dev/docs](https://dotwire.pasztormark.dev/docs)**
+
 ---
 
 ## Official SDKs
@@ -151,6 +153,8 @@ Coding agents integrating chat into a host app can start with the [SDK guide](do
 ---
 
 ## Normative Specifications & Documentation
+
+Browse the full docs site at [https://dotwire.pasztormark.dev/docs](https://dotwire.pasztormark.dev/docs).
 
 The architecture is governed by normative contracts:
 

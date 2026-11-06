@@ -2,6 +2,8 @@
 
 For coding agents adding dotwire to an application, see the [SDK integration guide](https://github.com/pasztor-mark/dotwire/blob/main/docs/SDK_AGENT_GUIDE.md).
 
+Full documentation: [https://dotwire.pasztormark.dev/docs](https://dotwire.pasztormark.dev/docs)
+
 Official Node.js & TypeScript Host SDK for **dotwire**, providing JWT token minting, room provisioning, user role management, and system messaging without direct database access.
 
 [![npm version](https://img.shields.io/npm/v/@dotwire/host.svg)](https://www.npmjs.com/package/@dotwire/host)
