@@ -9,7 +9,7 @@ import { DotwireProvider, useDotwireClient, useConnectionState } from '../src/in
  * itself (construction happens in an effect, per `src/provider.tsx`, which never runs during
  * `renderToString`).
  */
-function Consumer(): JSX.Element {
+function Consumer(): React.JSX.Element {
   const client = useDotwireClient();
   const connectionState = useConnectionState();
   return (
