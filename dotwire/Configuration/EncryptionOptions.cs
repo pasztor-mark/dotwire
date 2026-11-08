@@ -15,4 +15,6 @@ public sealed class EncryptionOptions
 
     /// <summary>Key id → base64-encoded 32-byte key. Values are secrets: never log them.</summary>
     public Dictionary<string, string> Keys { get; set; } = new();
+
+    public bool AllowLegacyEnvelopes { get; set; } = true;
 }

@@ -25,9 +25,9 @@ except where marked.
 | Claim | Required | Meaning |
 |---|---|---|
 | `iss` | yes | Host identifier; must match dotwire's configured issuer. |
-| `sub` | yes | The host's user id — an opaque string, never interpreted by dotwire beyond identity/lookup. |
+| `sub` | yes | The host's user id — an opaque string, never interpreted by dotwire beyond identity/lookup. 1–256 characters, no control characters (U+0000–U+001F, U+007F); a token whose `sub` breaks this is rejected. |
 | `aud` | yes | Must match dotwire's configured audience. |
-| `exp` / `iat` | yes | Standard expiry/issued-at claims. Short TTLs are recommended (guidance: 5–60 minutes) — see "Threat notes" for why. |
+| `exp` / `iat` | yes | Standard expiry/issued-at claims, both enforced: a token without `iat`, with `iat` in the future, or with `exp - iat` above `Auth:MaxTokenLifetimeMinutes` (default 60, `0` disables the cap) is rejected. Clock skew tolerance is `Auth:ClockSkewSeconds` (default 30). Short TTLs are recommended (guidance: 5–60 minutes) — see "Threat notes" for why. |
 | `dw:role` | yes | Namespaced custom claim; one of `member` \| `auditor` \| `admin`. Cross-checked against the service-side `user_roles` table (see "Authorization pipeline") — the JWT's claim is treated as a hint, not a grant. |
 | `dw:name` | no | Optional display name. |
 
@@ -37,7 +37,14 @@ config.
 
 **Signing:** RS256 only. dotwire's JwtBearer configuration does not accept HS256 or any
 symmetric algorithm — see "Threat notes" for why that restriction is load-bearing rather than
-incidental.
+incidental. Keys must be at least 2048-bit RSA; inline keys must be public-key PEM (a private
+key in `Auth:Keys` fails startup), and JWKS keys below 2048 bits are ignored.
+
+**Transport:** send the token in the `Authorization: Bearer` header. The only exception is the
+browser WebSocket upgrade, which cannot carry headers: `?access_token=` is accepted only on
+`GET /hub/rooms` and `GET /rooms/{uuid}/events`, and only when no `Authorization` header is
+present. Tokens in URLs end up in proxy logs, so keep their TTL short and run every hop over
+TLS.
 
 ## Key exchange & rotation
 
@@ -48,7 +55,12 @@ small key ring (`SigningKeyRing`) that hands the handler the public key matching
 
 - **JWKS URL** — a standard JSON Web Key Set endpoint, polled and cached by dotwire, with the
   verification key selected per-token by its `kid` header. This is the recommended path for
-  any host that already runs an OIDC-style identity provider or key-serving endpoint.
+  any host that already runs an OIDC-style identity provider or key-serving endpoint. The URL
+  must be `https` (or a loopback host) unless `Auth:AllowInsecureJwksUrl=true`; responses are
+  capped at 256 KiB; a fetched set with no usable key never replaces the previous set; the set
+  is fetched once at startup and refreshed in the background, so an unknown `kid` fails closed
+  immediately instead of blocking the request on a fetch. An inline key always wins over a JWKS
+  key with the same `kid`.
 - **Inline PEM public keys** — one or more PEM-encoded public keys supplied directly in
   dotwire's configuration, keyed by `kid`. This exists for airgapped or simple deployments
   that don't want to stand up (or can't reach) a JWKS endpoint.
@@ -99,6 +111,15 @@ deliberate separation-of-duties boundary, not
 an oversight: the role that can mutate the service (admin) is not automatically the role that
 can review the tamper-evident record of what happened.
 
+**Admins cannot change their own role, and cannot remove the last admin.** `PUT`/`DELETE
+/admin/users/{id}/role` on the caller's own `sub` answers `409 self_role_change`, and demoting
+or deleting the only remaining `admin` answers `409 last_admin` (role mutations are serialized
+with a transaction-scoped advisory lock). Beyond that, any admin can still grant `admin` or
+`auditor` to any `sub`: dotwire has no second approver for privileged grants. Every grant is
+audited (`role.set.*`, including the `member` rows `ensureMemberRole` creates), so separation of
+duties for privileged grants is enforced by reviewing the audit trail, and by the host keeping
+admin tokens out of reach of the people who hold the auditor identity.
+
 **Message injection is audited, and does not grant room read access.** The admin API lets an
 admin inject a message into any room as an asserted sender (`SendSystemMessageAsync` /
 `sendSystemMessage`), without needing membership in that room. The sender id on the wire is
@@ -107,7 +128,9 @@ injection emits an audit event (ids only, never content, per "Audit log" in ARCH
 The event is written after the JetStream ack but before live fanout: if it can't be written,
 dotwire erases the injected message from both stores (the same tombstone-and-delete path as
 redaction) and answers `503 audit_unavailable`, so no client ever sees an unaudited injection
-and retrying the call can't duplicate the message. Injecting into a room still does not let the admin *read* that room's history or live
+and retrying the call can't duplicate the message. Rooms have no table of their own (a room is its UUID plus its `room_members` rows), so an
+injection into a room nobody belongs to is accepted and simply has no audience; it is still
+audited and rate-limited under the `admin` bucket. Injecting into a room still does not let the admin *read* that room's history or live
 traffic; write-by-injection and read access remain separate grants, consistent with "Audit
 access is not room access" above.
 
@@ -117,6 +140,17 @@ request — regardless of whether the caller is `member`, `auditor`, or `admin`.
 role-based bypass of the membership check for history: an `auditor` or `admin` who wants to
 read a room's messages needs to actually be a member of that room, same as anyone else.
 `GET /rooms/{roomId}/participants` follows the same rule and returns only member user IDs.
+
+**DSAR export is the one deliberate exception.** `GET /admin/users/{id}/export` returns every
+message the subject sent, decrypted, across all rooms, without the caller being a member of
+those rooms. It is a compliance operation (GDPR Art. 15/20) rather than room access, it is
+admin-only, and it is audited (`dsar.exported`) before any data is written. Admin reads of
+role and membership metadata (`GET /admin/...`) are not individually audited; treat admin
+credentials accordingly.
+
+**Role checks read the read pool.** `user_roles`/`room_members` lookups go through the read
+data source. With an asynchronous read replica, a demotion takes effect after replica lag;
+point the read pool at the primary or a synchronous replica where that matters.
 
 ## Roles
 
@@ -225,6 +259,11 @@ const token = jwt.sign(
   revoked before the token expires. Cross-checking `dw:role` against `user_roles` on every
   authorization decision means a demotion or revocation in the table takes effect immediately,
   independent of how long the outstanding token has left to live.
+- **Why live sockets are re-checked.** Revocation is broadcast over NATS core, which can drop
+  a message; gateways therefore re-check membership right after registering a subscription and
+  sweep all live subscriptions against `user_roles`/`room_members` every
+  `Dotwire:MembershipSweepSeconds` (default 60). A role change also revokes the user's live
+  subscriptions.
 - **Why short TTLs.** Because dotwire has no token revocation list, revoking access to a
   *specific still-valid token* is bounded entirely by its TTL — the role cross-check protects
   against role drift, but a token that hasn't expired yet is still a valid credential for

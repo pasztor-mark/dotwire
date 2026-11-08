@@ -2,26 +2,38 @@ using System.Diagnostics;
 using System.Security.Claims;
 using System.Text.Json;
 using Dotwire.Api;
+using Dotwire.Auth;
 using Dotwire.Configuration;
-using Dotwire.Data;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
 using NATS.Client.Core;
-using Npgsql;
 
 namespace Dotwire.Realtime;
 
 [Authorize]
 public sealed class RoomHub(
-    [FromKeyedServices(PostgresDataSources.Read)] NpgsqlDataSource readDataSource,
+    IAccessStore accessStore,
     RoomInterestManager interestManager,
     PresenceCoalescer presenceCoalescer,
+    TypingThrottle typingThrottle,
+    UserConnectionLimiter connectionLimiter,
     INatsConnection nats,
     IOptions<NatsOptions> natsOptions) : Hub
 {
-    private const string LastTypingTicksKey = "dotwire_last_typing_ticks";
-    private static readonly long TypingCooldownTicks = Stopwatch.Frequency / 2;
+    private const string ConnectionSlotKey = "dotwire_connection_slot";
+
+    public override Task OnConnectedAsync()
+    {
+        var sub = Context.User?.FindFirstValue("sub");
+        if (string.IsNullOrEmpty(sub))
+            throw new HubException("Unauthorized");
+        if (!connectionLimiter.TryAcquire(sub))
+            throw new HubException("TooManyConnections");
+
+        Context.Items[ConnectionSlotKey] = sub;
+        return base.OnConnectedAsync();
+    }
 
     public async Task Subscribe(Guid roomId)
     {
@@ -32,26 +44,32 @@ public sealed class RoomHub(
         if (string.IsNullOrEmpty(sub) || string.IsNullOrEmpty(claimedRole))
             throw new HubException("Unauthorized");
 
-        await using (var roleCmd = readDataSource.CreateCommand("SELECT role FROM user_roles WHERE user_id = $1"))
-        {
-            roleCmd.Parameters.AddWithValue(sub);
-            var tableRole = (string?)await roleCmd.ExecuteScalarAsync(Context.ConnectionAborted);
-            if (tableRole is null || tableRole != claimedRole)
-                throw new HubException("Forbidden");
-        }
+        var ct = Context.ConnectionAborted;
+        if (await accessStore.GetRoleAsync(sub, ct) != claimedRole)
+            throw new HubException("Forbidden");
 
-        await using (var memberCmd = readDataSource.CreateCommand(
-            "SELECT EXISTS (SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2)"))
-        {
-            memberCmd.Parameters.AddWithValue(roomId);
-            memberCmd.Parameters.AddWithValue(sub);
-            var isMember = (bool)(await memberCmd.ExecuteScalarAsync(Context.ConnectionAborted))!;
-            if (!isMember)
-                throw new HubException("Forbidden");
-        }
+        if (!await accessStore.IsMemberAsync(roomId, sub, ct))
+            throw new HubException("Forbidden");
 
-        if (!await interestManager.SubscribeAsync(roomId, Context.ConnectionId, sub))
+        if (!await interestManager.SubscribeAsync(roomId, Context.ConnectionId, sub, claimedRole))
             return;
+
+        bool stillMember;
+        try
+        {
+            stillMember = await accessStore.IsMemberAsync(roomId, sub, ct);
+        }
+        catch
+        {
+            interestManager.Unsubscribe(roomId, Context.ConnectionId);
+            throw;
+        }
+
+        if (!stillMember)
+        {
+            interestManager.Unsubscribe(roomId, Context.ConnectionId);
+            throw new HubException("Forbidden");
+        }
 
         presenceCoalescer.QueueJoin(roomId, sub);
     }
@@ -78,15 +96,8 @@ public sealed class RoomHub(
         if (!natsOptions.Value.Enabled)
             return;
 
-        var now = Stopwatch.GetTimestamp();
-        var lastTypingMap = GetLastTypingMap();
-        lock (lastTypingMap)
-        {
-            var found = lastTypingMap.TryGetValue(roomId, out var last);
-            if (isTyping ? found && now - last.TrueTicks < TypingCooldownTicks : !(found && last.IsTyping))
-                return;
-            lastTypingMap[roomId] = (isTyping ? now : last.TrueTicks, isTyping);
-        }
+        if (!typingThrottle.ShouldPublish(sub, roomId, isTyping, Stopwatch.GetTimestamp()))
+            return;
 
         var notification = new TypingNotification(roomId, sub, isTyping);
         var payload = JsonSerializer.SerializeToUtf8Bytes(notification, DotwireJsonContext.Default.TypingNotification);
@@ -106,16 +117,9 @@ public sealed class RoomHub(
             }
         }
 
-        await base.OnDisconnectedAsync(exception);
-    }
+        if (Context.Items.Remove(ConnectionSlotKey, out var slot) && slot is string slotUser)
+            connectionLimiter.Release(slotUser);
 
-    private Dictionary<Guid, (long TrueTicks, bool IsTyping)> GetLastTypingMap()
-    {
-        if (!Context.Items.TryGetValue(LastTypingTicksKey, out var obj) || obj is not Dictionary<Guid, (long TrueTicks, bool IsTyping)> map)
-        {
-            map = [];
-            Context.Items[LastTypingTicksKey] = map;
-        }
-        return map;
+        await base.OnDisconnectedAsync(exception);
     }
 }

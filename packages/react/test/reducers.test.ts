@@ -187,3 +187,22 @@ test('presenceReducer: a delta can join and leave different users at once', () =
   state = presenceReducer(state, { type: 'delta', joined: ['bob'], left: ['alice'] });
   assert.deepEqual(state, ['bob']);
 });
+
+test('typingReducer treats hostile user ids as plain keys', () => {
+  let state = typingReducer(initialTypingState, { type: 'notification', userId: '__proto__', isTyping: true, now: 1 });
+  state = typingReducer(state, { type: 'notification', userId: 'alice', isTyping: true, now: 1 });
+  state = typingReducer(state, { type: 'expire', now: 5000, ttlMs: 3000 });
+  state = typingReducer(state, { type: 'notification', userId: 'bob', isTyping: true, now: 5000 });
+  state = typingReducer(state, { type: 'expire', now: 5001, ttlMs: 3000 });
+
+  assert.equal(Object.getPrototypeOf(state), Object.prototype);
+  assert.deepEqual(typingUsersOf(state), ['bob']);
+
+  const unchanged = typingReducer(state, { type: 'notification', userId: 'toString', isTyping: false, now: 5002 });
+  assert.equal(unchanged, state);
+
+  const withProto = typingReducer(state, { type: 'notification', userId: '__proto__', isTyping: true, now: 5003 });
+  const expired = typingReducer(withProto, { type: 'expire', now: 5004, ttlMs: 3000 });
+  assert.equal(Object.getPrototypeOf(expired), Object.prototype);
+  assert.deepEqual(typingUsersOf(expired).sort(), ['__proto__', 'bob']);
+});

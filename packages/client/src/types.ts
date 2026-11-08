@@ -80,6 +80,10 @@ export interface SendAck {
   time: string;
 }
 
+export interface SendMessageOptions {
+  idempotencyKey?: string;
+}
+
 export interface HistoryPage {
   messages: RoomMessage[];
   hasMore: boolean;

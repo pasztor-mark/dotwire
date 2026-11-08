@@ -16,6 +16,9 @@ public static class ApiResults
     public static IResult InvalidRequest(string? reason = null) =>
         Error(StatusCodes.Status400BadRequest, "invalid_request", reason);
 
+    public static IResult Conflict(string code, string? reason = null) =>
+        Error(StatusCodes.Status409Conflict, code, reason);
+
     public static IResult PresendRejected(string? reason = null) =>
         Error(StatusCodes.Status422UnprocessableEntity, "presend_rejected", reason);
 

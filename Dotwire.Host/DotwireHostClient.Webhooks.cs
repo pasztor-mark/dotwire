@@ -8,13 +8,16 @@ public sealed partial class DotwireHostClient
 {
     private const string SignaturePrefix = "sha256=";
 
-    /// <inheritdoc />
     public async Task<ClientSendResult> HandleClientSendAsync(Stream body, string senderUserId, CancellationToken ct = default)
     {
+        var bytes = await ReadBoundedAsync(body, _options.MaxWebhookBodyBytes, ct);
+        if (bytes is null)
+            return new ClientSendResult(413, Serialize(new ApiErrorBody("payload_too_large")), null, "payload_too_large", null);
+
         ClientSendRequest? request;
         try
         {
-            request = await JsonSerializer.DeserializeAsync(body, DotwireHostJsonContext.Default.ClientSendRequest, ct);
+            request = JsonSerializer.Deserialize(bytes, DotwireHostJsonContext.Default.ClientSendRequest);
         }
         catch (JsonException)
         {
@@ -29,7 +32,7 @@ public sealed partial class DotwireHostClient
 
         try
         {
-            var ack = await SendAsUserAsync(request.RoomId, senderUserId, request.Content, ct);
+            var ack = await SendAsUserAsync(request.RoomId, senderUserId, request.Content, request.IdempotencyKey, ct);
             return new ClientSendResult(202, Serialize(ack, DotwireHostJsonContext.Default.SendMessageResult), ack, null, null);
         }
         catch (PresendRejectedException ex)
@@ -43,17 +46,20 @@ public sealed partial class DotwireHostClient
         }
         catch (PostSendException ex)
         {
-            // The send itself succeeded; only the (in-process) PostSend hook failed. The
-            // client already has its message accepted - surface the ack, not an error.
             return new ClientSendResult(202, Serialize(ex.Sent, DotwireHostJsonContext.Default.SendMessageResult), ex.Sent, null, null);
         }
     }
 
-    /// <inheritdoc />
-    public async Task<WebhookResult> HandlePresendWebhookAsync(Stream body, string? signatureHeader, CancellationToken ct = default)
+    public Task<WebhookResult> HandlePresendWebhookAsync(Stream body, string? signatureHeader, CancellationToken ct = default) =>
+        HandlePresendWebhookAsync(body, new WebhookHeaders(signatureHeader), ct);
+
+    public async Task<WebhookResult> HandlePresendWebhookAsync(Stream body, WebhookHeaders headers, CancellationToken ct = default)
     {
-        var bytes = await ReadAllAsync(body, ct);
-        if (!VerifySignature(bytes, signatureHeader))
+        EnsureWebhookSecretConfigured();
+        var bytes = await ReadBoundedAsync(body, _options.MaxWebhookBodyBytes, ct);
+        if (bytes is null)
+            return PayloadTooLarge();
+        if (!VerifySignature(bytes, headers, DateTimeOffset.UtcNow))
             return Unauthorized();
 
         var request = JsonSerializer.Deserialize(bytes, DotwireHostJsonContext.Default.PresendWebhookRequestDto)
@@ -75,11 +81,16 @@ public sealed partial class DotwireHostClient
         return new WebhookResult(200, Serialize(response, DotwireHostJsonContext.Default.PresendWebhookResponseDto));
     }
 
-    /// <inheritdoc />
-    public async Task<WebhookResult> HandlePostSendWebhookAsync(Stream body, string? signatureHeader, CancellationToken ct = default)
+    public Task<WebhookResult> HandlePostSendWebhookAsync(Stream body, string? signatureHeader, CancellationToken ct = default) =>
+        HandlePostSendWebhookAsync(body, new WebhookHeaders(signatureHeader), ct);
+
+    public async Task<WebhookResult> HandlePostSendWebhookAsync(Stream body, WebhookHeaders headers, CancellationToken ct = default)
     {
-        var bytes = await ReadAllAsync(body, ct);
-        if (!VerifySignature(bytes, signatureHeader))
+        EnsureWebhookSecretConfigured();
+        var bytes = await ReadBoundedAsync(body, _options.MaxWebhookBodyBytes, ct);
+        if (bytes is null)
+            return PayloadTooLarge();
+        if (!VerifySignature(bytes, headers, DateTimeOffset.UtcNow))
             return Unauthorized();
 
         var request = JsonSerializer.Deserialize(bytes, DotwireHostJsonContext.Default.PostSendWebhookRequestDto)
@@ -87,45 +98,76 @@ public sealed partial class DotwireHostClient
 
         if (PostSend is not null)
         {
-            // Best-effort, like the server's own postsend contract: never turns into a
-            // non-200 response, since the send it describes already happened either way.
             try
             {
                 await PostSend(new PostSendContext(request.RoomId, request.Seq, request.Time, request.Content, request.SenderId), ct);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _ = ex; // swallowed: caller can inspect via their own PostSend hook's own logging.
+                _ = ex;
             }
         }
 
         return new WebhookResult(200, "{}");
     }
 
-    private bool VerifySignature(byte[] body, string? signatureHeader)
+    private void EnsureWebhookSecretConfigured()
+    {
+        if (string.IsNullOrEmpty(_options.WebhookSecret) && !_options.AllowUnsignedWebhooks)
+            throw new InvalidOperationException(
+                "DotwireHostOptions.WebhookSecret is required to handle webhooks; set AllowUnsignedWebhooks = true to accept unsigned calls.");
+    }
+
+    internal bool VerifySignature(byte[] body, WebhookHeaders headers, DateTimeOffset now)
     {
         if (string.IsNullOrEmpty(_options.WebhookSecret))
-            return true;
+            return _options.AllowUnsignedWebhooks;
 
-        if (string.IsNullOrEmpty(signatureHeader) || !signatureHeader.StartsWith(SignaturePrefix, StringComparison.Ordinal))
+        var key = Encoding.UTF8.GetBytes(_options.WebhookSecret);
+
+        if (!string.IsNullOrEmpty(headers.SignatureV2) && !string.IsNullOrEmpty(headers.Timestamp))
+        {
+            if (!long.TryParse(headers.Timestamp, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var unix))
+                return false;
+            if ((now - DateTimeOffset.FromUnixTimeSeconds(unix)).Duration() > _options.WebhookTimestampTolerance)
+                return false;
+
+            var prefix = Encoding.UTF8.GetBytes(headers.Timestamp + ".");
+            var payload = new byte[prefix.Length + body.Length];
+            prefix.CopyTo(payload, 0);
+            body.CopyTo(payload, prefix.Length);
+            return SignatureMatches(key, payload, headers.SignatureV2);
+        }
+
+        return _options.AllowLegacyWebhookSignatures && SignatureMatches(key, body, headers.Signature);
+    }
+
+    private static bool SignatureMatches(byte[] key, byte[] payload, string? header)
+    {
+        if (string.IsNullOrEmpty(header) || !header.StartsWith(SignaturePrefix, StringComparison.Ordinal))
             return false;
 
-        var providedHex = signatureHeader[SignaturePrefix.Length..];
-        var key = Encoding.UTF8.GetBytes(_options.WebhookSecret);
-        var computed = HMACSHA256.HashData(key, body);
-        var computedHex = Convert.ToHexString(computed).ToLowerInvariant();
-
+        var computedHex = Convert.ToHexString(HMACSHA256.HashData(key, payload)).ToLowerInvariant();
         return CryptographicOperations.FixedTimeEquals(
             Encoding.UTF8.GetBytes(computedHex),
-            Encoding.UTF8.GetBytes(providedHex));
+            Encoding.UTF8.GetBytes(header[SignaturePrefix.Length..]));
     }
 
     private static WebhookResult Unauthorized() => new(401, Serialize(new ApiErrorBody("invalid_signature")));
 
-    private static async Task<byte[]> ReadAllAsync(Stream stream, CancellationToken ct)
+    private static WebhookResult PayloadTooLarge() => new(413, Serialize(new ApiErrorBody("payload_too_large")));
+
+    private static async Task<byte[]?> ReadBoundedAsync(Stream stream, int maxBytes, CancellationToken ct)
     {
         using var buffer = new MemoryStream();
-        await stream.CopyToAsync(buffer, ct);
+        var chunk = new byte[16 * 1024];
+        int read;
+        while ((read = await stream.ReadAsync(chunk, ct)) > 0)
+        {
+            if (buffer.Length + read > maxBytes)
+                return null;
+            buffer.Write(chunk, 0, read);
+        }
         return buffer.ToArray();
     }
 

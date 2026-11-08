@@ -28,6 +28,7 @@ public interface IDotwireHostClient
     Task<IReadOnlyList<string>> GetRoomParticipantsAsync(Guid roomId, string asUserId, CancellationToken ct = default);
 
     Task<SendMessageResult> SendAsUserAsync(Guid roomId, string userId, string content, CancellationToken ct = default);
+    Task<SendMessageResult> SendAsUserAsync(Guid roomId, string userId, string content, string? idempotencyKey, CancellationToken ct = default);
     Task<SendMessageResult> SendSystemMessageAsync(Guid roomId, string content, string senderId = "system", CancellationToken ct = default);
     Task<RoomHistory> GetMessagesAsync(Guid roomId, string asUserId, HistoryQuery? query = null, CancellationToken ct = default);
     IAsyncEnumerable<RoomEvent> StreamEventsAsync(Guid roomId, string asUserId, StreamOptions? options = null, CancellationToken ct = default);
@@ -53,12 +54,14 @@ public interface IDotwireHostClient
     /// response to write back.
     /// </summary>
     Task<WebhookResult> HandlePresendWebhookAsync(Stream body, string? signatureHeader, CancellationToken ct = default);
+    Task<WebhookResult> HandlePresendWebhookAsync(Stream body, WebhookHeaders headers, CancellationToken ct = default);
 
     /// <summary>
     /// Handles dotwire's postsend webhook call-out: verifies the signature (if configured),
     /// runs <see cref="PostSend"/>, and returns the exact HTTP response to write back.
     /// </summary>
     Task<WebhookResult> HandlePostSendWebhookAsync(Stream body, string? signatureHeader, CancellationToken ct = default);
+    Task<WebhookResult> HandlePostSendWebhookAsync(Stream body, WebhookHeaders headers, CancellationToken ct = default);
 
     /// <summary>
     /// Runs in-process before a user-initiated send (<see cref="SendAsUserAsync"/>,

@@ -17,12 +17,12 @@ function streamOf(text: string): ReadableStream<Uint8Array> {
 
 test('parseSseStream + toRoomEvent handle every event type and ignore ping comments', async () => {
   const text =
-    'id: 1\nevent: message\ndata: {"roomId":"r1","seq":1,"senderId":"a","time":"t","content":"hi","replayed":true}\n\n' +
+    'id: 1\nevent: message\ndata: {"roomId":"22222222-2222-4222-8222-222222222222","seq":1,"senderId":"a","time":"t","content":"hi","replayed":true}\n\n' +
     ': ping\n\n' +
-    'event: retracted\ndata: {"roomId":"r1","seq":1}\n\n' +
-    'event: typing\ndata: {"roomId":"r1","userId":"a","isTyping":true}\n\n' +
-    'event: presence\ndata: {"roomId":"r1","joined":["a"],"left":[]}\n\n' +
-    'event: revoked\ndata: {"roomId":"r1"}\n\n';
+    'event: retracted\ndata: {"roomId":"22222222-2222-4222-8222-222222222222","seq":1}\n\n' +
+    'event: typing\ndata: {"roomId":"22222222-2222-4222-8222-222222222222","userId":"a","isTyping":true}\n\n' +
+    'event: presence\ndata: {"roomId":"22222222-2222-4222-8222-222222222222","joined":["a"],"left":[]}\n\n' +
+    'event: revoked\ndata: {"roomId":"22222222-2222-4222-8222-222222222222"}\n\n';
 
   const events: RoomEvent[] = [];
   for await (const raw of parseSseStream(streamOf(text))) {
@@ -31,23 +31,23 @@ test('parseSseStream + toRoomEvent handle every event type and ignore ping comme
   }
 
   assert.deepEqual(events, [
-    { type: 'message', roomId: 'r1', seq: 1, senderId: 'a', time: 't', content: 'hi', replayed: true },
-    { type: 'retracted', roomId: 'r1', seq: 1 },
-    { type: 'typing', roomId: 'r1', userId: 'a', isTyping: true },
-    { type: 'presence', roomId: 'r1', joined: ['a'], left: [] },
-    { type: 'revoked', roomId: 'r1' }
+    { type: 'message', roomId: '22222222-2222-4222-8222-222222222222', seq: 1, senderId: 'a', time: 't', content: 'hi', replayed: true },
+    { type: 'retracted', roomId: '22222222-2222-4222-8222-222222222222', seq: 1 },
+    { type: 'typing', roomId: '22222222-2222-4222-8222-222222222222', userId: 'a', isTyping: true },
+    { type: 'presence', roomId: '22222222-2222-4222-8222-222222222222', joined: ['a'], left: [] },
+    { type: 'revoked', roomId: '22222222-2222-4222-8222-222222222222' }
   ]);
 });
 
 test('streamRoomEvents yields typed events and stops after revoked', async () => {
-  const text = 'id: 1\nevent: message\ndata: {"roomId":"r1","seq":1,"senderId":"a","time":"t","content":"hi"}\n\n' + 'event: revoked\ndata: {"roomId":"r1"}\n\n';
+  const text = 'id: 1\nevent: message\ndata: {"roomId":"22222222-2222-4222-8222-222222222222","seq":1,"senderId":"a","time":"t","content":"hi"}\n\n' + 'event: revoked\ndata: {"roomId":"22222222-2222-4222-8222-222222222222"}\n\n';
   const { fetchImpl } = createFakeFetch(
     () => new Response(streamOf(text), { status: 200, headers: { 'content-type': 'text/event-stream' } })
   );
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
 
   const events: RoomEvent[] = [];
-  for await (const evt of client.streamRoomEvents('r1', { asUserId: 'dave' })) {
+  for await (const evt of client.streamRoomEvents('22222222-2222-4222-8222-222222222222', { asUserId: 'dave' })) {
     events.push(evt);
   }
   assert.equal(events.length, 2);
@@ -63,18 +63,18 @@ test('streamRoomEvents reconnects with Last-Event-ID set to the last seen seq af
     attempt++;
     if (attempt === 1) {
       // First connection: yield one message then the stream ends abruptly (simulated drop).
-      return new Response(streamOf('id: 5\nevent: message\ndata: {"roomId":"r1","seq":5,"senderId":"a","time":"t","content":"hi"}\n\n'), {
+      return new Response(streamOf('id: 5\nevent: message\ndata: {"roomId":"22222222-2222-4222-8222-222222222222","seq":5,"senderId":"a","time":"t","content":"hi"}\n\n'), {
         status: 200
       });
     }
     // Second connection (the resume): assert Last-Event-ID was sent, then close with revoked to end the test.
     assert.equal(call.headers['last-event-id'], '5');
-    return new Response(streamOf('event: revoked\ndata: {"roomId":"r1"}\n\n'), { status: 200 });
+    return new Response(streamOf('event: revoked\ndata: {"roomId":"22222222-2222-4222-8222-222222222222"}\n\n'), { status: 200 });
   });
 
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
   const events: RoomEvent[] = [];
-  for await (const evt of client.streamRoomEvents('r1', { asUserId: 'dave', autoResume: true })) {
+  for await (const evt of client.streamRoomEvents('22222222-2222-4222-8222-222222222222', { asUserId: 'dave', autoResume: true })) {
     events.push(evt);
   }
 
@@ -88,13 +88,13 @@ test('streamRoomEvents does not reconnect when autoResume is false', async () =>
   let attempt = 0;
   const { fetchImpl } = createFakeFetch(() => {
     attempt++;
-    return new Response(streamOf('id: 1\nevent: message\ndata: {"roomId":"r1","seq":1,"senderId":"a","time":"t","content":"hi"}\n\n'), {
+    return new Response(streamOf('id: 1\nevent: message\ndata: {"roomId":"22222222-2222-4222-8222-222222222222","seq":1,"senderId":"a","time":"t","content":"hi"}\n\n'), {
       status: 200
     });
   });
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
   const events: RoomEvent[] = [];
-  for await (const evt of client.streamRoomEvents('r1', { asUserId: 'dave', autoResume: false })) {
+  for await (const evt of client.streamRoomEvents('22222222-2222-4222-8222-222222222222', { asUserId: 'dave', autoResume: false })) {
     events.push(evt);
   }
   assert.equal(attempt, 1);

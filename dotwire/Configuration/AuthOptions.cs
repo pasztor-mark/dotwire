@@ -23,4 +23,10 @@ public sealed class AuthOptions
 
     /// <summary>JWKS cache refresh interval; also refreshed (rate-limited) on unknown kid.</summary>
     public int JwksRefreshMinutes { get; set; } = 5;
+
+    public bool AllowInsecureJwksUrl { get; set; }
+
+    public int ClockSkewSeconds { get; set; } = 30;
+
+    public int MaxTokenLifetimeMinutes { get; set; } = 60;
 }

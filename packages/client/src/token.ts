@@ -1,5 +1,7 @@
 import { toDotwireClientError } from './errors.js';
 
+export const NO_EXP_CACHE_MS = 60_000;
+
 interface TokenResponseBody {
   token: string;
 }
@@ -33,7 +35,7 @@ export class TokenManager {
   }
 
   private isExpiringSoon(): boolean {
-    if (this.cachedExpMs === null) return false;
+    if (this.cachedExpMs === null) return true;
     return Date.now() >= this.cachedExpMs - this.marginMs;
   }
 
@@ -42,9 +44,12 @@ export class TokenManager {
     if (!response.ok) {
       throw await toDotwireClientError(response);
     }
-    const body = (await response.json()) as TokenResponseBody;
+    const body = (await response.json()) as Partial<TokenResponseBody> | null;
+    if (!body || typeof body.token !== 'string' || body.token.length === 0) {
+      throw new Error('token endpoint response is missing a string "token"');
+    }
     this.cachedToken = body.token;
-    this.cachedExpMs = decodeExpMs(body.token);
+    this.cachedExpMs = decodeExpMs(body.token) ?? Date.now() + this.marginMs + NO_EXP_CACHE_MS;
     return this.cachedToken;
   }
 }

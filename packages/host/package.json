@@ -1,6 +1,6 @@
 {
   "name": "@dotwire/host",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Server-side SDK for dotwire: mint tokens, manage roles and membership, send/inject/redact messages, read audit logs, and run moderation, all from a host backend.",
   "repository": {
     "type": "git",
@@ -23,7 +23,7 @@
   ],
   "sideEffects": false,
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "build": "tsup",

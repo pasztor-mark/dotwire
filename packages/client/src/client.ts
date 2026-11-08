@@ -20,6 +20,7 @@ import {
   PresenceDelta,
   RoomMessage,
   SendAck,
+  SendMessageOptions,
   TypingNotification,
   isSystemSender
 } from './types.js';
@@ -222,12 +223,13 @@ export class DotwireClient {
       const page = await this.getHistory(roomId, { afterSeq, limit: pageSize });
       if (page.messages.length === 0) break;
 
+      const before = afterSeq;
       for (const message of page.messages) {
         this.deliverMessage({ ...message, replayed: true });
         afterSeq = Math.max(afterSeq, message.seq);
       }
 
-      hasMore = page.hasMore;
+      hasMore = page.hasMore && afterSeq > before;
     }
   }
 
@@ -315,7 +317,7 @@ export class DotwireClient {
     return this.sendTyping(roomId, false);
   }
 
-  public async sendMessage(roomId: string, content: string, timeoutMs?: number): Promise<SendAck> {
+  public async sendMessage(roomId: string, content: string, timeoutMs?: number, options: SendMessageOptions = {}): Promise<SendAck> {
     const timeout = timeoutMs ?? this.options.requestTimeoutMs ?? 15000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -327,16 +329,17 @@ export class DotwireClient {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'include',
-          body: JSON.stringify({ roomId, content }),
+          body: JSON.stringify(options.idempotencyKey ? { roomId, content, idempotencyKey: options.idempotencyKey } : { roomId, content }),
           signal: controller.signal
         });
       } else {
         const token = await this.getToken();
-        response = await fetch(`${this.baseUrl}/rooms/${roomId}/messages`, {
+        response = await fetch(`${this.baseUrl}/rooms/${encodeURIComponent(roomId)}/messages`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`
+            Authorization: `Bearer ${token}`,
+            ...(options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : {})
           },
           body: JSON.stringify({ content }),
           signal: controller.signal
@@ -361,7 +364,7 @@ export class DotwireClient {
     if (options.limit !== undefined) params.set('limit', options.limit.toString());
 
     const qs = params.toString();
-    const url = `${this.baseUrl}/rooms/${roomId}/messages${qs ? `?${qs}` : ''}`;
+    const url = `${this.baseUrl}/rooms/${encodeURIComponent(roomId)}/messages${qs ? `?${qs}` : ''}`;
     const timeout = options.timeoutMs ?? this.options.requestTimeoutMs ?? 15000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -399,7 +402,7 @@ export class DotwireClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs ?? this.options.requestTimeoutMs ?? 15000);
     try {
-      const response = await fetch(`${this.baseUrl}/rooms/${roomId}/participants`, {
+      const response = await fetch(`${this.baseUrl}/rooms/${encodeURIComponent(roomId)}/participants`, {
         method: 'GET',
         headers: { Authorization: `Bearer ${token}` },
         signal: controller.signal

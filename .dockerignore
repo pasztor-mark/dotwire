@@ -26,3 +26,16 @@ README.md
 **/*.key
 **/*.pem
 **/*.pub
+**/.reminders
+**/.remember
+**/.dotwire-agent-room
+**/.claude
+**/.superpowers
+**/.codex
+**/.notes
+**/CLAUDE.local.md
+**/dev-jwt.*
+**/packages
+**/samples
+**/docs
+**/dotwire.Tests

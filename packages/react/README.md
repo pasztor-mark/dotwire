@@ -98,6 +98,7 @@ function Room({ roomId }: { roomId: string }) {
 - **`useConnectionState()`** → the client's live `ConnectionState`
   (`'disconnected' | 'connecting' | 'connected' | 'reconnecting' | 'disconnecting'`).
 - **`useRoom(roomId, { history = 50 })`** → `{ messages, status, error, hasMore, loadOlder, send }`.
+  `messages` grows for as long as the component stays mounted (older pages are merged in by `loadOlder`); remount or key the component per conversation for very long-lived rooms. Render `content` as text, never as HTML.
   Subscribes for the lifetime of the component, loads the initial history page, and applies
   live messages, retractions, and revocation. `messages` is always sorted by `seq` and deduped.
   `status` starts `'connecting'`, becomes `'ready'` once the initial subscribe resolves,

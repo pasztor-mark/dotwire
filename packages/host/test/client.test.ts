@@ -101,10 +101,10 @@ test('deleteUserRole swallows 404', async () => {
 
 test('getUserRooms returns roomIds', async () => {
   const { fetchImpl } = createRoutedFetch({
-    'GET /admin/users/x/rooms': () => jsonRes(200, { userId: 'x', roomIds: ['r1', 'r2'] })
+    'GET /admin/users/x/rooms': () => jsonRes(200, { userId: 'x', roomIds: ['22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333'] })
   });
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
-  assert.deepEqual(await client.getUserRooms('x'), ['r1', 'r2']);
+  assert.deepEqual(await client.getUserRooms('x'), ['22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333']);
 });
 
 // ---------------------------------------------------------------------
@@ -113,42 +113,42 @@ test('getUserRooms returns roomIds', async () => {
 
 test('addRoomMembers defaults ensureMemberRole to true and posts the ids', async () => {
   const { fetchImpl } = createRoutedFetch({
-    'POST /admin/rooms/room1/members': (call) => {
+    'POST /admin/rooms/11111111-1111-4111-8111-111111111111/members': (call) => {
       assert.deepEqual(JSON.parse(call.body!), { userIds: ['a', 'b'], ensureMemberRole: true });
-      return jsonRes(200, { roomId: 'room1', members: ['a', 'b'] });
+      return jsonRes(200, { roomId: '11111111-1111-4111-8111-111111111111', members: ['a', 'b'] });
     }
   });
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
-  assert.deepEqual(await client.addRoomMembers('room1', ['a', 'b']), ['a', 'b']);
+  assert.deepEqual(await client.addRoomMembers('11111111-1111-4111-8111-111111111111', ['a', 'b']), ['a', 'b']);
 });
 
 test('addRoomMembers honours ensureMemberRole: false', async () => {
   const { fetchImpl } = createRoutedFetch({
-    'POST /admin/rooms/room1/members': (call) => {
+    'POST /admin/rooms/11111111-1111-4111-8111-111111111111/members': (call) => {
       assert.deepEqual(JSON.parse(call.body!), { userIds: ['a'], ensureMemberRole: false });
-      return jsonRes(200, { roomId: 'room1', members: ['a'] });
+      return jsonRes(200, { roomId: '11111111-1111-4111-8111-111111111111', members: ['a'] });
     }
   });
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
-  await client.addRoomMembers('room1', ['a'], { ensureMemberRole: false });
+  await client.addRoomMembers('11111111-1111-4111-8111-111111111111', ['a'], { ensureMemberRole: false });
 });
 
 test('removeRoomMember swallows 404, getRoomMembers returns members', async () => {
   const { fetchImpl } = createRoutedFetch({
-    'DELETE /admin/rooms/room1/members/a': () => new Response(null, { status: 404 }),
-    'GET /admin/rooms/room1/members': () => jsonRes(200, { roomId: 'room1', members: ['a', 'b'] })
+    'DELETE /admin/rooms/11111111-1111-4111-8111-111111111111/members/a': () => new Response(null, { status: 404 }),
+    'GET /admin/rooms/11111111-1111-4111-8111-111111111111/members': () => jsonRes(200, { roomId: '11111111-1111-4111-8111-111111111111', members: ['a', 'b'] })
   });
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
-  await assert.doesNotReject(() => client.removeRoomMember('room1', 'a'));
-  assert.deepEqual(await client.getRoomMembers('room1'), ['a', 'b']);
+  await assert.doesNotReject(() => client.removeRoomMember('11111111-1111-4111-8111-111111111111', 'a'));
+  assert.deepEqual(await client.getRoomMembers('11111111-1111-4111-8111-111111111111'), ['a', 'b']);
 });
 
 test('getRoomParticipants reads as the requested room member', async () => {
   const { fetchImpl, calls } = createRoutedFetch({
-    'GET /rooms/room1/participants': () => jsonRes(200, ['alice', 'bob'])
+    'GET /rooms/11111111-1111-4111-8111-111111111111/participants': () => jsonRes(200, ['alice', 'bob'])
   });
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
-  assert.deepEqual(await client.getRoomParticipants('room1', 'alice'), ['alice', 'bob']);
+  assert.deepEqual(await client.getRoomParticipants('11111111-1111-4111-8111-111111111111', 'alice'), ['alice', 'bob']);
   const payload = decodeJwt(bearerToken(calls[0]));
   assert.equal(payload.sub, 'alice');
   assert.equal((payload as Record<string, unknown>)['dw:role'], 'member');
@@ -162,7 +162,7 @@ test('sendAsUser tries member, resolves role on 403, retries once, and succeeds'
   let sendCount = 0;
   const { fetchImpl, calls } = createFakeFetch((call) => {
     const url = new URL(call.url);
-    if (call.method === 'POST' && url.pathname === '/rooms/room1/messages') {
+    if (call.method === 'POST' && url.pathname === '/rooms/11111111-1111-4111-8111-111111111111/messages') {
       sendCount++;
       const role = (decodeJwt(bearerToken(call)) as Record<string, unknown>)['dw:role'];
       if (role === 'member') return jsonRes(403, {});
@@ -175,7 +175,7 @@ test('sendAsUser tries member, resolves role on 403, retries once, and succeeds'
   });
 
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
-  const ack = await client.sendAsUser('room1', 'dave', 'hi');
+  const ack = await client.sendAsUser('11111111-1111-4111-8111-111111111111', 'dave', 'hi');
   assert.deepEqual(ack, { seq: 5, time: '2026-09-07T00:00:00Z' });
   assert.equal(sendCount, 2);
 
@@ -186,13 +186,13 @@ test('sendAsUser tries member, resolves role on 403, retries once, and succeeds'
 test('a second 403 after role resolution surfaces as a Forbidden DotwireApiError', async () => {
   const { fetchImpl } = createFakeFetch((call) => {
     const url = new URL(call.url);
-    if (call.method === 'POST' && url.pathname === '/rooms/room1/messages') return jsonRes(403, {});
+    if (call.method === 'POST' && url.pathname === '/rooms/11111111-1111-4111-8111-111111111111/messages') return jsonRes(403, {});
     if (call.method === 'GET' && url.pathname === '/admin/users/eve/role') return jsonRes(200, { userId: 'eve', role: 'member' });
     throw new Error('unexpected');
   });
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
   await assert.rejects(
-    () => client.sendAsUser('room1', 'eve', 'hi'),
+    () => client.sendAsUser('11111111-1111-4111-8111-111111111111', 'eve', 'hi'),
     (err: unknown) => err instanceof DotwireApiError && err.kind === 'Forbidden' && err.status === 403
   );
 });
@@ -205,7 +205,7 @@ test('local presend hook can reject before any network call', async () => {
     baseConfig({ fetch: fetchImpl, presend: () => ({ allow: false, rejectionReason: 'blocked word' }) })
   );
   await assert.rejects(
-    () => client.sendAsUser('room1', 'dave', 'bad word'),
+    () => client.sendAsUser('11111111-1111-4111-8111-111111111111', 'dave', 'bad word'),
     (err: unknown) => err instanceof PresendRejectedError && err.reason === 'blocked word'
   );
   assert.equal(calls.length, 0);
@@ -220,7 +220,7 @@ test('local presend hook can rewrite content', async () => {
   const client = new DotwireHostClient(
     baseConfig({ fetch: fetchImpl, presend: (ctx) => ({ allow: true, content: `${ctx.content} [redacted]` }) })
   );
-  await client.sendAsUser('room1', 'dave', 'raw content');
+  await client.sendAsUser('11111111-1111-4111-8111-111111111111', 'dave', 'raw content');
   assert.equal(sentContent, 'raw content [redacted]');
 });
 
@@ -235,7 +235,7 @@ test('postSend hook failure throws PostSendError carrying the ack; the send alre
     })
   );
   await assert.rejects(
-    () => client.sendAsUser('room1', 'dave', 'hi'),
+    () => client.sendAsUser('11111111-1111-4111-8111-111111111111', 'dave', 'hi'),
     (err: unknown) => err instanceof PostSendError && err.sent.seq === 9
   );
 });
@@ -244,7 +244,7 @@ test('sendSystemMessage uses admin injection and does not run presend/postSend h
   let presendCalls = 0;
   let postSendCalls = 0;
   const { fetchImpl, calls } = createRoutedFetch({
-    'POST /admin/rooms/room1/messages': (call) => {
+    'POST /admin/rooms/11111111-1111-4111-8111-111111111111/messages': (call) => {
       assert.deepEqual(JSON.parse(call.body!), { content: 'hello', senderId: 'system' });
       return jsonRes(202, { seq: 1, time: 't' });
     }
@@ -261,7 +261,7 @@ test('sendSystemMessage uses admin injection and does not run presend/postSend h
       }
     })
   );
-  const ack = await client.sendSystemMessage('room1', 'hello');
+  const ack = await client.sendSystemMessage('11111111-1111-4111-8111-111111111111', 'hello');
   assert.deepEqual(ack, { seq: 1, time: 't' });
   assert.equal(presendCalls, 0);
   assert.equal(postSendCalls, 0);
@@ -272,13 +272,13 @@ test('sendSystemMessage uses admin injection and does not run presend/postSend h
 
 test('sendSystemMessage honours a custom senderId', async () => {
   const { fetchImpl } = createRoutedFetch({
-    'POST /admin/rooms/room1/messages': (call) => {
+    'POST /admin/rooms/11111111-1111-4111-8111-111111111111/messages': (call) => {
       assert.deepEqual(JSON.parse(call.body!), { content: 'hi', senderId: 'bot:1' });
       return jsonRes(202, { seq: 1, time: 't' });
     }
   });
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
-  await client.sendSystemMessage('room1', 'hi', { senderId: 'bot:1' });
+  await client.sendSystemMessage('11111111-1111-4111-8111-111111111111', 'hi', { senderId: 'bot:1' });
 });
 
 // ---------------------------------------------------------------------
@@ -287,25 +287,25 @@ test('sendSystemMessage honours a custom senderId', async () => {
 
 test('getMessages sends afterSeq/beforeSeq/limit as query params, resolving role for the given user', async () => {
   const { fetchImpl } = createRoutedFetch({
-    'GET /rooms/room1/messages': (call) => {
+    'GET /rooms/11111111-1111-4111-8111-111111111111/messages': (call) => {
       const url = new URL(call.url);
       assert.equal(url.searchParams.get('afterSeq'), '10');
       assert.equal(url.searchParams.get('limit'), '20');
-      return jsonRes(200, { roomId: 'room1', messages: [], hasMore: false });
+      return jsonRes(200, { roomId: '11111111-1111-4111-8111-111111111111', messages: [], hasMore: false });
     }
   });
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
-  const page = await client.getMessages('room1', { asUserId: 'dave', afterSeq: 10, limit: 20 });
+  const page = await client.getMessages('11111111-1111-4111-8111-111111111111', { asUserId: 'dave', afterSeq: 10, limit: 20 });
   assert.equal(page.hasMore, false);
 });
 
 test('redactMessage DELETEs as admin', async () => {
   const { fetchImpl, calls } = createRoutedFetch({
-    'DELETE /admin/rooms/room1/messages/7': () =>
-      jsonRes(200, { roomId: 'room1', seq: 7, removedFromHistory: true, removedFromStream: true })
+    'DELETE /admin/rooms/11111111-1111-4111-8111-111111111111/messages/7': () =>
+      jsonRes(200, { roomId: '11111111-1111-4111-8111-111111111111', seq: 7, removedFromHistory: true, removedFromStream: true })
   });
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
-  const result = await client.redactMessage('room1', 7);
+  const result = await client.redactMessage('11111111-1111-4111-8111-111111111111', 7);
   assert.equal(result.removedFromHistory, true);
   assert.equal((decodeJwt(bearerToken(calls[0])) as Record<string, unknown>)['dw:role'], 'admin');
 });
@@ -386,11 +386,11 @@ test('error mapping: status/code -> DotwireApiError.kind', async () => {
 
   for (const c of cases) {
     const { fetchImpl } = createRoutedFetch({
-      'GET /admin/rooms/room1/members': () => jsonRes(c.status, c.body, c.headers)
+      'GET /admin/rooms/11111111-1111-4111-8111-111111111111/members': () => jsonRes(c.status, c.body, c.headers)
     });
     const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
     await assert.rejects(
-      () => client.getRoomMembers('room1'),
+      () => client.getRoomMembers('11111111-1111-4111-8111-111111111111'),
       (err: unknown) => {
         if (!(err instanceof DotwireApiError)) throw new Error(`expected DotwireApiError for status ${c.status}`);
         assert.equal(err.status, c.status);
@@ -408,12 +408,12 @@ test('error mapping: status/code -> DotwireApiError.kind', async () => {
 
 test('handleClientSend parses the request, sends as the given user, and mirrors the ack', async () => {
   const { fetchImpl } = createRoutedFetch({
-    'POST /rooms/room1/messages': () => jsonRes(202, { seq: 3, time: 't' })
+    'POST /rooms/11111111-1111-4111-8111-111111111111/messages': () => jsonRes(202, { seq: 3, time: 't' })
   });
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
   const request = new Request('https://host.test/api/chat/send', {
     method: 'POST',
-    body: JSON.stringify({ roomId: 'room1', content: 'hi' })
+    body: JSON.stringify({ roomId: '11111111-1111-4111-8111-111111111111', content: 'hi' })
   });
   const res = await client.handleClientSend(request, 'dave');
   assert.equal(res.status, 202);
@@ -426,7 +426,7 @@ test('handleClientSend maps a presend rejection to 422', async () => {
   );
   const request = new Request('https://host.test/api/chat/send', {
     method: 'POST',
-    body: JSON.stringify({ roomId: 'room1', content: 'hi' })
+    body: JSON.stringify({ roomId: '11111111-1111-4111-8111-111111111111', content: 'hi' })
   });
   const res = await client.handleClientSend(request, 'dave');
   assert.equal(res.status, 422);
@@ -435,12 +435,12 @@ test('handleClientSend maps a presend rejection to 422', async () => {
 
 test('handleClientSend maps a server DotwireApiError to its status/code', async () => {
   const { fetchImpl } = createRoutedFetch({
-    'POST /rooms/room1/messages': () => jsonRes(429, { error: 'rate_limited' }, { 'retry-after': '1' })
+    'POST /rooms/11111111-1111-4111-8111-111111111111/messages': () => jsonRes(429, { error: 'rate_limited' }, { 'retry-after': '1' })
   });
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
   const request = new Request('https://host.test/api/chat/send', {
     method: 'POST',
-    body: JSON.stringify({ roomId: 'room1', content: 'hi' })
+    body: JSON.stringify({ roomId: '11111111-1111-4111-8111-111111111111', content: 'hi' })
   });
   const res = await client.handleClientSend(request, 'dave');
   assert.equal(res.status, 429);
@@ -450,20 +450,20 @@ test('handleClientSend maps a server DotwireApiError to its status/code', async 
 
 test('handleClientSendBody is the Express-friendly equivalent', async () => {
   const { fetchImpl } = createRoutedFetch({
-    'POST /rooms/room1/messages': () => jsonRes(202, { seq: 1, time: 't' })
+    'POST /rooms/11111111-1111-4111-8111-111111111111/messages': () => jsonRes(202, { seq: 1, time: 't' })
   });
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
-  const result = await client.handleClientSendBody({ roomId: 'room1', content: 'hi' }, 'dave');
+  const result = await client.handleClientSendBody({ roomId: '11111111-1111-4111-8111-111111111111', content: 'hi' }, 'dave');
   assert.equal(result.status, 202);
   assert.deepEqual(result.body, { seq: 1, time: 't' });
 });
 
 test('handlePresendWebhook verifies the signature and runs the configured presend hook', async () => {
   const client = new DotwireHostClient(
-    baseConfig({ webhookSecret: 'shh', presend: (ctx) => ({ allow: true, content: `${ctx.content}!` }) })
+    baseConfig({ webhookSecret: 'shh', allowLegacyWebhookSignatures: true, presend: (ctx) => ({ allow: true, content: `${ctx.content}!` }) })
   );
 
-  const bodyText = JSON.stringify({ roomId: 'room1', senderId: 'alice', content: 'hi', time: 't', source: 'member' });
+  const bodyText = JSON.stringify({ roomId: '11111111-1111-4111-8111-111111111111', senderId: 'alice', content: 'hi', time: 't', source: 'member' });
   const { createHmac } = await import('node:crypto');
   const sig = `sha256=${createHmac('sha256', 'shh').update(bodyText).digest('hex')}`;
 
@@ -485,17 +485,17 @@ test('handlePresendWebhook verifies the signature and runs the configured presen
   assert.equal(badRes.status, 401);
 });
 
-test('handlePresendWebhook with no secret configured skips signature verification', async () => {
-  const client = new DotwireHostClient(baseConfig({ presend: () => ({ allow: false, rejectionReason: 'blocked' }) }));
-  const bodyText = JSON.stringify({ roomId: 'room1', senderId: 'alice', content: 'hi', time: 't', source: 'member' });
+test('handlePresendWebhook with allowUnsignedWebhooks skips signature verification', async () => {
+  const client = new DotwireHostClient(baseConfig({ allowUnsignedWebhooks: true, presend: () => ({ allow: false, rejectionReason: 'blocked' }) }));
+  const bodyText = JSON.stringify({ roomId: '11111111-1111-4111-8111-111111111111', senderId: 'alice', content: 'hi', time: 't', source: 'member' });
   const res = await client.handlePresendWebhook(new Request('https://host.test/webhooks/presend', { method: 'POST', body: bodyText }));
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { allow: false, reason: 'blocked' });
 });
 
 test('handlePresendWebhook defaults to allow when no presend hook is configured', async () => {
-  const client = new DotwireHostClient(baseConfig());
-  const bodyText = JSON.stringify({ roomId: 'room1', senderId: 'alice', content: 'hi', time: 't', source: 'member' });
+  const client = new DotwireHostClient(baseConfig({ allowUnsignedWebhooks: true }));
+  const bodyText = JSON.stringify({ roomId: '11111111-1111-4111-8111-111111111111', senderId: 'alice', content: 'hi', time: 't', source: 'member' });
   const res = await client.handlePresendWebhook(new Request('https://host.test/webhooks/presend', { method: 'POST', body: bodyText }));
   const body = (await res.json()) as { allow: boolean };
   assert.equal(body.allow, true);
@@ -505,28 +505,29 @@ test('handlePostSendWebhook runs the configured postSend hook and always answers
   let seen: unknown;
   const client = new DotwireHostClient(
     baseConfig({
+      allowUnsignedWebhooks: true,
       postSend: (ctx) => {
         seen = ctx;
       }
     })
   );
-  const bodyText = JSON.stringify({ roomId: 'room1', seq: 9, senderId: 'alice', content: 'hi', time: 't', source: 'member' });
+  const bodyText = JSON.stringify({ roomId: '11111111-1111-4111-8111-111111111111', seq: 9, senderId: 'alice', content: 'hi', time: 't', source: 'member' });
   const res = await client.handlePostSendWebhook(new Request('https://host.test/webhooks/postsend', { method: 'POST', body: bodyText }));
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), {});
-  assert.deepEqual(seen, { roomId: 'room1', seq: 9, senderUserId: 'alice', content: 'hi', time: 't' });
+  assert.deepEqual(seen, { roomId: '11111111-1111-4111-8111-111111111111', seq: 9, senderUserId: 'alice', content: 'hi', time: 't' });
 });
 
 test('handlePostSendWebhookBody rejects a bad signature with 401', async () => {
   const client = new DotwireHostClient(baseConfig({ webhookSecret: 'shh' }));
-  const body = { roomId: 'room1', seq: 1, senderId: 'a', content: 'hi', time: 't', source: 'member' };
+  const body = { roomId: '11111111-1111-4111-8111-111111111111', seq: 1, senderId: 'a', content: 'hi', time: 't', source: 'member' };
   const result = await client.handlePostSendWebhookBody(body, 'sha256=nope');
   assert.equal(result.status, 401);
 });
 
 test('handleClientSend returns the ack (202) when only the local postSend hook fails', async () => {
   const { fetchImpl } = createRoutedFetch({
-    'POST /rooms/room1/messages': () => jsonRes(202, { seq: 9, time: 't' })
+    'POST /rooms/11111111-1111-4111-8111-111111111111/messages': () => jsonRes(202, { seq: 9, time: 't' })
   });
   const client = new DotwireHostClient(
     baseConfig({
@@ -536,7 +537,7 @@ test('handleClientSend returns the ack (202) when only the local postSend hook f
       }
     })
   );
-  const result = await client.handleClientSendBody({ roomId: 'room1', content: 'hi' }, 'dave');
+  const result = await client.handleClientSendBody({ roomId: '11111111-1111-4111-8111-111111111111', content: 'hi' }, 'dave');
   assert.equal(result.status, 202);
   assert.deepEqual(result.body, { seq: 9, time: 't' });
 });

@@ -42,6 +42,18 @@ public class DotwireHostOptions
     /// </summary>
     public string? WebhookSecret { get; init; }
 
+    public bool AllowUnsignedWebhooks { get; init; }
+
+    public bool AllowLegacyWebhookSignatures { get; init; }
+
+    public TimeSpan WebhookTimestampTolerance { get; init; } = TimeSpan.FromMinutes(5);
+
+    public int MaxWebhookBodyBytes { get; init; } = 1024 * 1024;
+
     /// <summary>How long a resolved (user -> role) lookup is cached before <see cref="DotwireHostClient"/> re-resolves it.</summary>
     public TimeSpan RoleCacheTtl { get; init; } = TimeSpan.FromMinutes(5);
+
+    public override string ToString() =>
+        $"DotwireHostOptions {{ BaseUrl = {BaseUrl}, Issuer = {Issuer}, Audience = {Audience}, KeyId = {KeyId}, " +
+        $"PrivateKeyPem = [redacted], WebhookSecret = {(string.IsNullOrEmpty(WebhookSecret) ? "[unset]" : "[redacted]")} }}";
 }

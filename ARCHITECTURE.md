@@ -77,13 +77,22 @@ each active only when its URL is configured (`Dotwire:Webhooks:Presend:Url` /
   the send or rewrite content.
 - **Postsend** (`Dotwire:Webhooks:PostSend`) is fire-and-forget from the send path's
   perspective — the message is already accepted and has a `(roomId, seq)` — queued
-  (`QueueCapacity`, default 10,000; full queue drops the newest item with a warning rather than
-  blocking a send) and delivered with retries (`MaxAttempts`, default 3) and its own timeout
+  (`QueueCapacity`, default 1,000, plus `MaxQueueBytes`, default 64 MiB of queued content; a
+  full queue drops the newest item with a warning rather than blocking a send) and delivered with retries (`MaxAttempts`, default 3) and its own timeout
   (`TimeoutMs`, default 2000). It never blocks or affects the send path itself.
 
-Both call-outs carry `X-Dotwire-Signature: sha256=<hex HMAC-SHA256 of the raw body>` when
-`Dotwire:Webhooks:Secret` is configured, so a host can verify the call genuinely came from
-dotwire before acting on it. `IncludeAdminSends` (both hooks, default `false`) controls whether
+When `Dotwire:Webhooks:Secret` is configured, both call-outs carry `X-Dotwire-Timestamp`
+(unix seconds), `X-Dotwire-Signature-V2: sha256=<hex HMAC-SHA256 of "<timestamp>.<raw body>">`
+and, for older hosts, the legacy `X-Dotwire-Signature: sha256=<hex HMAC-SHA256 of the raw
+body>`. The host SDKs verify the timestamped signature and reject calls more than five minutes
+old, so a captured webhook call cannot be replayed later; accepting the legacy body-only
+signature is an explicit opt-in (`AllowLegacyWebhookSignatures` / `allowLegacyWebhookSignatures`).
+The SDK handlers refuse to run without a secret unless `AllowUnsignedWebhooks` /
+`allowUnsignedWebhooks` is set, because an unsigned postsend handler wired to moderation lets
+anyone trigger redaction of real messages. Webhook URLs must be `https` (or a loopback host)
+unless `Dotwire:Webhooks:AllowInsecureUrls=true`; dotwire refuses to start otherwise, and logs
+a warning when URLs are configured without a secret. Presend responses are capped at 1 MiB and
+the SDK handlers cap incoming bodies at 1 MiB (`MaxWebhookBodyBytes` / `maxWebhookBodyBytes`). `IncludeAdminSends` (both hooks, default `false`) controls whether
 admin message injection (see AUTH.md, "Message injection is audited...") also runs through
 presend/postsend — off by default, since injected messages are already host-authored and
 audited by construction. Both host SDKs (`Dotwire.Host`, `@dotwire/host`) ship matching
@@ -135,6 +144,18 @@ quiet. Revocation propagates across a multi-node deployment the same way regular
 over the NATS-core backplane — so a revoked member is dropped from every node they happen to
 be connected to, not just the node that served the admin request.
 
+NATS core is at-most-once, so the broadcast alone is not the guarantee. The admin endpoints
+retry the broadcast (three attempts, two seconds each); `Subscribe` and the SSE endpoint
+re-check membership after registering the connection, closing the race where a revocation
+lands between the check and the registration; and every gateway runs a membership sweep
+(`Dotwire:MembershipSweepSeconds`, default 60, `0` disables) that re-validates every live
+subscription against `room_members` and `user_roles` in one batched, `room_id`-keyed query and
+drops the ones that no longer match. Changing a user's role through `PUT /admin/users/{id}/role`
+also revokes their live subscriptions, since their outstanding tokens now carry a stale role.
+The worst-case window for a lost broadcast is therefore one sweep interval, not the token TTL.
+If the NATS fanout loop for a room dies unexpectedly, the node drops that room's local
+subscribers so they reconnect and gap-fill instead of silently going deaf.
+
 ## Data layout
 
 Storage is PostgreSQL with the Timescale extension. The `messages` table is a hypertable keyed
@@ -142,7 +163,10 @@ on `(room_id, time)`, with the JetStream `seq` stored alongside each row so hist
 correlated back to their position in the ordering token from the write path. Two Npgsql data
 sources are split in code from day one — a read pool and a write pool — and history reads are
 routed to the read pool; this split exists from the start specifically so it never has to be
-retrofitted under load. **Shard-key discipline:** every hot-path query includes `room_id`.
+retrofitted under load. Authorization lookups (`user_roles`, `room_members`) are reads and go
+through the read pool too, behind one `IAccessStore` seam. When the read pool points at an
+asynchronous replica, a demotion or membership removal takes effect after replica lag; deploy
+the read pool against the primary or a synchronous replica if that window matters. **Shard-key discipline:** every hot-path query includes `room_id`.
 Sharding itself is out of scope for v1 (see PRODUCT.md's out-of-scope list), but the schema and
 query discipline are shard-*ready* by construction — nothing is built that would foreclose
 sharding later.
@@ -205,6 +229,23 @@ rows to cold storage on the same cadence as other compliance backups) gives an a
 trusted, independently-held anchor to verify against, without depending on the live database
 being uncompromised.
 
+**Integrity hardening.** `audit_log.prev_hash` is unique (migration 0009), so two writers that
+lost the advisory lock can never fork the chain silently: the second insert fails. A
+`BEFORE INSERT` trigger on `audit_checkpoints` rejects checkpoints dated in the future or whose
+`(last_id, hash)` does not match the `audit_log` row, and `/audit/verify` re-checks the anchor
+row against the checkpoint hash before trusting it (a mismatch reports `ok: false` at the
+anchor). Checkpoints dated after today are ignored by both the writer and the verifier. The
+writer also records the JetStream publish time in the unhashed `stream_time` column next to
+the node-stamped `event_time`, and turns an unparseable stream entry into a hash-chained
+`audit.malformed` placeholder instead of skipping it, so `stream_seq` has no silent gaps.
+Admin mutations publish their audit event before committing the database change: a failed
+commit can leave an audit event for a change that did not happen (a retry then succeeds), which
+is the accepted direction — a duplicate or orphaned event is detectable, a missing one is not.
+The chain hash is unkeyed SHA-256: anyone with write access to the database can recompute it,
+so the real tamper anchor is exporting `audit_checkpoints` to storage the database cannot
+write. Default verification starts at the latest checkpoint; run `?full=true` (single-flight
+per node) to re-check rows below it.
+
 **Single-writer via Postgres advisory lock.** Exactly one process may run the audit writer at
 a time — required for the strict total order hash-chaining depends on (see WHY above) — and
 that exclusivity is enforced with a Postgres session-level advisory lock
@@ -255,12 +296,22 @@ there is no excuse to relax them under schedule pressure.
   (roughly one delta every few seconds) rather than emitted per raw transition; typing
   indicators are throttled by the same convention. WHY: presence event volume runs 10–100x
   message volume at scale, so leaving it unthrottled would dwarf actual message traffic.
-- **Per-connection token-bucket rate limiting**, enforced in-process. WHY: bounds worst-case
-  per-connection cost without a dependency on an external rate-limiting service.
+- **Per-user token-bucket rate limiting**, enforced in-process. WHY: bounds worst-case
+  per-user cost without a dependency on an external rate-limiting service. The hub bucket is
+  keyed by `sub`, so opening more sockets does not buy more Subscribe calls, and each node caps
+  concurrent hub plus SSE connections per user (`Dotwire:MaxConnectionsPerUser`, default 100;
+  over the cap a hub connection is refused and SSE answers `429`). Typing is throttled per
+  `(user, room)` across connections, and when a connection's send queue is more than half full
+  typing and presence events are shed so only durable messages can trigger
+  disconnect-the-laggard.
 - **Per-route token-bucket rate limits** (`Dotwire:RateLimits`, on by default), keyed per user
-  (`sub`) for the `send`, `read` (history, SSE connect, `/audit`), and `admin` (every `/admin`
-  route, including DSAR and retention) buckets, and per connection for the `hub` bucket
-  (Subscribe/Unsubscribe — typing keeps its own separate cooldown, unaffected by this bucket).
+  (`sub`) for the `send`, `read` (history, SSE connect, hub connect, `/audit`), `admin` (every
+  `/admin` route, including DSAR and retention) and `hub` (Subscribe/Unsubscribe — typing keeps
+  its own separate cooldown, unaffected by this bucket) buckets. Requests without a valid token
+  share a per-client-IP `Unauthenticated` bucket that runs after authentication and before
+  authorization, so bad-token floods are limited too (behind a proxy every client shares the
+  proxy's IP; size that bucket accordingly). Request bodies are capped at
+  `Dotwire:MaxRequestBodyBytes` (default 256 KiB) before any parsing.
   Each is a standard ASP.NET Core token-bucket limiter (`PermitLimit`/`TokensPerPeriod`/
   `PeriodSeconds`, independently tunable per bucket). WHY: in-process limiting needs no new
   infrastructure component (PRODUCT.md's out-of-scope list rules out Redis) and is enough at
@@ -270,6 +321,20 @@ there is no excuse to relax them under schedule pressure.
   for the traffic this system targets.
 
 **Deployment posture (documented defaults, not code):**
+- **TLS is mandatory in production.** The bundled compose files and `haproxy.cfg` speak plain
+  HTTP on loopback-bound ports for local use only; terminate TLS in front of them (or add a
+  `bind ... ssl crt ...` line plus HSTS to HAProxy). Browsers cannot set headers on a WebSocket
+  upgrade, so the SignalR client sends its JWT as `?access_token=`; dotwire accepts a query token
+  only on `GET /hub/rooms` and `GET /rooms/{uuid}/events`, never when an `Authorization` header is
+  present, and the bundled HAProxy rejects `access_token` on every other path. Keep token TTLs
+  short and keep URL logging off (or scrubbed) at every proxy.
+- **CORS is an allowlist.** Set `Cors:AllowedOrigins` to the host app's origins; with no list
+  configured dotwire allows any origin but never sends `Access-Control-Allow-Credentials`
+  (authentication is bearer-only). Set `AllowedHosts` to the real host names as well.
+- **Gateways hold no owner credentials.** Only the migrating node (or a one-shot migrator job)
+  gets `ConnectionStrings:PostgresMigrator`; runtime-only nodes connect as `dotwire_app`.
+  Applied migrations are checksummed in `schema_migrations`, and startup fails if an applied
+  script was edited.
 - **Server GC with DATAS**, plus raised file-descriptor limits and socket backlog, documented
   in deployment docs and set in the compose file. WHY: connection-dense workloads need GC and
   OS limits tuned away from their interactive-workload defaults.
@@ -332,6 +397,11 @@ fanout SignalR uses, so ordering and gap-fill semantics match the SignalR path e
 SSE consumer is not a second, divergent notion of "what happened in this room." Each connection
 gets a bounded channel (`Dotwire:Sse:BufferSize`, default 256); a laggard consumer that fills
 it is disconnected, mirroring the bounded-queue/disconnect-the-laggard fanout discipline below.
+A resume replays at most `Dotwire:Sse:MaxReplayRows` (default 1000) messages per connection;
+past that the server ends the stream and the client resumes with `Last-Event-ID`, so each
+replay chunk is paid for by a rate-limited request. Rows that cannot be decrypted are skipped
+without stalling the replay cursor. The JetStream tail top-up reads at most twice the page size
+per request.
 Periodic keep-alive comments (`Dotwire:Sse:KeepAliveSeconds`, default 15) keep idle connections
 from being reaped by intermediate proxies. Runs on the Gateway node role; toggled off entirely
 via `Dotwire:Sse:Enabled` for deployments that don't want the surface.
@@ -353,6 +423,15 @@ messages, and on history reads for stored ones.
 Ciphertext envelopes are **key-id-tagged**: rotation means introducing a new key id for new
 messages while old keys are retained to decrypt old messages — there is no mass re-encryption
 step, ever, on rotation.
+
+**Envelope v1.** New messages use `0x01 ‖ salt(32) ‖ ciphertext ‖ tag(16)`. A per-message
+AES-256 key and nonce are derived with HKDF-SHA256 from the configured key and the random salt,
+so the random-nonce usage limit of AES-GCM never applies to the configured key, and the
+associated data binds the ciphertext to `room_id`, `key_id` and `sender_id`: a row copied into
+another room or attributed to another sender fails authentication instead of decrypting.
+Envelopes written before v1 (`nonce(12) ‖ ciphertext ‖ tag(16)`, no associated data) still
+decrypt while `Dotwire:Encryption:AllowLegacyEnvelopes` is `true` (the default); set it to
+`false` once every legacy row has aged out of both stores to make relocation impossible.
 
 **Key source:** keys come from configuration (`Dotwire:Encryption:Keys:<id>`, base64, exactly
 32 bytes), supplied through an environment variable or an external secret store.
@@ -412,4 +491,7 @@ an operator loses track of which one is authoritative.
 access mechanism: given a `sub`, it exports that user's messages, room memberships, and role
 and audit-reference metadata across every room they touch. Message content is decrypted at
 export time — the same delivery-edge decryption used for history reads (see "Read path"
-above) — so the export is human-readable rather than a dump of ciphertext.
+above) — so the export is human-readable rather than a dump of ciphertext. By design the export
+is not gated by `room_members`: it is an admin compliance operation over everything the
+subject sent, and it is audited (`dsar.exported`) before the first byte is written. Admin and
+audit responses carry `Cache-Control: no-store`.

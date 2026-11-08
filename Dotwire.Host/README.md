@@ -171,19 +171,26 @@ app.MapPost("/my-app/rooms/{roomId}/send", async (HttpRequest req, string userId
 
 If instead you've configured dotwire's own `Dotwire:Webhooks:Presend:Url`/`PostSend:Url` to
 point at your host, wire the same `Presend`/`PostSend` delegates through the matching
-handlers - signature verification (`X-Dotwire-Signature: sha256=<hex>`, HMAC-SHA256 of the
-raw body against `DotwireHostOptions.WebhookSecret`) is handled for you:
+handlers. `DotwireHostOptions.WebhookSecret` (the same value as the server's
+`Dotwire:Webhooks:Secret`) is required: the handlers throw without it unless you set
+`AllowUnsignedWebhooks = true`. They verify `X-Dotwire-Signature-V2` (HMAC-SHA256 of
+`"<X-Dotwire-Timestamp>.<raw body>"`), reject calls older than `WebhookTimestampTolerance`
+(default five minutes) and bodies larger than `MaxWebhookBodyBytes` (default 1 MiB, `413`).
+The body-only `X-Dotwire-Signature` is accepted only with `AllowLegacyWebhookSignatures = true`.
 
 ```csharp
+static WebhookHeaders Headers(HttpRequest req) => new(
+    req.Headers["X-Dotwire-Signature"], req.Headers["X-Dotwire-Timestamp"], req.Headers["X-Dotwire-Signature-V2"]);
+
 app.MapPost("/webhooks/presend", async (HttpRequest req) =>
 {
-    var result = await client.HandlePresendWebhookAsync(req.Body, req.Headers["X-Dotwire-Signature"]);
+    var result = await client.HandlePresendWebhookAsync(req.Body, Headers(req));
     return Results.Text(result.Json, "application/json", statusCode: result.StatusCode);
 });
 
 app.MapPost("/webhooks/postsend", async (HttpRequest req) =>
 {
-    var result = await client.HandlePostSendWebhookAsync(req.Body, req.Headers["X-Dotwire-Signature"]);
+    var result = await client.HandlePostSendWebhookAsync(req.Body, Headers(req));
     return Results.Text(result.Json, "application/json", statusCode: result.StatusCode);
 });
 ```

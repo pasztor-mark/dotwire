@@ -3,7 +3,10 @@ namespace Dotwire.Host;
 public sealed partial class DotwireHostClient
 {
     /// <inheritdoc />
-    public async Task<SendMessageResult> SendAsUserAsync(Guid roomId, string userId, string content, CancellationToken ct = default)
+    public Task<SendMessageResult> SendAsUserAsync(Guid roomId, string userId, string content, CancellationToken ct = default) =>
+        SendAsUserAsync(roomId, userId, content, null, ct);
+
+    public async Task<SendMessageResult> SendAsUserAsync(Guid roomId, string userId, string content, string? idempotencyKey, CancellationToken ct = default)
     {
         if (Presend is not null)
         {
@@ -19,7 +22,7 @@ public sealed partial class DotwireHostClient
         {
             var token = MintToken(userId, role, ttl: _options.DefaultTokenTtl);
             var body = JsonBody(new SendMessageRequestDto(finalContent), DotwireHostJsonContext.Default.SendMessageRequestDto);
-            return SendAsync(HttpMethod.Post, $"/rooms/{roomId}/messages", token, DotwireHostJsonContext.Default.SendMessageResult, innerCt, body);
+            return SendAsync(HttpMethod.Post, $"/rooms/{roomId}/messages", token, DotwireHostJsonContext.Default.SendMessageResult, innerCt, body, idempotencyKey);
         }, ct);
 
         if (PostSend is not null)

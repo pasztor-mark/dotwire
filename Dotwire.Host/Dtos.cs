@@ -104,9 +104,11 @@ public sealed record ClientSendResult(int StatusCode, string Json, SendMessageRe
 /// <summary>The exact HTTP response for a presend/postsend webhook call routed through the host.</summary>
 public sealed record WebhookResult(int StatusCode, string Json);
 
+public sealed record WebhookHeaders(string? Signature, string? Timestamp = null, string? SignatureV2 = null);
+
 // ---- Wire DTOs (server shapes; internal, not part of the public surface) ----
 
-internal sealed record ClientSendRequest(Guid RoomId, string Content);
+internal sealed record ClientSendRequest(Guid RoomId, string Content, string? IdempotencyKey = null);
 
 internal sealed record ApiErrorBody(string Error, string? Reason = null);
 

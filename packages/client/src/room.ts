@@ -8,6 +8,7 @@ import {
   type PresenceDelta,
   type RoomMessage,
   type SendAck,
+  type SendMessageOptions,
   type SubscribeOptions,
   type TypingNotification
 } from './types.js';
@@ -46,8 +47,8 @@ export class DotwireRoomHandle {
     return this.client.unsubscribe(this.roomId);
   }
 
-  public async sendMessage(content: string, timeoutMs?: number): Promise<SendAck> {
-    return this.client.sendMessage(this.roomId, content, timeoutMs);
+  public async sendMessage(content: string, timeoutMs?: number, options?: SendMessageOptions): Promise<SendAck> {
+    return this.client.sendMessage(this.roomId, content, timeoutMs, options);
   }
 
   public async getHistory(options: GetHistoryOptions = {}): Promise<HistoryPage> {

@@ -127,7 +127,7 @@ public class SigningKeyRingTests
     }
 
     [Fact]
-    public void ResolvesJwksKeyByKidAfterFetch()
+    public async Task ResolvesJwksKeyByKidAfterRefresh()
     {
         var jwksRsa = RSA.Create(2048);
         const string jwksKid = "jwks-key-1";
@@ -136,6 +136,7 @@ public class SigningKeyRingTests
         options.JwksUrl = "https://issuer.example/.well-known/jwks.json";
 
         var ring = new SigningKeyRing(options, new HttpClient(handler));
+        await ring.RefreshAsync();
         var keys = ring.Resolve(jwksKid).ToList();
 
         Assert.Single(keys);
@@ -144,7 +145,7 @@ public class SigningKeyRingTests
     }
 
     [Fact]
-    public void UnknownKidWithinFloorDoesNotRefetch()
+    public async Task UnknownKidWithinFloorDoesNotRefetch()
     {
         var jwksRsa = RSA.Create(2048);
         const string jwksKid = "jwks-key-1";
@@ -153,13 +154,8 @@ public class SigningKeyRingTests
         options.JwksUrl = "https://issuer.example/.well-known/jwks.json";
 
         var ring = new SigningKeyRing(options, new HttpClient(handler));
+        await ring.RefreshAsync();
 
-        // First call: cache is empty/stale, so it fetches once regardless of kid.
-        ring.Resolve(jwksKid).ToList();
-        Assert.Equal(1, handler.CallCount);
-
-        // Second call, immediately after, with an unrecognized kid: still inside the
-        // 30s unknown-kid floor (real elapsed time here is milliseconds), so no refetch.
         var keys = ring.Resolve("some-other-kid").ToList();
 
         Assert.Empty(keys);
@@ -167,7 +163,7 @@ public class SigningKeyRingTests
     }
 
     [Fact]
-    public void FetchFailureKeepsPreviousKeysAndDoesNotThrow()
+    public async Task FetchFailureKeepsPreviousKeysAndDoesNotThrow()
     {
         var jwksRsa = RSA.Create(2048);
         const string jwksKid = "jwks-key-1";
@@ -183,22 +179,158 @@ public class SigningKeyRingTests
         options.JwksUrl = "https://issuer.example/.well-known/jwks.json";
 
         var ring = new SigningKeyRing(options, new HttpClient(handler));
+        await ring.RefreshAsync();
+        Assert.Single(ring.Resolve(jwksKid));
 
-        // First call succeeds and populates the cache.
-        var firstKeys = ring.Resolve(jwksKid).ToList();
-        Assert.Single(firstKeys);
-
-        // Force the next call to actually re-hit the (now-failing) handler instead of
-        // being absorbed by the unknown-kid/interval floors.
-        RewindLastFetch(ring);
-
-        var exception = Record.Exception(() => ring.Resolve(jwksKid).ToList());
+        var exception = await Record.ExceptionAsync(ring.RefreshAsync);
 
         Assert.Null(exception);
         Assert.Equal(2, handler.CallCount);
+        Assert.Single(ring.Resolve(jwksKid));
+    }
 
-        var keysAfterFailure = ring.Resolve(jwksKid).ToList();
-        Assert.Single(keysAfterFailure);
-        Assert.Equal(jwksKid, keysAfterFailure[0].KeyId);
+    [Fact]
+    public async Task UnknownKidNeverBlocksTheCaller()
+    {
+        var jwksRsa = RSA.Create(2048);
+        var release = new TaskCompletionSource();
+        var handler = new SlowJwksHandler(release.Task, () => JwksResponse(jwksRsa, "late-kid"));
+        var options = ValidOptions();
+        options.JwksUrl = "https://issuer.example/.well-known/jwks.json";
+        var ring = new SigningKeyRing(options, new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) });
+
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var keys = ring.Resolve("late-kid").ToList();
+        elapsed.Stop();
+
+        Assert.Empty(keys);
+        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(1), $"Resolve blocked for {elapsed.Elapsed}");
+
+        release.SetResult();
+        await ring.RefreshAsync();
+        Assert.Single(ring.Resolve("late-kid"));
+    }
+
+    [Theory]
+    [InlineData("""{"keys":[]}""")]
+    [InlineData("not json")]
+    public async Task EmptyOrInvalidJwksKeepsPreviousKeys(string body)
+    {
+        var jwksRsa = RSA.Create(2048);
+        var calls = 0;
+        var handler = new FakeJwksHandler(() => ++calls == 1
+            ? JwksResponse(jwksRsa, "k")
+            : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) });
+        var options = ValidOptions();
+        options.JwksUrl = "https://issuer.example/jwks";
+        var ring = new SigningKeyRing(options, new HttpClient(handler));
+
+        await ring.RefreshAsync();
+        await ring.RefreshAsync();
+
+        Assert.Equal(2, calls);
+        Assert.Single(ring.Resolve("k"));
+    }
+
+    [Fact]
+    public async Task JwksWithOnlyWeakKeysKeepsPreviousKeys()
+    {
+        var strong = RSA.Create(2048);
+        var weak = RSA.Create(1024);
+        var calls = 0;
+        var handler = new FakeJwksHandler(() => ++calls == 1 ? JwksResponse(strong, "k") : JwksResponse(weak, "k"));
+        var options = ValidOptions();
+        options.JwksUrl = "https://issuer.example/jwks";
+        var ring = new SigningKeyRing(options, new HttpClient(handler));
+
+        await ring.RefreshAsync();
+        await ring.RefreshAsync();
+
+        var key = Assert.Single(ring.Resolve("k"));
+        Assert.Equal(2048, key.KeySize);
+    }
+
+    [Fact]
+    public async Task OversizedJwksIsRejected()
+    {
+        var calls = 0;
+        var handler = new FakeJwksHandler(() =>
+        {
+            calls++;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(new string(' ', SigningKeyRing.MaxJwksBytes + 1) + """{"keys":[]}"""),
+            };
+        });
+        var options = ValidOptions();
+        options.JwksUrl = "https://issuer.example/jwks";
+        var ring = new SigningKeyRing(options, new HttpClient(handler));
+
+        await ring.RefreshAsync();
+
+        Assert.Equal(1, calls);
+        Assert.Empty(ring.Resolve("k"));
+    }
+
+    [Theory]
+    [InlineData("http://issuer.example/jwks", false, true)]
+    [InlineData("http://issuer.example/jwks", true, false)]
+    [InlineData("http://localhost:5000/jwks", false, false)]
+    [InlineData("http://127.0.0.1:5000/jwks", false, false)]
+    [InlineData("https://issuer.example/jwks", false, false)]
+    [InlineData("ftp://issuer.example/jwks", false, true)]
+    public void JwksUrlMustBeHttpsUnlessLoopbackOrOverridden(string url, bool allowInsecure, bool throws)
+    {
+        var options = ValidOptions();
+        options.JwksUrl = url;
+        options.AllowInsecureJwksUrl = allowInsecure;
+
+        var exception = Record.Exception(() => new SigningKeyRing(options));
+
+        Assert.Equal(throws, exception is InvalidOperationException);
+    }
+
+    [Fact]
+    public void WeakInlineKeyIsRejected()
+    {
+        var options = ValidOptions();
+        options.Keys["weak"] = RSA.Create(1024).ExportSubjectPublicKeyInfoPem();
+
+        Assert.Throws<InvalidOperationException>(() => new SigningKeyRing(options));
+    }
+
+    [Fact]
+    public void PrivateKeyPemIsRejected()
+    {
+        var options = ValidOptions();
+        options.Keys["oops"] = RSA.Create(2048).ExportPkcs8PrivateKeyPem();
+
+        Assert.Throws<InvalidOperationException>(() => new SigningKeyRing(options));
+    }
+
+    [Fact]
+    public async Task InlineKeyShadowsJwksKeyWithTheSameKid()
+    {
+        var inlineRsa = RSA.Create(2048);
+        var jwksRsa = RSA.Create(2048);
+        var handler = new FakeJwksHandler(() => JwksResponse(jwksRsa, "shared"));
+        var options = ValidOptions();
+        options.Keys["shared"] = inlineRsa.ExportSubjectPublicKeyInfoPem();
+        options.JwksUrl = "https://issuer.example/jwks";
+        var ring = new SigningKeyRing(options, new HttpClient(handler));
+        await ring.RefreshAsync();
+
+        var key = Assert.IsType<RsaSecurityKey>(Assert.Single(ring.Resolve("shared")));
+
+        Assert.Equal(inlineRsa.ExportParameters(false).Modulus, key.Rsa.ExportParameters(false).Modulus);
+    }
+
+    private sealed class SlowJwksHandler(Task gate, Func<HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await gate.WaitAsync(cancellationToken);
+            return respond();
+        }
     }
 }

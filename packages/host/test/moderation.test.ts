@@ -6,7 +6,7 @@ import { DotwireApiError } from '../src/errors.js';
 import { baseConfig, createFakeFetch, createRoutedFetch, jsonRes } from './helpers.js';
 
 function pending(seq: number): PendingModeration {
-  return { roomId: 'r1', seq, time: 't', senderUserId: 'u', content: `msg ${seq}` };
+  return { roomId: '22222222-2222-4222-8222-222222222222', seq, time: 't', senderUserId: 'u', content: `msg ${seq}` };
 }
 
 test('ModerationQueue: dequeue blocks until an item is enqueued, then delivers it', async () => {
@@ -41,8 +41,8 @@ test('ModerationQueue: enqueue applies back-pressure at capacity', async () => {
 
 test('ModerationQueue.postSendHook enqueues from a PostSendContext', async () => {
   const queue = new ModerationQueue(10);
-  await queue.postSendHook({ roomId: 'r1', seq: 3, time: 't', content: 'hi', senderUserId: 'u1' });
-  assert.deepEqual(await queue.dequeue(), { roomId: 'r1', seq: 3, time: 't', senderUserId: 'u1', content: 'hi' });
+  await queue.postSendHook({ roomId: '22222222-2222-4222-8222-222222222222', seq: 3, time: 't', content: 'hi', senderUserId: 'u1' });
+  assert.deepEqual(await queue.dequeue(), { roomId: '22222222-2222-4222-8222-222222222222', seq: 3, time: 't', senderUserId: 'u1', content: 'hi' });
 });
 
 test('BatchModerationWorker flushes a batch once maxBatchSize is reached, without waiting for the delay', async () => {
@@ -123,22 +123,22 @@ test('BatchModerationWorker.redactWith retries once on 429 honouring retryAfterM
   const { fetchImpl } = createFakeFetch(() => {
     calls++;
     if (calls === 1) return jsonRes(429, { error: 'rate_limited' }, { 'retry-after': '0' });
-    return jsonRes(200, { roomId: 'r1', seq: 5, removedFromHistory: true, removedFromStream: true });
+    return jsonRes(200, { roomId: '22222222-2222-4222-8222-222222222222', seq: 5, removedFromHistory: true, removedFromStream: true });
   });
   const host = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
   const redact = BatchModerationWorker.redactWith(host);
-  await redact({ roomId: 'r1', seq: 5, flagged: true });
+  await redact({ roomId: '22222222-2222-4222-8222-222222222222', seq: 5, flagged: true });
   assert.equal(calls, 2);
 });
 
 test('BatchModerationWorker.redactWith gives up and rethrows after repeated 429s', async () => {
   const { fetchImpl, calls } = createRoutedFetch({
-    'DELETE /admin/rooms/r1/messages/5': () => jsonRes(429, { error: 'rate_limited' }, { 'retry-after': '0' })
+    'DELETE /admin/rooms/22222222-2222-4222-8222-222222222222/messages/5': () => jsonRes(429, { error: 'rate_limited' }, { 'retry-after': '0' })
   });
   const host = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
   const redact = BatchModerationWorker.redactWith(host);
   await assert.rejects(
-    () => redact({ roomId: 'r1', seq: 5, flagged: true }),
+    () => redact({ roomId: '22222222-2222-4222-8222-222222222222', seq: 5, flagged: true }),
     (err: unknown) => err instanceof DotwireApiError && err.status === 429
   );
   assert.equal(calls.length, 3);

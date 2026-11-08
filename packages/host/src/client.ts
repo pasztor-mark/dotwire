@@ -21,6 +21,7 @@ import type {
   RoomEvent,
   RoomHistoryResponse,
   RoomMembersResponse,
+  SendAsUserOptions,
   SendMessageResult,
   SendSystemMessageOptions,
   StreamRoomEventsOptions,
@@ -28,7 +29,8 @@ import type {
   UserExport,
   UserRoleResponse,
   UserRoomsResponse,
-  WebhookResult
+  WebhookResult,
+  WebhookSignatureHeaders
 } from './types.js';
 
 const DEFAULT_ADMIN_USER_ID = 'host-admin';
@@ -40,6 +42,54 @@ const DEFAULT_ROLE_CACHE_TTL_MS = 300_000;
 
 /** Re-mints a cached admin/auditor token when less than this much life remains. */
 const TOKEN_REFRESH_MARGIN_SECONDS = 60;
+const DEFAULT_WEBHOOK_TOLERANCE_SECONDS = 300;
+const DEFAULT_MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export class PayloadTooLargeError extends Error {
+  constructor() {
+    super('request body exceeds the configured limit');
+    this.name = 'PayloadTooLargeError';
+  }
+}
+
+export function roomPath(roomId: string): string {
+  if (typeof roomId !== 'string' || !UUID_PATTERN.test(roomId)) throw new TypeError('invalid roomId: expected a UUID');
+  return roomId;
+}
+
+export function seqPath(seq: number): string {
+  if (!Number.isSafeInteger(seq) || seq <= 0) throw new TypeError('invalid seq: expected a positive integer');
+  return String(seq);
+}
+
+export async function readBoundedText(request: Request, maxBytes: number): Promise<string> {
+  const declared = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) throw new PayloadTooLargeError();
+  if (!request.body) return '';
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new PayloadTooLargeError();
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+function jitter(ms: number): number {
+  return Math.round(ms * (0.5 + Math.random() * 0.5));
+}
 
 interface RawFetchOptions {
   query?: Record<string, string | number | boolean | undefined>;
@@ -245,7 +295,7 @@ export class DotwireHostClient {
 
   async addRoomMembers(roomId: string, userIds: string[], options: AddRoomMembersOptions = {}): Promise<string[]> {
     const ensureMemberRole = options.ensureMemberRole ?? true;
-    const path = `/admin/rooms/${roomId}/members`;
+    const path = `/admin/rooms/${roomPath(roomId)}/members`;
     const res = await this.adminRequest('POST', path, { body: { userIds, ensureMemberRole } });
     await this.throwIfError(res, 'POST', path);
     const data = (await res.json()) as RoomMembersResponse;
@@ -253,14 +303,14 @@ export class DotwireHostClient {
   }
 
   async removeRoomMember(roomId: string, userId: string): Promise<void> {
-    const path = `/admin/rooms/${roomId}/members/${userId}`;
-    const res = await this.adminRequest('DELETE', `/admin/rooms/${roomId}/members/${encodeURIComponent(userId)}`);
+    const path = `/admin/rooms/${roomPath(roomId)}/members/${userId}`;
+    const res = await this.adminRequest('DELETE', `/admin/rooms/${roomPath(roomId)}/members/${encodeURIComponent(userId)}`);
     if (res.status === 404) return;
     await this.throwIfError(res, 'DELETE', path);
   }
 
   async getRoomMembers(roomId: string): Promise<string[]> {
-    const path = `/admin/rooms/${roomId}/members`;
+    const path = `/admin/rooms/${roomPath(roomId)}/members`;
     const res = await this.adminRequest('GET', path);
     await this.throwIfError(res, 'GET', path);
     const data = (await res.json()) as RoomMembersResponse;
@@ -269,7 +319,7 @@ export class DotwireHostClient {
 
   /** Reads participants under the user's own room membership, without admin access. */
   async getRoomParticipants(roomId: string, asUserId: string): Promise<string[]> {
-    const path = `/rooms/${roomId}/participants`;
+    const path = `/rooms/${roomPath(roomId)}/participants`;
     const res = await this.fetchAsUser('GET', path, asUserId);
     await this.throwIfError(res, 'GET', path);
     return (await res.json()) as string[];
@@ -279,7 +329,8 @@ export class DotwireHostClient {
   // Sending
   // ---------------------------------------------------------------------
 
-  async sendAsUser(roomId: string, userId: string, content: string): Promise<SendMessageResult> {
+  async sendAsUser(roomId: string, userId: string, content: string, options: SendAsUserOptions = {}): Promise<SendMessageResult> {
+    const room = roomPath(roomId);
     if (this.presend) {
       const result = await this.presend({ roomId, content, senderUserId: userId });
       if (!result.allow) {
@@ -290,8 +341,11 @@ export class DotwireHostClient {
       }
     }
 
-    const path = `/rooms/${roomId}/messages`;
-    const res = await this.fetchAsUser('POST', `/rooms/${roomId}/messages`, userId, { body: { content } });
+    const path = `/rooms/${room}/messages`;
+    const res = await this.fetchAsUser('POST', path, userId, {
+      body: { content },
+      extraHeaders: options.idempotencyKey ? { 'Idempotency-Key': options.idempotencyKey } : undefined
+    });
     await this.throwIfError(res, 'POST', path);
     const ack = (await res.json()) as SendMessageResult;
 
@@ -309,14 +363,14 @@ export class DotwireHostClient {
   /** Admin message injection (spec §3.3). Presend/postSend hooks do not run for system injections. */
   async sendSystemMessage(roomId: string, content: string, options: SendSystemMessageOptions = {}): Promise<SendMessageResult> {
     const senderId = options.senderId ?? 'system';
-    const path = `/admin/rooms/${roomId}/messages`;
+    const path = `/admin/rooms/${roomPath(roomId)}/messages`;
     const res = await this.adminRequest('POST', path, { body: { content, senderId } });
     await this.throwIfError(res, 'POST', path);
     return (await res.json()) as SendMessageResult;
   }
 
   async getMessages(roomId: string, options: GetMessagesOptions): Promise<RoomHistoryResponse> {
-    const path = `/rooms/${roomId}/messages`;
+    const path = `/rooms/${roomPath(roomId)}/messages`;
     const res = await this.fetchAsUser('GET', path, options.asUserId, {
       query: { afterSeq: options.afterSeq, beforeSeq: options.beforeSeq, limit: options.limit }
     });
@@ -330,6 +384,7 @@ export class DotwireHostClient {
   }
 
   private async *streamRoomEventsGenerator(roomId: string, options: StreamRoomEventsOptions): AsyncGenerator<RoomEvent> {
+    const room = roomPath(roomId);
     const autoResume = options.autoResume ?? true;
     const signal = options.signal;
     let lastSeq = options.afterSeq;
@@ -341,7 +396,7 @@ export class DotwireHostClient {
 
       let response: Response;
       try {
-        response = await this.fetchAsUser('GET', `/rooms/${roomId}/events`, options.asUserId, {
+        response = await this.fetchAsUser('GET', `/rooms/${room}/events`, options.asUserId, {
           query: lastSeq === undefined ? {} : { afterSeq: lastSeq },
           extraHeaders: {
             Accept: 'text/event-stream',
@@ -353,14 +408,15 @@ export class DotwireHostClient {
       } catch (err) {
         if (signal?.aborted || isAbortError(err)) return;
         if (!autoResume) throw err;
-        await delay(backoffMs, signal).catch(() => undefined);
+        await delay(jitter(backoffMs), signal).catch(() => undefined);
         backoffMs = Math.min(backoffMs * 2, maxBackoffMs);
         continue;
       }
 
       if (!response.ok) {
-        await this.throwIfError(response, 'GET', `/rooms/${roomId}/events`);
+        await this.throwIfError(response, 'GET', `/rooms/${room}/events`);
       }
+      backoffMs = 1000;
       if (!response.body) return;
 
       let revoked = false;
@@ -378,20 +434,19 @@ export class DotwireHostClient {
       } catch (err) {
         if (signal?.aborted || isAbortError(err)) return;
         if (!autoResume) throw err;
-        await delay(backoffMs, signal).catch(() => undefined);
+        await delay(jitter(backoffMs), signal).catch(() => undefined);
         backoffMs = Math.min(backoffMs * 2, maxBackoffMs);
         continue;
       }
 
       if (revoked || !autoResume || signal?.aborted) return;
 
-      backoffMs = 1000; // clean disconnect after a successful connection: reset backoff before reconnecting
-      await delay(backoffMs, signal).catch(() => undefined);
+      await delay(jitter(backoffMs), signal).catch(() => undefined);
     }
   }
 
   async redactMessage(roomId: string, seq: number): Promise<RedactMessageResponse> {
-    const path = `/admin/rooms/${roomId}/messages/${seq}`;
+    const path = `/admin/rooms/${roomPath(roomId)}/messages/${seqPath(seq)}`;
     const res = await this.adminRequest('DELETE', path);
     await this.throwIfError(res, 'DELETE', path);
     return (await res.json()) as RedactMessageResponse;
@@ -449,8 +504,9 @@ export class DotwireHostClient {
   async handleClientSend(request: Request, senderUserId: string): Promise<Response> {
     let parsed: unknown;
     try {
-      parsed = await request.json();
-    } catch {
+      parsed = JSON.parse(await readBoundedText(request, this.maxWebhookBodyBytes));
+    } catch (err) {
+      if (err instanceof PayloadTooLargeError) return jsonResponse(413, { error: 'payload_too_large' });
       return jsonResponse(400, { error: 'invalid_request' });
     }
     const result = await this.handleClientSendCore(parsed, senderUserId);
@@ -463,12 +519,15 @@ export class DotwireHostClient {
   }
 
   private async handleClientSendCore(body: unknown, senderUserId: string): Promise<ClientSendResult> {
-    const b = (body ?? {}) as { roomId?: unknown; content?: unknown };
-    if (typeof b.roomId !== 'string' || typeof b.content !== 'string') {
+    const b = (body ?? {}) as { roomId?: unknown; content?: unknown; idempotencyKey?: unknown };
+    if (typeof b.roomId !== 'string' || typeof b.content !== 'string' || !UUID_PATTERN.test(b.roomId)) {
+      return { status: 400, body: { error: 'invalid_request' } };
+    }
+    if (b.idempotencyKey !== undefined && typeof b.idempotencyKey !== 'string') {
       return { status: 400, body: { error: 'invalid_request' } };
     }
     try {
-      const ack = await this.sendAsUser(b.roomId, senderUserId, b.content);
+      const ack = await this.sendAsUser(b.roomId, senderUserId, b.content, { idempotencyKey: b.idempotencyKey as string | undefined });
       return { status: 202, body: ack };
     } catch (err) {
       if (err instanceof PresendRejectedError) {
@@ -486,19 +545,36 @@ export class DotwireHostClient {
 
   /** Verifies `X-Dotwire-Signature` (when `webhookSecret` is set), runs the local `presend` hook, and mirrors the server's presend webhook response shape. */
   async handlePresendWebhook(request: Request): Promise<Response> {
-    const text = await request.text();
-    const signature = request.headers.get('x-dotwire-signature');
-    const result = await this.handlePresendWebhookCore(text, signature);
+    this.ensureWebhookSecret();
+    let text: string;
+    try {
+      text = await readBoundedText(request, this.maxWebhookBodyBytes);
+    } catch (err) {
+      if (err instanceof PayloadTooLargeError) return jsonResponse(413, { allow: false, reason: 'payload_too_large' });
+      throw err;
+    }
+    const result = await this.handlePresendWebhookCore(text, request.headers.get('x-dotwire-signature'), signatureHeadersOf(request));
     return jsonResponse(result.status, result.body);
   }
 
-  async handlePresendWebhookBody(body: unknown, signatureHeader?: string | null, rawBody?: string): Promise<WebhookResult> {
+  async handlePresendWebhookBody(
+    body: unknown,
+    signatureHeader?: string | null,
+    rawBody?: string,
+    headers: WebhookSignatureHeaders = {}
+  ): Promise<WebhookResult> {
+    this.ensureWebhookSecret();
     const text = rawBody ?? JSON.stringify(body);
-    return this.handlePresendWebhookCore(text, signatureHeader ?? null, body);
+    return this.handlePresendWebhookCore(text, signatureHeader ?? null, headers, body);
   }
 
-  private async handlePresendWebhookCore(rawText: string, signatureHeader: string | null, parsedBody?: unknown): Promise<WebhookResult> {
-    if (!this.verifySignature(rawText, signatureHeader)) {
+  private async handlePresendWebhookCore(
+    rawText: string,
+    signatureHeader: string | null,
+    headers: WebhookSignatureHeaders,
+    parsedBody?: unknown
+  ): Promise<WebhookResult> {
+    if (!this.verifySignature(rawText, signatureHeader, headers)) {
       return { status: 401, body: { allow: false, reason: 'invalid_signature' } };
     }
     let payload: { roomId?: unknown; senderId?: unknown; content?: unknown };
@@ -521,26 +597,43 @@ export class DotwireHostClient {
         return { status: 200, body: { allow: false, reason: result.rejectionReason } };
       }
       return { status: 200, body: { allow: true, content: result.content } };
-    } catch (err) {
-      return { status: 200, body: { allow: false, reason: err instanceof Error ? err.message : 'presend hook failed' } };
+    } catch {
+      return { status: 200, body: { allow: false, reason: 'presend hook failed' } };
     }
   }
 
   /** Verifies the signature, runs the local `postSend` hook, and always answers `{}` (postsend is best-effort). */
   async handlePostSendWebhook(request: Request): Promise<Response> {
-    const text = await request.text();
-    const signature = request.headers.get('x-dotwire-signature');
-    const result = await this.handlePostSendWebhookCore(text, signature);
+    this.ensureWebhookSecret();
+    let text: string;
+    try {
+      text = await readBoundedText(request, this.maxWebhookBodyBytes);
+    } catch (err) {
+      if (err instanceof PayloadTooLargeError) return jsonResponse(413, {});
+      throw err;
+    }
+    const result = await this.handlePostSendWebhookCore(text, request.headers.get('x-dotwire-signature'), signatureHeadersOf(request));
     return jsonResponse(result.status, result.body);
   }
 
-  async handlePostSendWebhookBody(body: unknown, signatureHeader?: string | null, rawBody?: string): Promise<WebhookResult> {
+  async handlePostSendWebhookBody(
+    body: unknown,
+    signatureHeader?: string | null,
+    rawBody?: string,
+    headers: WebhookSignatureHeaders = {}
+  ): Promise<WebhookResult> {
+    this.ensureWebhookSecret();
     const text = rawBody ?? JSON.stringify(body);
-    return this.handlePostSendWebhookCore(text, signatureHeader ?? null, body);
+    return this.handlePostSendWebhookCore(text, signatureHeader ?? null, headers, body);
   }
 
-  private async handlePostSendWebhookCore(rawText: string, signatureHeader: string | null, parsedBody?: unknown): Promise<WebhookResult> {
-    if (!this.verifySignature(rawText, signatureHeader)) {
+  private async handlePostSendWebhookCore(
+    rawText: string,
+    signatureHeader: string | null,
+    headers: WebhookSignatureHeaders,
+    parsedBody?: unknown
+  ): Promise<WebhookResult> {
+    if (!this.verifySignature(rawText, signatureHeader, headers)) {
       return { status: 401, body: {} };
     }
     let payload: { roomId?: unknown; seq?: unknown; senderId?: unknown; content?: unknown; time?: unknown };
@@ -569,17 +662,28 @@ export class DotwireHostClient {
     return { status: 200, body: {} };
   }
 
-  private verifySignature(rawBody: string, signatureHeader: string | null): boolean {
-    if (!this.config.webhookSecret) return true;
-    if (!signatureHeader) return false;
-    const prefix = 'sha256=';
-    if (!signatureHeader.startsWith(prefix)) return false;
-    const provided = signatureHeader.slice(prefix.length);
-    const expected = createHmac('sha256', this.config.webhookSecret).update(rawBody, 'utf8').digest('hex');
-    const providedBuf = Buffer.from(provided, 'hex');
-    const expectedBuf = Buffer.from(expected, 'hex');
-    if (providedBuf.length !== expectedBuf.length) return false;
-    return timingSafeEqual(providedBuf, expectedBuf);
+  private get maxWebhookBodyBytes(): number {
+    return this.config.maxWebhookBodyBytes ?? DEFAULT_MAX_WEBHOOK_BODY_BYTES;
+  }
+
+  private ensureWebhookSecret(): void {
+    if (!this.config.webhookSecret && !this.config.allowUnsignedWebhooks) {
+      throw new Error('webhookSecret is required to handle webhooks; set allowUnsignedWebhooks: true to accept unsigned calls');
+    }
+  }
+
+  private verifySignature(rawBody: string, signatureHeader: string | null, headers: WebhookSignatureHeaders, nowMs = Date.now()): boolean {
+    const secret = this.config.webhookSecret;
+    if (!secret) return this.config.allowUnsignedWebhooks === true;
+
+    if (headers.signatureV2 && headers.timestamp) {
+      if (!/^\d+$/.test(headers.timestamp)) return false;
+      const tolerance = this.config.webhookToleranceSeconds ?? DEFAULT_WEBHOOK_TOLERANCE_SECONDS;
+      if (Math.abs(nowMs / 1000 - Number(headers.timestamp)) > tolerance) return false;
+      return signatureMatches(secret, `${headers.timestamp}.${rawBody}`, headers.signatureV2);
+    }
+
+    return this.config.allowLegacyWebhookSignatures === true && signatureMatches(secret, rawBody, signatureHeader);
   }
 
   // ---------------------------------------------------------------------
@@ -671,6 +775,22 @@ export class DotwireHostClient {
       path
     });
   }
+}
+
+function signatureHeadersOf(request: Request): WebhookSignatureHeaders {
+  return {
+    timestamp: request.headers.get('x-dotwire-timestamp'),
+    signatureV2: request.headers.get('x-dotwire-signature-v2')
+  };
+}
+
+function signatureMatches(secret: string, payload: string, header: string | null | undefined): boolean {
+  const prefix = 'sha256=';
+  if (!header || !header.startsWith(prefix)) return false;
+  const providedBuf = Buffer.from(header.slice(prefix.length), 'hex');
+  const expectedBuf = createHmac('sha256', secret).update(payload, 'utf8').digest();
+  if (providedBuf.length !== expectedBuf.length) return false;
+  return timingSafeEqual(providedBuf, expectedBuf);
 }
 
 function jsonResponse(status: number, body: unknown): Response {

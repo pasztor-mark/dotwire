@@ -32,14 +32,15 @@ public sealed class RoomInterestManager : IAsyncDisposable
         Task MessageTask,
         Task EphemeralTask);
 
-    private sealed class ConnectionInfo(string userId, HubOutbox? outbox)
+    private sealed class ConnectionInfo(string userId, string? role, HubOutbox? outbox)
     {
         public string UserId { get; } = userId;
+        public string? Role { get; } = role;
         public HubOutbox? Outbox { get; } = outbox;
         public HashSet<Guid> Rooms { get; } = [];
     }
 
-    private sealed record SseConnection(Channel<SseOutboundEvent> Channel, CancellationTokenSource Revoked);
+    private sealed record SseConnection(Channel<SseOutboundEvent> Channel, CancellationTokenSource Revoked, int Capacity);
 
     private sealed class HubOutbox
     {
@@ -59,11 +60,19 @@ public sealed class RoomInterestManager : IAsyncDisposable
             _ = Task.Run(PumpAsync);
         }
 
-        public void Post(SerializedHubMessage message)
+        public void Post(SerializedHubMessage message, bool ephemeral = false)
         {
+            if (ephemeral && _channel.Reader.Count > HubSendQueueCapacity / 2)
+                return;
+
             if (_channel.Writer.TryWrite(message) || _closed)
                 return;
 
+            Abort();
+        }
+
+        public void Abort()
+        {
             _closed = true;
             _channel.Writer.TryComplete();
             _connection.Abort();
@@ -117,12 +126,12 @@ public sealed class RoomInterestManager : IAsyncDisposable
     }
 
     /// <summary>Returns false if the connection was already subscribed to this room.</summary>
-    public async Task<bool> SubscribeAsync(Guid roomId, string connectionId, string userId)
+    public async Task<bool> SubscribeAsync(Guid roomId, string connectionId, string userId, string? role = null)
     {
         Task ready;
         lock (_gate)
         {
-            var info = _connections.GetOrAdd(connectionId, id => new ConnectionInfo(userId, CreateOutbox(id)));
+            var info = _connections.GetOrAdd(connectionId, id => new ConnectionInfo(userId, role, CreateOutbox(id)));
             if (!info.Rooms.Add(roomId))
                 return false;
 
@@ -206,7 +215,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
     /// bookkeeping as hub connections, so <see cref="Revoke"/> can find and close it too.
     /// </summary>
     public async Task<(ChannelReader<SseOutboundEvent> Reader, CancellationToken Revoked)> RegisterSseConnectionAsync(
-        Guid roomId, string connectionId, string userId, int bufferSize)
+        Guid roomId, string connectionId, string userId, int bufferSize, string? role = null)
     {
         var connection = new SseConnection(
             Channel.CreateBounded<SseOutboundEvent>(new BoundedChannelOptions(bufferSize)
@@ -215,15 +224,15 @@ public sealed class RoomInterestManager : IAsyncDisposable
                 SingleReader = true,
                 SingleWriter = false,
             }),
-            new CancellationTokenSource());
+            new CancellationTokenSource(),
+            bufferSize);
         var perRoom = _sseChannels.GetOrAdd(roomId, _ => new ConcurrentDictionary<string, SseConnection>());
         perRoom[connectionId] = connection;
-        await SubscribeAsync(roomId, connectionId, userId);
+        await SubscribeAsync(roomId, connectionId, userId, role);
         return (connection.Channel.Reader, connection.Revoked.Token);
     }
 
-    /// <summary>Tears down an SSE connection's registration; safe to call more than once.</summary>
-    public void UnregisterSseConnection(Guid roomId, string connectionId)
+    public bool UnregisterSseConnection(Guid roomId, string connectionId)
     {
         if (_sseChannels.TryGetValue(roomId, out var perRoom))
         {
@@ -233,7 +242,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
                 _sseChannels.TryRemove(roomId, out _);
         }
 
-        Unsubscribe(roomId, connectionId);
+        return Unsubscribe(roomId, connectionId);
     }
 
     /// <summary>
@@ -241,13 +250,16 @@ public sealed class RoomInterestManager : IAsyncDisposable
     /// A full channel disconnects the laggard (spec §3.9): the write is dropped and the
     /// channel completed, closing that connection so the client resumes with `Last-Event-ID`.
     /// </summary>
-    private void PublishToSse(Guid roomId, SseOutboundEvent evt)
+    internal void PublishToSse(Guid roomId, SseOutboundEvent evt, bool ephemeral = false)
     {
         if (!_sseChannels.TryGetValue(roomId, out var perRoom))
             return;
 
         foreach (var (connectionId, connection) in perRoom)
         {
+            if (ephemeral && connection.Channel.Reader.Count > connection.Capacity / 2)
+                continue;
+
             if (!connection.Channel.Writer.TryWrite(evt))
             {
                 connection.Channel.Writer.TryComplete();
@@ -256,11 +268,25 @@ public sealed class RoomInterestManager : IAsyncDisposable
         }
     }
 
-    private static void PublishToHub(ConcurrentDictionary<string, ConnectionInfo> connections, string method, object payload)
+    private static void PublishToHub(ConcurrentDictionary<string, ConnectionInfo> connections, string method, object payload, bool ephemeral = false)
     {
         var message = new SerializedHubMessage(new InvocationMessage(method, [payload]));
         foreach (var (_, info) in connections)
-            info.Outbox?.Post(message);
+            info.Outbox?.Post(message, ephemeral);
+    }
+
+    public IReadOnlyList<(Guid RoomId, string UserId, string? Role)> LiveSubscriptions()
+    {
+        lock (_gate)
+        {
+            var live = new List<(Guid, string, string?)>();
+            foreach (var (_, info) in _connections)
+            {
+                foreach (var roomId in info.Rooms)
+                    live.Add((roomId, info.UserId, info.Role));
+            }
+            return live;
+        }
     }
 
     private HubOutbox? CreateOutbox(string connectionId) =>
@@ -284,13 +310,10 @@ public sealed class RoomInterestManager : IAsyncDisposable
         List<(string ConnectionId, ConnectionInfo Info)> affected = [];
         lock (_gate)
         {
-            if (_subscriptions.TryGetValue(roomId, out var subscription))
+            foreach (var (connectionId, info) in _connections)
             {
-                foreach (var (connectionId, info) in subscription.Connections)
-                {
-                    if (info.UserId == userId)
-                        affected.Add((connectionId, info));
-                }
+                if (info.UserId == userId && info.Rooms.Contains(roomId))
+                    affected.Add((connectionId, info));
             }
         }
 
@@ -305,10 +328,34 @@ public sealed class RoomInterestManager : IAsyncDisposable
                 sse.Channel.Writer.TryComplete();
             }
 
-            Unsubscribe(roomId, connectionId);
-            _presenceCoalescer.QueueLeave(roomId, userId);
+            if (Unsubscribe(roomId, connectionId))
+                _presenceCoalescer.QueueLeave(roomId, userId);
         }
     }
+
+    private void FailSubscription(Guid roomId, RoomSubscription subscription)
+    {
+        lock (_gate)
+        {
+            _subscriptions.TryRemove(new KeyValuePair<Guid, RoomSubscription>(roomId, subscription));
+        }
+
+        foreach (var (_, info) in subscription.Connections)
+            info.Outbox?.Abort();
+
+        if (_sseChannels.TryGetValue(roomId, out var perRoom))
+        {
+            foreach (var (connectionId, sse) in perRoom)
+            {
+                if (perRoom.TryRemove(connectionId, out _))
+                    sse.Channel.Writer.TryComplete();
+            }
+        }
+
+        subscription.Cts.Cancel();
+    }
+
+    internal bool HasSubscription(Guid roomId) => _subscriptions.ContainsKey(roomId);
 
     private RoomSubscription CreateSubscription(Guid roomId)
     {
@@ -316,9 +363,29 @@ public sealed class RoomInterestManager : IAsyncDisposable
         var cts = new CancellationTokenSource();
         var messageReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var ephemeralReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var messageTask = Task.Run(() => SubscribeMessagesLoopAsync(roomId, connections, messageReady, cts.Token));
-        var ephemeralTask = Task.Run(() => SubscribeEphemeralLoopAsync(roomId, connections, ephemeralReady, cts.Token));
-        return new RoomSubscription(connections, cts, Task.WhenAll(messageReady.Task, ephemeralReady.Task), messageTask, ephemeralTask);
+        var subscription = new TaskCompletionSource<RoomSubscription>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var messageTask = Task.Run(async () =>
+        {
+            await SubscribeMessagesLoopAsync(roomId, connections, messageReady, cts.Token);
+            await OnLoopExitedAsync(roomId, subscription.Task, messageReady.Task, cts.Token);
+        });
+        var ephemeralTask = Task.Run(async () =>
+        {
+            await SubscribeEphemeralLoopAsync(roomId, connections, ephemeralReady, cts.Token);
+            await OnLoopExitedAsync(roomId, subscription.Task, ephemeralReady.Task, cts.Token);
+        });
+        var created = new RoomSubscription(connections, cts, Task.WhenAll(messageReady.Task, ephemeralReady.Task), messageTask, ephemeralTask);
+        subscription.SetResult(created);
+        return created;
+    }
+
+    private async Task OnLoopExitedAsync(Guid roomId, Task<RoomSubscription> subscription, Task ready, CancellationToken ct)
+    {
+        if (ct.IsCancellationRequested || !ready.IsCompletedSuccessfully)
+            return;
+
+        _logger.LogWarning("Fanout loop for room {RoomId} stopped unexpectedly; dropping local subscribers so they resubscribe", roomId);
+        FailSubscription(roomId, await subscription);
     }
 
     private async Task SubscribeMessagesLoopAsync(
@@ -344,7 +411,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
                     if (roomMessage is null)
                         continue;
 
-                    var decrypted = _cipher.Decrypt(roomMessage.KeyId, roomMessage.Content);
+                    var decrypted = _cipher.Decrypt(roomMessage.KeyId, roomMessage.Content, roomId, roomMessage.SenderId);
                     var plaintext = Encoding.UTF8.GetString(decrypted);
                     var delivery = new RoomMessageDelivery(roomMessage.RoomId, roomMessage.Seq, roomMessage.SenderId, roomMessage.Time, plaintext);
 
@@ -393,8 +460,8 @@ public sealed class RoomInterestManager : IAsyncDisposable
                         var typing = JsonSerializer.Deserialize(msg.Data, DotwireJsonContext.Default.TypingNotification);
                         if (typing is not null)
                         {
-                            PublishToHub(connections, "UserTyping", typing);
-                            PublishToSse(roomId, new SseOutboundEvent("typing", msg.Data, null));
+                            PublishToHub(connections, "UserTyping", typing, ephemeral: true);
+                            PublishToSse(roomId, new SseOutboundEvent("typing", msg.Data, null), ephemeral: true);
                         }
                     }
                     else if (msg.Subject.EndsWith(".presence", StringComparison.Ordinal))
@@ -402,8 +469,8 @@ public sealed class RoomInterestManager : IAsyncDisposable
                         var presence = JsonSerializer.Deserialize(msg.Data, DotwireJsonContext.Default.PresenceDelta);
                         if (presence is not null)
                         {
-                            PublishToHub(connections, "PresenceUpdated", presence);
-                            PublishToSse(roomId, new SseOutboundEvent("presence", msg.Data, null));
+                            PublishToHub(connections, "PresenceUpdated", presence, ephemeral: true);
+                            PublishToSse(roomId, new SseOutboundEvent("presence", msg.Data, null), ephemeral: true);
                         }
                     }
                     else if (msg.Subject.EndsWith(".retracted", StringComparison.Ordinal))

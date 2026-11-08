@@ -9,7 +9,6 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NATS.Client.Core;
-using Npgsql;
 using Xunit;
 
 namespace dotwire.Tests;
@@ -66,9 +65,11 @@ public class RealtimeFanoutUnitTests
         await interestManager.SubscribeAsync(RoomId, "conn-1", "user-1");
 
         var hub = new RoomHub(
-            NpgsqlDataSource.Create("Host=localhost"),
+            new FakeAccessStore(),
             interestManager,
             new PresenceCoalescer(nats, Options.Create(new NatsOptions { Enabled = false }), NullLogger<PresenceCoalescer>.Instance),
+            new TypingThrottle(),
+            new UserConnectionLimiter(Options.Create(new DotwireOptions())),
             nats,
             Options.Create(new NatsOptions()))
         {
@@ -111,9 +112,8 @@ public class RealtimeFanoutUnitTests
         var interestManager = CreateInterestManager(nats);
         var (reader, _) = await interestManager.RegisterSseConnectionAsync(RoomId, "sse-1", "user-1", bufferSize: 1);
 
-        var publish = typeof(RoomInterestManager).GetMethod("PublishToSse", BindingFlags.NonPublic | BindingFlags.Instance)!;
-        publish.Invoke(interestManager, [RoomId, new SseOutboundEvent("message", [], 1)]);
-        publish.Invoke(interestManager, [RoomId, new SseOutboundEvent("message", [], 2)]);
+        interestManager.PublishToSse(RoomId, new SseOutboundEvent("message", [], 1));
+        interestManager.PublishToSse(RoomId, new SseOutboundEvent("message", [], 2));
 
         var delivered = new List<ulong?>();
         await foreach (var evt in reader.ReadAllAsync(TestContext.Current.CancellationToken))

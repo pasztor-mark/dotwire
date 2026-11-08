@@ -5,8 +5,9 @@ public sealed class WebhooksOptions
 {
     public const string SectionName = "Dotwire:Webhooks";
 
-    /// <summary>When set, every webhook call carries `X-Dotwire-Signature: sha256=&lt;hex HMAC-SHA256 of the raw body&gt;`.</summary>
-    public string? Secret { get; set; }
+        public string? Secret { get; set; }
+
+    public bool AllowInsecureUrls { get; set; }
 
     public PresendOptions Presend { get; set; } = new();
 
@@ -45,7 +46,9 @@ public sealed class PostSendOptions
     public int MaxAttempts { get; set; } = 3;
 
     /// <summary>Full queue drops the newest item with a warning; postsend never blocks the send path.</summary>
-    public int QueueCapacity { get; set; } = 10000;
+    public int QueueCapacity { get; set; } = 1000;
+
+    public long MaxQueueBytes { get; set; } = 64L * 1024 * 1024;
 
     public bool IncludeAdminSends { get; set; } = false;
 }

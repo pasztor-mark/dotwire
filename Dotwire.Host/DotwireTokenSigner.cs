@@ -31,6 +31,9 @@ public sealed class DotwireTokenSigner : IDisposable
         TimeSpan? ttl = null
     )
     {
+        if (role is not ("member" or "auditor" or "admin"))
+            throw new ArgumentException($"Unknown dotwire role '{role}'; expected member, auditor or admin.", nameof(role));
+
         var now = DateTime.UtcNow;
         var descriptor = new SecurityTokenDescriptor
         {

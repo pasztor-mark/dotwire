@@ -1,6 +1,6 @@
 services:
   dotwire:
-    image: ghcr.io/pasztor-mark/dotwire:latest
+    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.3.0}
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -13,7 +13,7 @@ services:
     tmpfs:
       - /tmp
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       DOTNET_gcServer: "1"
       DOTNET_GCDynamicAdaptationMode: "1"
@@ -40,7 +40,7 @@ services:
         soft: 65536
         hard: 65536
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8080/healthz"]
+      test: ["CMD", "/app/dotwire", "--healthcheck"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -51,7 +51,7 @@ services:
         condition: service_healthy
 
   postgres:
-    image: timescale/timescaledb:latest-pg17
+    image: timescale/timescaledb:2.31.0-pg17
     command: ["postgres", "-c", "shared_buffers=256MB", "-c", "work_mem=16MB", "-c", "max_connections=200"]
     security_opt:
       - no-new-privileges:true
@@ -78,7 +78,7 @@ services:
       retries: 10
 
   nats:
-    image: nats:2.10-alpine
+    image: nats:2.10.29-alpine
     command: ["-js", "-sd", "/data", "-m", "8222"]
     user: "1000:1000"
     security_opt:

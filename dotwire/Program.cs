@@ -1,3 +1,4 @@
+using Dotwire;
 using Dotwire.Api;
 using Dotwire.Auth;
 using Dotwire.Configuration;
@@ -17,6 +18,9 @@ using Npgsql;
 using System.Security.Claims;
 using System.Threading.RateLimiting;
 
+if (args is ["--healthcheck", ..])
+    return await HealthProbe.RunAsync(new HttpClient { Timeout = TimeSpan.FromSeconds(3) }, HealthProbe.DefaultUri());
+
 DotNetEnv.Env.TraversePath().Load();
 
 var builder = WebApplication.CreateSlimBuilder(args);
@@ -31,10 +35,16 @@ builder.Services.Configure<RateLimitOptions>(builder.Configuration.GetSection(Ra
 builder.Services.Configure<RetentionOptions>(builder.Configuration.GetSection(RetentionOptions.SectionName));
 builder.Services.AddSingleton<MessageCipher>();
 
+var dotwireOptions = builder.Configuration.GetSection(DotwireOptions.SectionName).Get<DotwireOptions>() ?? new DotwireOptions();
+builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = dotwireOptions.MaxRequestBodyBytes);
+
 var authOptions = builder.Configuration.GetSection(AuthOptions.SectionName).Get<AuthOptions>() ?? new AuthOptions();
 var keyRing = new SigningKeyRing(
     authOptions,
     logger: LoggerFactory.Create(b => b.AddConsole()).CreateLogger(nameof(SigningKeyRing)));
+
+var webhooksOptions = builder.Configuration.GetSection(WebhooksOptions.SectionName).Get<WebhooksOptions>() ?? new WebhooksOptions();
+WebhookUrlRules.Validate(webhooksOptions);
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -47,15 +57,17 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidAlgorithms = [SecurityAlgorithms.RsaSha256],
             IssuerSigningKeyResolver = (_, _, kid, _) => keyRing.Resolve(kid),
             NameClaimType = "sub",
+            ClockSkew = TimeSpan.FromSeconds(authOptions.ClockSkewSeconds),
         };
         options.Events = new JwtBearerEvents
         {
             OnMessageReceived = context =>
             {
-                var accessToken = context.Request.Query["access_token"];
-                var path = context.HttpContext.Request.Path;
+                var request = context.HttpContext.Request;
+                var accessToken = request.Query["access_token"];
                 if (!string.IsNullOrEmpty(accessToken) &&
-                    (path.StartsWithSegments("/hub/rooms") || path.Value?.EndsWith("/events") == true))
+                    string.IsNullOrEmpty(request.Headers.Authorization) &&
+                    TokenRules.AcceptsQueryToken(request.Method, request.Path))
                 {
                     context.Token = accessToken;
                 }
@@ -63,25 +75,25 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             },
             OnTokenValidated = context =>
             {
-                var principal = context.Principal;
-                if (string.IsNullOrEmpty(principal?.FindFirstValue("sub")))
-                    context.Fail("Token has no sub claim.");
-                else if (principal.FindFirstValue("dw:role")
-                         is not ("member" or "auditor" or "admin"))
-                    context.Fail("Token has no valid dw:role claim.");
+                var failure = TokenRules.Validate(context.Principal, authOptions, DateTimeOffset.UtcNow);
+                if (failure is not null)
+                    context.Fail(failure);
                 return Task.CompletedTask;
             },
         };
     });
 builder.Services.AddAuthorization();
+
+var corsSettings = builder.Configuration.GetSection(CorsSettings.SectionName).Get<CorsSettings>() ?? new CorsSettings();
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
     {
-        policy.AllowAnyHeader()
-            .AllowAnyMethod()
-            .AllowCredentials()
-            .SetIsOriginAllowed(_ => true);
+        policy.AllowAnyHeader().AllowAnyMethod();
+        if (corsSettings.AllowedOrigins.Length > 0)
+            policy.WithOrigins(corsSettings.AllowedOrigins);
+        else
+            policy.AllowAnyOrigin();
     });
 });
 
@@ -93,6 +105,7 @@ builder.Services.AddSignalR(options =>
 {
     options.EnableDetailedErrors = false;
     options.KeepAliveInterval = TimeSpan.FromSeconds(30);
+    options.ClientTimeoutInterval = TimeSpan.FromSeconds(60);
     options.AddFilter<HubRateLimitFilter>();
 }).AddJsonProtocol(options =>
 {
@@ -111,6 +124,16 @@ builder.Services.AddRateLimiter(options =>
         await ApiResults.RateLimited(retryAfterSeconds).ExecuteAsync(context.HttpContext);
     };
 
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+    {
+        var rateLimits = httpContext.RequestServices.GetRequiredService<IOptions<RateLimitOptions>>().Value;
+        if (!rateLimits.Enabled || httpContext.User.Identity?.IsAuthenticated == true)
+            return RateLimitPartition.GetNoLimiter("authenticated");
+
+        var bucket = rateLimits.Unauthenticated;
+        return RateLimitPartition.GetTokenBucketLimiter($"ip:{httpContext.Connection.RemoteIpAddress}", _ => BucketOptions(bucket));
+    });
+
     AddUserBucketPolicy(options, "send", o => o.Send);
     AddUserBucketPolicy(options, "read", o => o.Read);
     AddUserBucketPolicy(options, "admin", o => o.Admin);
@@ -120,6 +143,7 @@ builder.Services.AddKeyedSingleton<NpgsqlDataSource>(PostgresDataSources.Read,
     (sp, _) => NpgsqlDataSource.Create(RequireConnectionString(sp.GetRequiredService<IConfiguration>(), "PostgresRead")));
 builder.Services.AddKeyedSingleton<NpgsqlDataSource>(PostgresDataSources.Write,
     (sp, _) => NpgsqlDataSource.Create(RequireConnectionString(sp.GetRequiredService<IConfiguration>(), "PostgresWrite")));
+builder.Services.AddSingleton<IAccessStore, PostgresAccessStore>();
 
 builder.Services.AddSingleton<INatsConnection>(sp =>
 {
@@ -134,10 +158,12 @@ builder.Services.AddSingleton<HubLifetimeManager<RoomHub>>(sp => sp.GetRequiredS
 builder.Services.AddSingleton<RoomInterestManager>();
 builder.Services.AddSingleton<PresenceCoalescer>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PresenceCoalescer>());
+builder.Services.AddSingleton<TypingThrottle>();
+builder.Services.AddSingleton<UserConnectionLimiter>();
 builder.Services.AddSingleton<AuditPublisher>();
 
-// One pooled HttpClient for both presend and postsend webhooks (spec §3.8), AOT-safe.
-builder.Services.AddHttpClient(PresendWebhookClient.HttpClientName)
+builder.Services.AddHttpClient(PresendWebhookClient.HttpClientName, client =>
+        client.MaxResponseContentBufferSize = PresendWebhookClient.MaxResponseBytes)
     .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
     {
         PooledConnectionLifetime = TimeSpan.FromMinutes(2),
@@ -146,19 +172,36 @@ builder.Services.AddSingleton<PresendWebhookClient>();
 builder.Services.AddSingleton<PostSendWebhookService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PostSendWebhookService>());
 
-var nodeRole = builder.Configuration.GetSection(DotwireOptions.SectionName).Get<DotwireOptions>()?.Role ?? NodeRole.All;
+var nodeRole = dotwireOptions.Role;
 if (nodeRole is NodeRole.All or NodeRole.Api)
 {
     builder.Services.AddHostedService<PostgresWriterService>();
     builder.Services.AddHostedService<AuditWriterService>();
 }
+if (nodeRole is NodeRole.All or NodeRole.Gateway)
+    builder.Services.AddHostedService<MembershipSweeper>();
 
 var app = builder.Build();
 
+if (!string.IsNullOrEmpty(webhooksOptions.Presend.Url) || !string.IsNullOrEmpty(webhooksOptions.PostSend.Url))
+{
+    if (string.IsNullOrEmpty(webhooksOptions.Secret))
+        app.Logger.LogWarning("Webhook URLs are configured without Dotwire:Webhooks:Secret; hosts cannot verify webhook calls.");
+}
+
 app.UseCors();
+app.Use((context, next) =>
+{
+    if (context.Request.ContentLength > dotwireOptions.MaxRequestBodyBytes)
+    {
+        context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
+        return Task.CompletedTask;
+    }
+    return next(context);
+});
 app.UseAuthentication();
-app.UseAuthorization();
 app.UseRateLimiter();
+app.UseAuthorization();
 
 if (nodeRole is NodeRole.All or NodeRole.Api)
 {
@@ -174,7 +217,7 @@ if (nodeRole is NodeRole.All or NodeRole.Gateway)
     {
         options.Transports = HttpTransportType.WebSockets;
         options.CloseOnAuthenticationExpiration = true;
-    });
+    }).RequireRateLimiting("read");
     Events.MapEventEndpoints(app);
 }
 
@@ -209,11 +252,24 @@ if (nats.Enabled)
         app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(nameof(JetStreamProvisioner)));
 }
 
+await keyRing.RefreshAsync();
+
 app.Run();
+return 0;
 
 static string RequireConnectionString(IConfiguration configuration, string name) =>
     configuration.GetConnectionString(name)
     ?? throw new InvalidOperationException($"ConnectionStrings:{name} is not configured.");
+
+static TokenBucketRateLimiterOptions BucketOptions(RateLimitBucketOptions bucket) => new()
+{
+    TokenLimit = bucket.PermitLimit,
+    TokensPerPeriod = bucket.TokensPerPeriod,
+    ReplenishmentPeriod = TimeSpan.FromSeconds(bucket.PeriodSeconds),
+    AutoReplenishment = true,
+    QueueLimit = 0,
+    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+};
 
 // Per-user (sub claim) token-bucket policy. Disabled globally via Dotwire:RateLimits:Enabled=false.
 static void AddUserBucketPolicy(RateLimiterOptions options, string name, Func<RateLimitOptions, RateLimitBucketOptions> selector)
@@ -226,15 +282,7 @@ static void AddUserBucketPolicy(RateLimiterOptions options, string name, Func<Ra
 
         var bucket = selector(rateLimits);
         var key = httpContext.User.FindFirstValue("sub") ?? "anonymous";
-        return RateLimitPartition.GetTokenBucketLimiter(key, _ => new TokenBucketRateLimiterOptions
-        {
-            TokenLimit = bucket.PermitLimit,
-            TokensPerPeriod = bucket.TokensPerPeriod,
-            ReplenishmentPeriod = TimeSpan.FromSeconds(bucket.PeriodSeconds),
-            AutoReplenishment = true,
-            QueueLimit = 0,
-            QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
-        });
+        return RateLimitPartition.GetTokenBucketLimiter(key, _ => BucketOptions(bucket));
     });
 }
 

@@ -29,6 +29,10 @@ public sealed record PresendVerdict(PresendOutcome Outcome, string? Content = nu
 public sealed class PresendWebhookClient(IHttpClientFactory httpClientFactory, IOptions<WebhooksOptions> options, ILogger<PresendWebhookClient> logger)
 {
     public const string HttpClientName = "dotwire-webhooks";
+    public const long MaxResponseBytes = 1024 * 1024;
+    public const string TimestampHeader = "X-Dotwire-Timestamp";
+    public const string SignatureHeader = "X-Dotwire-Signature";
+    public const string SignatureV2Header = "X-Dotwire-Signature-V2";
 
     public bool IsConfigured => !string.IsNullOrEmpty(options.Value.Presend.Url);
 
@@ -47,7 +51,7 @@ public sealed class PresendWebhookClient(IHttpClientFactory httpClientFactory, I
             cts.CancelAfter(TimeSpan.FromMilliseconds(presend.TimeoutMs));
 
             using var httpRequest = BuildRequest(presend.Url, body, "presend");
-            SignIfConfigured(httpRequest, body, options.Value.Secret);
+            SignIfConfigured(httpRequest, body, options.Value.Secret, DateTimeOffset.UtcNow);
             var client = httpClientFactory.CreateClient(HttpClientName);
             using var response = await client.SendAsync(httpRequest, cts.Token);
 
@@ -96,12 +100,24 @@ public sealed class PresendWebhookClient(IHttpClientFactory httpClientFactory, I
         return request;
     }
 
-    internal static void SignIfConfigured(HttpRequestMessage request, byte[] body, string? secret)
+    internal static void SignIfConfigured(HttpRequestMessage request, byte[] body, string? secret, DateTimeOffset now)
     {
         if (string.IsNullOrEmpty(secret))
             return;
 
-        var hash = HMACSHA256.HashData(Encoding.UTF8.GetBytes(secret), body);
-        request.Headers.Add("X-Dotwire-Signature", $"sha256={Convert.ToHexStringLower(hash)}");
+        var key = Encoding.UTF8.GetBytes(secret);
+        var timestamp = now.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture);
+        request.Headers.Add(TimestampHeader, timestamp);
+        request.Headers.Add(SignatureHeader, $"sha256={Convert.ToHexStringLower(HMACSHA256.HashData(key, body))}");
+        request.Headers.Add(SignatureV2Header, $"sha256={Convert.ToHexStringLower(HMACSHA256.HashData(key, TimestampedPayload(timestamp, body)))}");
+    }
+
+    public static byte[] TimestampedPayload(string timestamp, byte[] body)
+    {
+        var prefix = Encoding.UTF8.GetBytes(timestamp + ".");
+        var payload = new byte[prefix.Length + body.Length];
+        prefix.CopyTo(payload, 0);
+        body.CopyTo(payload, prefix.Length);
+        return payload;
     }
 }
