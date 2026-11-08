@@ -1,7 +1,7 @@
 services:
   # Load balancer
   lb:
-    image: haproxy:2.9.15-alpine
+    image: haproxy:3.4.6-alpine
     restart: always
     ports:
       - "127.0.0.1:8080:8080"
