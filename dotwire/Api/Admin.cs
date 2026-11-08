@@ -48,7 +48,7 @@ public static partial class Admin
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogError("Audit publish failed for {EventType} (subject {SubjectId}, room {RoomId}): {Error}",
-                audit.EventType, audit.SubjectId, audit.RoomId, ex.Message);
+                audit.EventType, audit.SubjectId?.Replace("\r", "").Replace("\n", ""), audit.RoomId, ex.Message);
             return false;
         }
     }
@@ -106,9 +106,9 @@ public static partial class Admin
             RevocationAttempts,
             RevocationAttemptTimeout,
             (attempt, error) => logger.LogWarning(
-                "Revocation broadcast attempt {Attempt} failed for room {RoomId} user {UserId}: {Error}", attempt, roomId, userId, error));
+                "Revocation broadcast attempt {Attempt} failed for room {RoomId} user {UserId}: {Error}", attempt, roomId, userId.Replace("\r", "").Replace("\n", ""), error));
 
         if (!delivered)
-            logger.LogError("Revocation broadcast failed for room {RoomId} user {UserId}; the membership sweep will drop live sockets", roomId, userId);
+            logger.LogError("Revocation broadcast failed for room {RoomId} user {UserId}; the membership sweep will drop live sockets", roomId, userId.Replace("\r", "").Replace("\n", ""));
     }
 }
