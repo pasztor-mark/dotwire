@@ -19,7 +19,7 @@ namespace dotwire.Tests;
 public class WebhookComposeTests
 {
     private const string PgConnectionString =
-        "Host=localhost;Port=5432;Database=dotwire;Username=dotwire;Password=";
+        "Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire;Password=";
 
     static WebhookComposeTests() => DotNetEnv.Env.TraversePath().Load();
 
@@ -39,8 +39,8 @@ public class WebhookComposeTests
 
     private WebApplicationFactory<Program> BuildFactory(Action<IWebHostBuilderSettings> configureWebhooks)
     {
-        SkipUnlessReachable("localhost", 5432, "Postgres");
-        SkipUnlessReachable("localhost", 4222, "NATS");
+        SkipUnlessReachable("127.0.0.1", 5432, "Postgres");
+        SkipUnlessReachable("127.0.0.1", 4222, "NATS");
 
         var pgPassword = Environment.GetEnvironmentVariable("POSTGRES_PASSWORD")
             ?? throw new InvalidOperationException("POSTGRES_PASSWORD missing from .env");
@@ -49,13 +49,13 @@ public class WebhookComposeTests
         var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
         {
             b.UseSetting("ConnectionStrings:PostgresMigrator",
-                $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire;Password={pgPassword}");
+                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire;Password={pgPassword}");
             b.UseSetting("ConnectionStrings:PostgresWrite",
-                $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
+                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
             b.UseSetting("ConnectionStrings:PostgresRead",
-                $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
+                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
             b.UseSetting("Postgres:Migrate", "true");
-            b.UseSetting("Nats:Url", "nats://localhost:4222");
+            b.UseSetting("Nats:Url", "nats://127.0.0.1:4222");
             b.UseSetting("Nats:Enabled", "true");
             b.UseSetting("Auth:Issuer", TestTokens.Issuer);
             b.UseSetting("Auth:Audience", TestTokens.Audience);

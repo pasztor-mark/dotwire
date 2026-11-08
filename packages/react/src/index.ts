@@ -24,5 +24,6 @@ export type {
   PresenceDelta,
   RoomMessage,
   SendAck,
+  SendMessageOptions,
   TypingNotification
 } from '@dotwire/client';

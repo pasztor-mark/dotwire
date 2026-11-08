@@ -311,6 +311,67 @@ public class HttpPipelineSecurityTests(WebApplicationFactory<Program> factory) :
         Assert.Equal([HttpStatusCode.Unauthorized, HttpStatusCode.Unauthorized, HttpStatusCode.TooManyRequests], statuses);
     }
 
+    private static void TinyRouteBuckets(Microsoft.AspNetCore.Hosting.IWebHostBuilder b)
+    {
+        foreach (var bucket in new[] { "Read", "Send" })
+        {
+            b.UseSetting($"Dotwire:RateLimits:{bucket}:PermitLimit", "1");
+            b.UseSetting($"Dotwire:RateLimits:{bucket}:TokensPerPeriod", "1");
+            b.UseSetting($"Dotwire:RateLimits:{bucket}:PeriodSeconds", "3600");
+        }
+    }
+
+    [Theory]
+    [InlineData("GET", null)]
+    [InlineData("POST", null)]
+    [InlineData("GET", "not.a.jwt")]
+    [InlineData("POST", "not.a.jwt")]
+    public async Task UnauthenticatedTraffic_DoesNotSpendAnyRouteBucket(string method, string? token)
+    {
+        var (app, _) = App(TinyRouteBuckets);
+        var client = app.CreateClient();
+        if (token is not null)
+            WithToken(client, token);
+
+        var statuses = new List<HttpStatusCode>();
+        for (var i = 0; i < 3; i++)
+        {
+            using var request = new HttpRequestMessage(new HttpMethod(method), $"/rooms/{Room}/messages");
+            if (method == "POST")
+                request.Content = JsonContent.Create(new { content = "hi" });
+            statuses.Add((await client.SendAsync(request, Ct)).StatusCode);
+        }
+
+        Assert.Equal([HttpStatusCode.Unauthorized, HttpStatusCode.Unauthorized, HttpStatusCode.Unauthorized], statuses);
+    }
+
+    [Fact]
+    public async Task AuthenticatedUser_IsStillLimitedByTheRouteBucket()
+    {
+        var (app, _) = App(TinyRouteBuckets);
+        var client = WithToken(app.CreateClient(), TestTokens.Mint("u1"));
+
+        var first = await client.GetAsync($"/rooms/{Room}/participants", Ct);
+        var second = await client.GetAsync($"/rooms/{Room}/participants", Ct);
+
+        Assert.Equal(HttpStatusCode.Forbidden, first.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, second.StatusCode);
+    }
+
+    [Fact]
+    public async Task UserNamedAnonymous_DoesNotShareAPartitionWithUnauthenticatedTraffic()
+    {
+        var (app, _) = App(TinyRouteBuckets);
+        await app.CreateClient().GetAsync($"/rooms/{Room}/participants", Ct);
+        var client = WithToken(app.CreateClient(), TestTokens.Mint("anonymous"));
+
+        var first = await client.GetAsync($"/rooms/{Room}/participants", Ct);
+        var second = await client.GetAsync($"/rooms/{Room}/participants", Ct);
+
+        Assert.Equal(HttpStatusCode.Forbidden, first.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, second.StatusCode);
+    }
+
     [Fact]
     public void HubClientTimeout_IsTwiceTheKeepAlive()
     {

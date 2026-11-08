@@ -77,10 +77,29 @@ services:
       timeout: 3s
       retries: 10
 
+  # A new named volume is root-owned (the nats image has no /data to inherit from), so hand it
+  # to the unprivileged user nats runs as before nats starts.
+  nats-init:
+    image: nats:2.10.29-alpine
+    entrypoint: ["chown", "1000:1000", "/data"]
+    user: "0:0"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    volumes:
+      - natsdata:/data
+
   nats:
     image: nats:2.10.29-alpine
     command: ["-js", "-sd", "/data", "-m", "8222"]
     user: "1000:1000"
+    depends_on:
+      nats-init:
+        condition: service_completed_successfully
     security_opt:
       - no-new-privileges:true
     cap_drop:

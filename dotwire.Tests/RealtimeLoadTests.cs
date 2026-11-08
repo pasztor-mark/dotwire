@@ -26,21 +26,21 @@ public class RealtimeLoadTests : IClassFixture<WebApplicationFactory<Program>>
 
         _canRunIntegration = !string.IsNullOrEmpty(_pgPassword) &&
                              !string.IsNullOrEmpty(appPassword) &&
-                             IsReachable("localhost", 5432) &&
-                             IsReachable("localhost", 4222);
+                             IsReachable("127.0.0.1", 5432) &&
+                             IsReachable("127.0.0.1", 4222);
 
         _factory = factory.WithWebHostBuilder(b =>
         {
             if (_canRunIntegration)
             {
                 b.UseSetting("ConnectionStrings:PostgresMigrator",
-                    $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire;Password={_pgPassword}");
+                    $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire;Password={_pgPassword}");
                 b.UseSetting("ConnectionStrings:PostgresWrite",
-                    $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
+                    $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
                 b.UseSetting("ConnectionStrings:PostgresRead",
-                    $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
+                    $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
                 b.UseSetting("Postgres:Migrate", "true");
-                b.UseSetting("Nats:Url", "nats://localhost:4222");
+                b.UseSetting("Nats:Url", "nats://127.0.0.1:4222");
                 b.UseSetting("Nats:Enabled", "true");
             }
             else
@@ -99,7 +99,7 @@ public class RealtimeLoadTests : IClassFixture<WebApplicationFactory<Program>>
     private async Task SeedUsersAsync(Guid roomId, IEnumerable<string> users)
     {
         if (!_canRunIntegration) return;
-        var connStr = $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire;Password={_pgPassword}";
+        var connStr = $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire;Password={_pgPassword}";
         await using var conn = new NpgsqlConnection(connStr);
         await conn.OpenAsync(TestContext.Current.CancellationToken);
 

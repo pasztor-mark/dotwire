@@ -24,7 +24,7 @@ namespace dotwire.Tests;
 public class AuditWriterComposeTests : IClassFixture<WebApplicationFactory<Program>>
 {
     private const string PgConnectionString =
-        "Host=localhost;Port=5432;Database=dotwire;Username=dotwire;Password=";
+        "Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire;Password=";
 
     private readonly WebApplicationFactory<Program> _factory;
     private readonly string _pgPassword;
@@ -32,8 +32,8 @@ public class AuditWriterComposeTests : IClassFixture<WebApplicationFactory<Progr
 
     public AuditWriterComposeTests(WebApplicationFactory<Program> factory)
     {
-        SkipUnlessReachable("localhost", 5432, "Postgres");
-        SkipUnlessReachable("localhost", 4222, "NATS");
+        SkipUnlessReachable("127.0.0.1", 5432, "Postgres");
+        SkipUnlessReachable("127.0.0.1", 4222, "NATS");
 
         DotNetEnv.Env.TraversePath().Load();
         _pgPassword = Environment.GetEnvironmentVariable("POSTGRES_PASSWORD")
@@ -43,13 +43,13 @@ public class AuditWriterComposeTests : IClassFixture<WebApplicationFactory<Progr
         _factory = factory.WithWebHostBuilder(b =>
         {
             b.UseSetting("ConnectionStrings:PostgresMigrator",
-                $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire;Password={_pgPassword}");
+                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire;Password={_pgPassword}");
             b.UseSetting("ConnectionStrings:PostgresWrite",
-                $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
+                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
             b.UseSetting("ConnectionStrings:PostgresRead",
-                $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
+                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
             b.UseSetting("Postgres:Migrate", "true");
-            b.UseSetting("Nats:Url", "nats://localhost:4222");
+            b.UseSetting("Nats:Url", "nats://127.0.0.1:4222");
             b.UseSetting("Nats:Enabled", "true");
             b.UseSetting("Auth:Issuer", TestTokens.Issuer);
             b.UseSetting("Auth:Audience", TestTokens.Audience);
@@ -192,9 +192,9 @@ public class AuditWriterComposeTests : IClassFixture<WebApplicationFactory<Progr
         // source (mirroring two separate API node processes), contending for the same
         // Postgres advisory lock.
         await using var dataSourceA = NpgsqlDataSource.Create(
-            $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
+            $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
         await using var dataSourceB = NpgsqlDataSource.Create(
-            $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
+            $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
 
         var writerA = new AuditWriterService(js, natsOptions, dataSourceA, loggerFactory.CreateLogger<AuditWriterService>());
         var writerB = new AuditWriterService(js, natsOptions, dataSourceB, loggerFactory.CreateLogger<AuditWriterService>());
@@ -243,7 +243,7 @@ public class AuditWriterComposeTests : IClassFixture<WebApplicationFactory<Progr
         var publisher = _factory.Services.GetRequiredService<AuditPublisher>();
 
         await using var dataSource = NpgsqlDataSource.Create(
-            $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
+            $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
 
         var writer1 = new AuditWriterService(js, natsOptions, dataSource, loggerFactory.CreateLogger<AuditWriterService>());
         using (var cts1 = new CancellationTokenSource())

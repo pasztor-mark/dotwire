@@ -29,15 +29,15 @@ public class SecurityFixesComposeTests : IClassFixture<WebApplicationFactory<Pro
 
     public SecurityFixesComposeTests(WebApplicationFactory<Program> factory)
     {
-        SkipUnlessReachable("localhost", 5432, "Postgres");
-        SkipUnlessReachable("localhost", 4222, "NATS");
+        SkipUnlessReachable("127.0.0.1", 5432, "Postgres");
+        SkipUnlessReachable("127.0.0.1", 4222, "NATS");
 
         DotNetEnv.Env.TraversePath().Load();
         var pgPassword = Environment.GetEnvironmentVariable("POSTGRES_PASSWORD")
             ?? throw new InvalidOperationException("POSTGRES_PASSWORD missing from .env");
         var appPassword = Environment.GetEnvironmentVariable("POSTGRES_APP_PASSWORD")!;
-        _ownerConnectionString = $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire;Password={pgPassword}";
-        _appConnectionString = $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}";
+        _ownerConnectionString = $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire;Password={pgPassword}";
+        _appConnectionString = $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}";
 
         _baseFactory = factory.WithWebHostBuilder(b =>
         {
@@ -46,7 +46,7 @@ public class SecurityFixesComposeTests : IClassFixture<WebApplicationFactory<Pro
             b.UseSetting("ConnectionStrings:PostgresRead", _appConnectionString);
             b.UseSetting("Postgres:AppRolePassword", appPassword);
             b.UseSetting("Postgres:Migrate", "true");
-            b.UseSetting("Nats:Url", "nats://localhost:4222");
+            b.UseSetting("Nats:Url", "nats://127.0.0.1:4222");
             b.UseSetting("Nats:Enabled", "true");
             b.UseSetting("Auth:Issuer", TestTokens.Issuer);
             b.UseSetting("Auth:Audience", TestTokens.Audience);
@@ -132,6 +132,7 @@ public class SecurityFixesComposeTests : IClassFixture<WebApplicationFactory<Pro
                     ws.ConfigureRequest = request => request.Headers.Authorization = $"Bearer {token}";
                     return await ws.ConnectAsync(context.Uri, ct);
                 };
+                options.AccessTokenProvider = () => Task.FromResult<string?>(token);
             })
             .Build();
 

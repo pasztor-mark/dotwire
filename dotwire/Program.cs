@@ -280,8 +280,11 @@ static void AddUserBucketPolicy(RateLimiterOptions options, string name, Func<Ra
         if (!rateLimits.Enabled)
             return RateLimitPartition.GetNoLimiter("disabled");
 
+        if (httpContext.User.Identity?.IsAuthenticated != true)
+            return RateLimitPartition.GetNoLimiter("unauthenticated");
+
         var bucket = selector(rateLimits);
-        var key = httpContext.User.FindFirstValue("sub") ?? "anonymous";
+        var key = $"user:{httpContext.User.FindFirstValue("sub")}";
         return RateLimitPartition.GetTokenBucketLimiter(key, _ => BucketOptions(bucket));
     });
 }

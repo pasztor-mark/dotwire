@@ -102,9 +102,10 @@ function Room({ roomId }: { roomId: string }) {
   Subscribes for the lifetime of the component, loads the initial history page, and applies
   live messages, retractions, and revocation. `messages` is always sorted by `seq` and deduped.
   `status` starts `'connecting'`, becomes `'ready'` once the initial subscribe resolves,
-  `'revoked'` on membership revocation, or `'error'` if subscribe/send throws. `loadOlder()`
+  `'revoked'` on membership revocation, or `'error'` if subscribe or `loadOlder` throws. `loadOlder()`
   pages backwards with `beforeSeq` and prepends the results; `hasMore` reflects whether an
-  older page might still exist. `send(content)` wraps `sendMessage`.
+  older page might still exist. `send(content, { idempotencyKey }?)` wraps `sendMessage`: a failed
+  send rejects its promise (for example `PresendRejected`) and leaves `status` and `error` unchanged.
 - **`useTyping(roomId)`** → `{ typingUsers, notifyTyping, stopTyping }`. A user drops out of
   `typingUsers` either on an explicit "stopped typing" notification or after ~3.5s of silence
   (time-based expiry, checked every second).
