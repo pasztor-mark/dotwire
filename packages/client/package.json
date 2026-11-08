@@ -43,7 +43,7 @@
     "@microsoft/signalr": "^8.0.7"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^26.6.6",
     "tsup": "^8.5.1",
     "typescript": "^5.8.0"
   }
