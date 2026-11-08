@@ -20,6 +20,8 @@ public class RealtimeHubAuthTests : IClassFixture<WebApplicationFactory<Program>
             b.UseSetting("ConnectionStrings:PostgresRead", "Host=localhost;Database=dotwire");
             b.UseSetting("ConnectionStrings:PostgresWrite", "Host=localhost;Database=dotwire");
             b.UseSetting("Nats:Enabled", "false");
+            b.UseSetting("Dotwire:Encryption:ActiveKeyId", "t1");
+            b.UseSetting("Dotwire:Encryption:Keys:t1", Convert.ToBase64String(new byte[32]));
             b.UseSetting("Auth:Issuer", TestTokens.Issuer);
             b.UseSetting("Auth:Audience", TestTokens.Audience);
             b.UseSetting($"Auth:Keys:{TestKeys.Kid}", TestKeys.PublicPem);
