@@ -10,7 +10,7 @@
 
 dotwire is a free, open-source chat layer you embed in your own application. Your app keeps owning its users and signs the JWTs; dotwire verifies them and handles realtime delivery, message persistence and ordering, and a tamper-evident audit log. It ships APIs and SDKs, not a chat UI, so you build the interface your product needs.
 
-> **Early release (v0.2).** APIs and deployment guidance may still change, and dotwire isn't production-hardened yet, so evaluate it carefully before relying on it. Feedback and issues are welcome.
+> **Early release (v0.3).** APIs and deployment guidance may still change, and dotwire isn't used in production yet, so evaluate it carefully before relying on it. Feedback and issues are welcome.
 
 ---
 
