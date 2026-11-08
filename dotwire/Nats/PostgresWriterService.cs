@@ -46,10 +46,7 @@ public sealed class PostgresWriterService(
                 if (batch.Count == 0)
                     continue;
 
-                await InsertBatchAsync(batch, stoppingToken);
-
-                foreach (var msg in batch)
-                    await msg.AckAsync(cancellationToken: stoppingToken);
+                await ProcessBatchAsync(batch, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -57,44 +54,112 @@ public sealed class PostgresWriterService(
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Batch insert failed, awaiting redelivery: {Error}", ex.Message);
+                logger.LogError("Batch insert failed ({ErrorType}), awaiting redelivery: {Error}", ex.GetType().Name, ex.Message);
                 await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
             }
         }
     }
 
-    private async Task InsertBatchAsync(List<INatsJSMsg<byte[]>> batch, CancellationToken ct)
+    private async Task ProcessBatchAsync(List<INatsJSMsg<byte[]>> batch, CancellationToken ct)
+    {
+        var rows = new List<(INatsJSMsg<byte[]> Msg, RoomMessage Message, long Seq)>(batch.Count);
+        foreach (var msg in batch)
+        {
+            var seq = (long)msg.Metadata!.Value.Sequence.Stream;
+            if (TryParse(msg.Data) is { } message)
+            {
+                rows.Add((msg, message, seq));
+                continue;
+            }
+
+            logger.LogError("Dropping malformed room message at stream seq {Seq}", seq);
+            await msg.AckTerminateAsync(cancellationToken: ct);
+        }
+
+        if (rows.Count == 0)
+            return;
+
+        try
+        {
+            await InsertAsync(rows.Select(r => (r.Message, r.Seq)).ToList(), ct);
+        }
+        catch (PostgresException ex) when (IsPermanent(ex) && rows.Count > 1)
+        {
+            logger.LogWarning("Batch insert rejected ({SqlState}); retrying {Count} messages one by one", ex.SqlState, rows.Count);
+            foreach (var row in rows)
+            {
+                try
+                {
+                    await InsertAsync([(row.Message, row.Seq)], ct);
+                }
+                catch (PostgresException single) when (IsPermanent(single))
+                {
+                    logger.LogError("Dropping room message at stream seq {Seq}: rejected by Postgres ({SqlState})", row.Seq, single.SqlState);
+                    await row.Msg.AckTerminateAsync(cancellationToken: ct);
+                    continue;
+                }
+                await row.Msg.AckAsync(cancellationToken: ct);
+            }
+            return;
+        }
+        catch (PostgresException ex) when (IsPermanent(ex))
+        {
+            logger.LogError("Dropping room message at stream seq {Seq}: rejected by Postgres ({SqlState})", rows[0].Seq, ex.SqlState);
+            await rows[0].Msg.AckTerminateAsync(cancellationToken: ct);
+            return;
+        }
+
+        foreach (var row in rows)
+            await row.Msg.AckAsync(cancellationToken: ct);
+    }
+
+    internal static RoomMessage? TryParse(byte[]? data)
+    {
+        if (data is not { Length: > 0 })
+            return null;
+
+        RoomMessage? message;
+        try
+        {
+            message = JsonSerializer.Deserialize(data, DotwireJsonContext.Default.RoomMessage);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+
+        if (message is null || message.RoomId == Guid.Empty || !Dotwire.Auth.IdValidation.IsValid(message.SenderId) ||
+            string.IsNullOrEmpty(message.KeyId) || message.Content is not { Length: > 0 })
+            return null;
+
+        return message;
+    }
+
+    internal static bool IsPermanent(PostgresException ex) =>
+        ex.SqlState.StartsWith("22", StringComparison.Ordinal) || ex.SqlState.StartsWith("23", StringComparison.Ordinal);
+
+    private async Task InsertAsync(List<(RoomMessage Message, long Seq)> rows, CancellationToken ct)
     {
         var sql = new StringBuilder(
             "INSERT INTO messages (room_id, time, seq, sender_id, key_id, content) VALUES ");
         await using var conn = await writeDataSource.OpenConnectionAsync(ct);
         await using var cmd = new NpgsqlCommand { Connection = conn };
-        var validCount = 0;
 
-        for (var i = 0; i < batch.Count; i++)
+        for (var i = 0; i < rows.Count; i++)
         {
-            var message = JsonSerializer.Deserialize(
-                batch[i].Data!, DotwireJsonContext.Default.RoomMessage);
-            if (message is null || string.IsNullOrEmpty(message.SenderId) || string.IsNullOrEmpty(message.KeyId) || message.Content is null || message.Content.Length == 0)
-                continue;
-
-            var seq = (long)batch[i].Metadata!.Value.Sequence.Stream;
+            var (message, seq) = rows[i];
             var time = message.Time.Year >= 2020 ? message.Time.UtcDateTime : DateTime.UtcNow;
 
-            var p = validCount * 6;
-            if (validCount > 0) sql.Append(", ");
+            var p = i * 6;
+            if (i > 0) sql.Append(", ");
             sql.Append($"(${p + 1}, ${p + 2}, ${p + 3}, ${p + 4}, ${p + 5}, ${p + 6})");
             cmd.Parameters.AddWithValue(message.RoomId);
             cmd.Parameters.AddWithValue(time);
             cmd.Parameters.AddWithValue(seq);
-            cmd.Parameters.AddWithValue((object?)message.SenderId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue((object?)message.KeyId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue((object?)message.Content ?? DBNull.Value);
-            validCount++;
+            cmd.Parameters.AddWithValue(message.SenderId);
+            cmd.Parameters.AddWithValue(message.KeyId);
+            cmd.Parameters.AddWithValue(message.Content);
         }
-
-        if (validCount == 0)
-            return;
 
         sql.Append(" ON CONFLICT DO NOTHING");
         cmd.CommandText = sql.ToString();

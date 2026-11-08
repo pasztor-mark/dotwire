@@ -48,15 +48,23 @@ export class ModerationQueue {
   private completed = false;
 
   private readonly capacity: number;
+  private readonly enqueueTimeoutMs: number;
 
-  constructor(capacity: number = 10_000) {
+  constructor(capacity: number = 10_000, options: { enqueueTimeoutMs?: number } = {}) {
     this.capacity = capacity;
+    this.enqueueTimeoutMs = options.enqueueTimeoutMs ?? 30_000;
   }
 
   async enqueue(item: PendingModeration, signal?: AbortSignal): Promise<void> {
     if (this.completed) throw new Error('ModerationQueue is already completed');
+    const deadline = Date.now() + this.enqueueTimeoutMs;
     while (this.items.length >= this.capacity) {
-      await this.waitForWriteSlot(signal);
+      if (signal?.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error(`ModerationQueue stayed full for ${this.enqueueTimeoutMs}ms; the message was sent but not queued for review`);
+      }
+      await this.waitForWriteSlot(signal, remaining);
     }
     this.items.push(item);
     this.wake(this.waitingReaders);
@@ -122,14 +130,18 @@ export class ModerationQueue {
     return item;
   }
 
-  private waitForWriteSlot(signal?: AbortSignal): Promise<void> {
+  private waitForWriteSlot(signal: AbortSignal | undefined, timeoutMs: number): Promise<void> {
     return new Promise((resolve) => {
-      const onAbort = () => resolve();
-      signal?.addEventListener('abort', onAbort, { once: true });
-      this.waitingWriters.push(() => {
-        signal?.removeEventListener('abort', onAbort);
+      const finish = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', finish);
+        const index = this.waitingWriters.indexOf(finish);
+        if (index !== -1) this.waitingWriters.splice(index, 1);
         resolve();
-      });
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      signal?.addEventListener('abort', finish, { once: true });
+      this.waitingWriters.push(finish);
     });
   }
 

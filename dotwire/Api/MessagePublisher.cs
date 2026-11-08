@@ -13,7 +13,7 @@ namespace Dotwire.Api;
 /// </summary>
 public static class MessagePublisher
 {
-    public sealed record PublishResult(ulong Seq, DateTimeOffset Time);
+    public sealed record PublishResult(ulong Seq, DateTimeOffset Time, bool Duplicate = false);
 
     public static async Task<PublishResult> PublishAsync(
         Guid roomId,
@@ -24,11 +24,13 @@ public static class MessagePublisher
         INatsConnection nats,
         NatsOptions natsOptions,
         ILogger logger,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? msgId = null)
     {
-        var live = await PublishDurableAsync(roomId, senderId, plaintext, cipher, js, natsOptions, ct);
-        await PublishLiveAsync(live, nats, natsOptions, logger, ct);
-        return new PublishResult(live.Seq, live.Time);
+        var (live, duplicate) = await PublishDurableCoreAsync(roomId, senderId, plaintext, cipher, js, natsOptions, msgId, ct);
+        if (!duplicate)
+            await PublishLiveAsync(live, nats, natsOptions, logger, ct);
+        return new PublishResult(live.Seq, live.Time, duplicate);
     }
 
     public static async Task<RoomLiveMessage> PublishDurableAsync(
@@ -38,22 +40,34 @@ public static class MessagePublisher
         MessageCipher cipher,
         INatsJSContext js,
         NatsOptions natsOptions,
+        CancellationToken ct) =>
+        (await PublishDurableCoreAsync(roomId, senderId, plaintext, cipher, js, natsOptions, null, ct)).Live;
+
+    private static async Task<(RoomLiveMessage Live, bool Duplicate)> PublishDurableCoreAsync(
+        Guid roomId,
+        string senderId,
+        byte[] plaintext,
+        MessageCipher cipher,
+        INatsJSContext js,
+        NatsOptions natsOptions,
+        string? msgId,
         CancellationToken ct)
     {
         var time = DateTimeOffset.UtcNow;
         var keyId = cipher.ActiveKeyId;
-        var encrypted = cipher.Encrypt(plaintext);
+        var encrypted = cipher.Encrypt(plaintext, roomId, senderId);
         var message = new RoomMessage(roomId, senderId, time, keyId, encrypted);
         var payload = JsonSerializer.SerializeToUtf8Bytes(message, DotwireJsonContext.Default.RoomMessage);
 
         var ack = await js.PublishAsync<byte[]>(
             $"{natsOptions.RoomSubjectPrefix}{roomId}",
             payload,
+            opts: msgId is null ? null : new NatsJSPubOpts { MsgId = msgId },
             cancellationToken: ct);
         if (ack.Error is not null)
             throw new InvalidOperationException($"JetStream publish error {ack.Error.Code}");
 
-        return new RoomLiveMessage(roomId, ack.Seq, senderId, time, keyId, encrypted);
+        return (new RoomLiveMessage(roomId, ack.Seq, senderId, time, keyId, encrypted), ack.Duplicate);
     }
 
     public static async Task PublishLiveAsync(

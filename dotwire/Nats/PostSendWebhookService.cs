@@ -18,6 +18,7 @@ public sealed class PostSendWebhookService : BackgroundService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IOptions<WebhooksOptions> _options;
     private readonly ILogger<PostSendWebhookService> _logger;
+    private long _queuedBytes;
 
     public PostSendWebhookService(IHttpClientFactory httpClientFactory, IOptions<WebhooksOptions> options, ILogger<PostSendWebhookService> logger)
     {
@@ -34,6 +35,11 @@ public sealed class PostSendWebhookService : BackgroundService
 
     public bool IsConfigured => !string.IsNullOrEmpty(_options.Value.PostSend.Url);
 
+    public long QueuedBytes => Interlocked.Read(ref _queuedBytes);
+
+    internal static long EstimateBytes(PostSendWebhookRequest request) =>
+        (long)request.Content.Length * sizeof(char) + request.SenderId.Length * sizeof(char) + 128;
+
     /// <summary>Enqueues a postsend delivery; never blocks or throws. Drops with a warning if the queue is full.</summary>
     public void Enqueue(PostSendWebhookRequest request)
     {
@@ -41,15 +47,28 @@ public sealed class PostSendWebhookService : BackgroundService
         if (string.IsNullOrEmpty(postSend.Url))
             return;
 
+        var size = EstimateBytes(request);
+        if (Interlocked.Add(ref _queuedBytes, size) > postSend.MaxQueueBytes)
+        {
+            Interlocked.Add(ref _queuedBytes, -size);
+            _logger.LogWarning("Postsend webhook queue is over {MaxBytes} bytes; dropping event for room {RoomId} seq {Seq}",
+                postSend.MaxQueueBytes, request.RoomId, request.Seq);
+            return;
+        }
+
         if (!_channel.Writer.TryWrite(request))
+        {
+            Interlocked.Add(ref _queuedBytes, -size);
             _logger.LogWarning("Postsend webhook queue is full (capacity {Capacity}); dropping event for room {RoomId} seq {Seq}",
                 postSend.QueueCapacity, request.RoomId, request.Seq);
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await foreach (var request in _channel.Reader.ReadAllAsync(stoppingToken))
         {
+            Interlocked.Add(ref _queuedBytes, -EstimateBytes(request));
             try
             {
                 await DeliverAsync(request, stoppingToken);
@@ -76,7 +95,7 @@ public sealed class PostSendWebhookService : BackgroundService
                 cts.CancelAfter(TimeSpan.FromMilliseconds(postSend.TimeoutMs));
 
                 using var httpRequest = PresendWebhookClient.BuildRequest(postSend.Url!, body, "postsend");
-                PresendWebhookClient.SignIfConfigured(httpRequest, body, _options.Value.Secret);
+                PresendWebhookClient.SignIfConfigured(httpRequest, body, _options.Value.Secret, DateTimeOffset.UtcNow);
 
                 var client = _httpClientFactory.CreateClient(PresendWebhookClient.HttpClientName);
                 using var response = await client.SendAsync(httpRequest, cts.Token);

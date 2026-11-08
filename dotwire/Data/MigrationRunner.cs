@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Npgsql;
 
 namespace Dotwire.Data;
@@ -44,29 +46,42 @@ public static class MigrationRunner
                 )
                 """, ct);
 
-            var applied = new HashSet<string>(StringComparer.Ordinal);
-            await using (var cmd = new NpgsqlCommand("SELECT filename FROM schema_migrations", conn))
+            await ExecAsync(conn, "ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum text", ct);
+
+            var applied = new Dictionary<string, string?>(StringComparer.Ordinal);
+            await using (var cmd = new NpgsqlCommand("SELECT filename, checksum FROM schema_migrations", conn))
             await using (var reader = await cmd.ExecuteReaderAsync(ct))
             {
                 while (await reader.ReadAsync(ct))
-                    applied.Add(reader.GetString(0));
+                    applied[reader.GetString(0)] = reader.IsDBNull(1) ? null : reader.GetString(1);
             }
 
-            foreach (var (name, sql) in LoadScripts())
+            var scripts = LoadScripts().ToList();
+            var modified = ModifiedScripts(applied, scripts);
+            if (modified.Count > 0)
+                throw new InvalidOperationException(
+                    $"Applied migrations were modified after being applied: {string.Join(", ", modified)}. Add a new migration instead.");
+
+            foreach (var (name, sql) in scripts)
             {
-                if (applied.Contains(name))
+                var checksum = Checksum(sql);
+                if (applied.TryGetValue(name, out var stored))
+                {
+                    if (stored is null)
+                        await BackfillChecksumAsync(conn, name, checksum, ct);
                     continue;
+                }
 
                 if (sql.StartsWith(NoTransactionMarker, StringComparison.Ordinal))
                 {
                     await ExecAsync(conn, sql, ct);
-                    await RecordAsync(conn, name, transaction: null, ct);
+                    await RecordAsync(conn, name, checksum, transaction: null, ct);
                 }
                 else
                 {
                     await using var tx = await conn.BeginTransactionAsync(ct);
                     await ExecAsync(conn, sql, ct);
-                    await RecordAsync(conn, name, tx, ct);
+                    await RecordAsync(conn, name, checksum, tx, ct);
                     await tx.CommitAsync(ct);
                 }
 
@@ -128,12 +143,32 @@ public static class MigrationRunner
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task RecordAsync(
-        NpgsqlConnection conn, string name, NpgsqlTransaction? transaction, CancellationToken ct)
+    public static string Checksum(string sql) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(sql.ReplaceLineEndings("\n"))));
+
+    public static IReadOnlyList<string> ModifiedScripts(
+        IReadOnlyDictionary<string, string?> applied, IEnumerable<(string Name, string Sql)> scripts) =>
+        scripts
+            .Where(s => applied.TryGetValue(s.Name, out var stored) && stored is not null && stored != Checksum(s.Sql))
+            .Select(s => s.Name)
+            .ToList();
+
+    private static async Task BackfillChecksumAsync(NpgsqlConnection conn, string name, string checksum, CancellationToken ct)
     {
         await using var cmd = new NpgsqlCommand(
-            "INSERT INTO schema_migrations (filename) VALUES ($1)", conn, transaction);
+            "UPDATE schema_migrations SET checksum = $2 WHERE filename = $1 AND checksum IS NULL", conn);
         cmd.Parameters.AddWithValue(name);
+        cmd.Parameters.AddWithValue(checksum);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task RecordAsync(
+        NpgsqlConnection conn, string name, string checksum, NpgsqlTransaction? transaction, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand(
+            "INSERT INTO schema_migrations (filename, checksum) VALUES ($1, $2)", conn, transaction);
+        cmd.Parameters.AddWithValue(name);
+        cmd.Parameters.AddWithValue(checksum);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 }

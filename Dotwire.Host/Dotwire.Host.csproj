@@ -9,7 +9,7 @@
   <PropertyGroup>
     <IsPackable>true</IsPackable>
     <PackageId>Dotwire.Host</PackageId>
-    <Version>0.2.1</Version>
+    <Version>0.3.0</Version>
     <Authors>Dotwire</Authors>
     <Description>Host-side .NET SDK for dotwire: mints RS256 tokens with the host's own key and talks to dotwire over HTTP - roles/membership, send/history/redact, audit, retention, DSAR export, SSE event streaming, presend/postsend moderation hooks, and client-send/webhook handlers.</Description>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>

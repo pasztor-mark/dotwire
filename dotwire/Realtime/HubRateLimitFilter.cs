@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using System.Threading.RateLimiting;
 using Dotwire.Configuration;
 using Microsoft.AspNetCore.SignalR;
@@ -5,15 +6,10 @@ using Microsoft.Extensions.Options;
 
 namespace Dotwire.Realtime;
 
-/// <summary>
-/// Per-connection token bucket for hub method invocations (spec §3.10). Applies only to
-/// <c>Subscribe</c>/<c>Unsubscribe</c> - <c>Typing</c> keeps its own half-second cooldown and
-/// is dropped silently, not rate limited here.
-/// </summary>
 public sealed class HubRateLimitFilter(IOptions<RateLimitOptions> options) : IHubFilter, IDisposable
 {
-    private readonly PartitionedRateLimiter<string> _limiter = PartitionedRateLimiter.Create<string, string>(connectionId =>
-        RateLimitPartition.GetTokenBucketLimiter(connectionId, _ =>
+    private readonly PartitionedRateLimiter<string> _limiter = PartitionedRateLimiter.Create<string, string>(key =>
+        RateLimitPartition.GetTokenBucketLimiter(key, _ =>
         {
             var bucket = options.Value.Hub;
             return new TokenBucketRateLimiterOptions
@@ -31,13 +27,16 @@ public sealed class HubRateLimitFilter(IOptions<RateLimitOptions> options) : IHu
     {
         if (options.Value.Enabled && invocationContext.HubMethodName is "Subscribe" or "Unsubscribe")
         {
-            using var lease = _limiter.AttemptAcquire(invocationContext.Context.ConnectionId);
+            using var lease = _limiter.AttemptAcquire(PartitionKey(invocationContext.Context));
             if (!lease.IsAcquired)
                 throw new HubException("RateLimited");
         }
 
         return await next(invocationContext);
     }
+
+    public static string PartitionKey(HubCallerContext context) =>
+        context.User?.FindFirstValue("sub") is { Length: > 0 } sub ? $"sub:{sub}" : $"conn:{context.ConnectionId}";
 
     public void Dispose() => _limiter.Dispose();
 }

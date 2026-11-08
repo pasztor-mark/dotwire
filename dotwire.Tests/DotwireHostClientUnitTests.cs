@@ -21,7 +21,8 @@ namespace dotwire.Tests;
 /// </summary>
 public class DotwireHostClientUnitTests
 {
-    private static (DotwireHostClient Client, StubHandler Handler) MakeClient(string? webhookSecret = null)
+    private static (DotwireHostClient Client, StubHandler Handler) MakeClient(
+        string? webhookSecret = null, bool allowUnsigned = true, bool allowLegacy = false)
     {
         var handler = new StubHandler();
         var http = new HttpClient(handler) { BaseAddress = new Uri("http://test.local") };
@@ -33,6 +34,8 @@ public class DotwireHostClientUnitTests
             KeyId = TestKeys.Kid,
             PrivateKeyPem = TestKeys.PrivatePem,
             WebhookSecret = webhookSecret,
+            AllowUnsignedWebhooks = allowUnsigned,
+            AllowLegacyWebhookSignatures = allowLegacy,
             RoleCacheTtl = TimeSpan.FromMinutes(5),
         };
         var signer = new DotwireTokenSigner(options);
@@ -307,7 +310,7 @@ public class DotwireHostClientUnitTests
         var roomId = Guid.NewGuid();
         await using var body = JsonBody($$"""{"roomId":"{{roomId}}","senderId":"user-1","content":"hi","time":"2026-01-01T00:00:00Z","source":"member"}""");
 
-        var result = await client.HandlePresendWebhookAsync(body, null, TestContext.Current.CancellationToken);
+        var result = await client.HandlePresendWebhookAsync(body, (string?)null, TestContext.Current.CancellationToken);
 
         Assert.Equal(200, result.StatusCode);
         using var doc = JsonDocument.Parse(result.Json);
@@ -324,7 +327,7 @@ public class DotwireHostClientUnitTests
 
         await using (var okBody = JsonBody($$"""{"roomId":"{{roomId}}","senderId":"user-1","content":"ok","time":"2026-01-01T00:00:00Z","source":"member"}"""))
         {
-            var allowed = await client.HandlePresendWebhookAsync(okBody, null, TestContext.Current.CancellationToken);
+            var allowed = await client.HandlePresendWebhookAsync(okBody, (string?)null, TestContext.Current.CancellationToken);
             using var doc = JsonDocument.Parse(allowed.Json);
             Assert.True(doc.RootElement.GetProperty("allow").GetBoolean());
             Assert.Equal("rewritten", doc.RootElement.GetProperty("content").GetString());
@@ -332,7 +335,7 @@ public class DotwireHostClientUnitTests
 
         await using (var badBody = JsonBody($$"""{"roomId":"{{roomId}}","senderId":"user-1","content":"bad","time":"2026-01-01T00:00:00Z","source":"member"}"""))
         {
-            var rejected = await client.HandlePresendWebhookAsync(badBody, null, TestContext.Current.CancellationToken);
+            var rejected = await client.HandlePresendWebhookAsync(badBody, (string?)null, TestContext.Current.CancellationToken);
             using var doc = JsonDocument.Parse(rejected.Json);
             Assert.False(doc.RootElement.GetProperty("allow").GetBoolean());
             Assert.Equal("blocked", doc.RootElement.GetProperty("reason").GetString());
@@ -348,7 +351,7 @@ public class DotwireHostClientUnitTests
         var roomId = Guid.NewGuid();
         await using var body = JsonBody($$"""{"roomId":"{{roomId}}","seq":9,"senderId":"user-1","content":"hi","time":"2026-01-01T00:00:00Z","source":"member"}""");
 
-        var result = await client.HandlePostSendWebhookAsync(body, null, TestContext.Current.CancellationToken);
+        var result = await client.HandlePostSendWebhookAsync(body, (string?)null, TestContext.Current.CancellationToken);
 
         Assert.Equal(200, result.StatusCode);
         Assert.Equal("{}", result.Json);
@@ -370,7 +373,7 @@ public class DotwireHostClientUnitTests
             await client.HandleClientSendAsync(body, "user-1", TestContext.Current.CancellationToken);
 
         await using (var webhookBody = JsonBody($$"""{"roomId":"{{roomId}}","seq":2,"senderId":"user-2","content":"hi","time":"2026-01-01T00:00:00Z","source":"member"}"""))
-            await client.HandlePostSendWebhookAsync(webhookBody, null, TestContext.Current.CancellationToken);
+            await client.HandlePostSendWebhookAsync(webhookBody, (string?)null, TestContext.Current.CancellationToken);
 
         Assert.True(queue.Reader.TryRead(out var first));
         Assert.Equal(1UL, first.Seq);
@@ -382,7 +385,7 @@ public class DotwireHostClientUnitTests
     public async Task WebhookHandlers_SignatureVerification_CorrectAndIncorrect()
     {
         const string secret = "test-secret";
-        var (client, _) = MakeClient(secret);
+        var (client, _) = MakeClient(secret, allowUnsigned: false, allowLegacy: true);
         var roomId = Guid.NewGuid();
         var json = $$"""{"roomId":"{{roomId}}","senderId":"user-1","content":"hi","time":"2026-01-01T00:00:00Z","source":"member"}""";
         var bytes = Encoding.UTF8.GetBytes(json);
@@ -402,7 +405,7 @@ public class DotwireHostClientUnitTests
 
         await using (var body = new MemoryStream(bytes))
         {
-            var missing = await client.HandlePresendWebhookAsync(body, null, TestContext.Current.CancellationToken);
+            var missing = await client.HandlePresendWebhookAsync(body, (string?)null, TestContext.Current.CancellationToken);
             Assert.Equal(401, missing.StatusCode);
         }
     }
@@ -523,5 +526,231 @@ public class DotwireHostClientUnitTests
             _handler is null
                 ? throw new InvalidOperationException("No stub response configured.")
                 : _handler(request);
+    }
+}
+
+public class DotwireHostClientSecurityTests
+{
+    private const string Secret = "test-secret";
+
+    private static (DotwireHostClient Client, RecordingHandler Handler) MakeClient(
+        string? webhookSecret = Secret, bool allowUnsigned = false, bool allowLegacy = false, int maxBody = 1024 * 1024)
+    {
+        var handler = new RecordingHandler();
+        var http = new HttpClient(handler) { BaseAddress = new Uri("http://test.local") };
+        var options = new DotwireHostOptions
+        {
+            BaseUrl = http.BaseAddress,
+            Issuer = TestTokens.Issuer,
+            Audience = TestTokens.Audience,
+            KeyId = TestKeys.Kid,
+            PrivateKeyPem = TestKeys.PrivatePem,
+            WebhookSecret = webhookSecret,
+            AllowUnsignedWebhooks = allowUnsigned,
+            AllowLegacyWebhookSignatures = allowLegacy,
+            MaxWebhookBodyBytes = maxBody,
+        };
+        return (new DotwireHostClient(http, new DotwireTokenSigner(options), options), handler);
+    }
+
+    private static byte[] PresendBody() =>
+        Encoding.UTF8.GetBytes($$"""{"roomId":"{{Guid.NewGuid()}}","senderId":"user-1","content":"hi","time":"2026-01-01T00:00:00Z","source":"member"}""");
+
+    private static string Sign(byte[] payload) =>
+        "sha256=" + Convert.ToHexStringLower(HMACSHA256.HashData(Encoding.UTF8.GetBytes(Secret), payload));
+
+    private static WebhookHeaders V2(byte[] body, DateTimeOffset at)
+    {
+        var ts = at.ToUnixTimeSeconds().ToString();
+        return new WebhookHeaders(Sign(body), ts, Sign(Encoding.UTF8.GetBytes(ts + ".").Concat(body).ToArray()));
+    }
+
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    [Fact]
+    public async Task Webhooks_WithoutSecret_RefuseToRun()
+    {
+        var (client, _) = MakeClient(webhookSecret: null);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.HandlePresendWebhookAsync(new MemoryStream(PresendBody()), (string?)null, Ct));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => client.HandlePostSendWebhookAsync(new MemoryStream(PresendBody()), (string?)null, Ct));
+    }
+
+    [Fact]
+    public async Task Webhooks_TimestampedSignature_IsAccepted()
+    {
+        var (client, _) = MakeClient();
+        var body = PresendBody();
+
+        var result = await client.HandlePresendWebhookAsync(new MemoryStream(body), V2(body, DateTimeOffset.UtcNow), Ct);
+
+        Assert.Equal(200, result.StatusCode);
+    }
+
+    [Fact]
+    public async Task Webhooks_StaleTimestamp_IsRejected()
+    {
+        var (client, _) = MakeClient();
+        var body = PresendBody();
+
+        var result = await client.HandlePresendWebhookAsync(new MemoryStream(body), V2(body, DateTimeOffset.UtcNow.AddMinutes(-10)), Ct);
+
+        Assert.Equal(401, result.StatusCode);
+    }
+
+    [Fact]
+    public async Task Webhooks_TamperedTimestamp_IsRejected()
+    {
+        var (client, _) = MakeClient();
+        var body = PresendBody();
+        var headers = V2(body, DateTimeOffset.UtcNow.AddMinutes(-10)) with { Timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString() };
+
+        var result = await client.HandlePresendWebhookAsync(new MemoryStream(body), headers, Ct);
+
+        Assert.Equal(401, result.StatusCode);
+    }
+
+    [Fact]
+    public async Task Webhooks_LegacyBodyOnlySignature_NeedsOptIn()
+    {
+        var body = PresendBody();
+        var (strict, _) = MakeClient();
+        var (legacy, _) = MakeClient(allowLegacy: true);
+
+        var rejected = await strict.HandlePresendWebhookAsync(new MemoryStream(body), Sign(body), Ct);
+        var accepted = await legacy.HandlePresendWebhookAsync(new MemoryStream(body), Sign(body), Ct);
+
+        Assert.Equal(401, rejected.StatusCode);
+        Assert.Equal(200, accepted.StatusCode);
+    }
+
+    [Fact]
+    public async Task Webhooks_OversizedBody_Is413()
+    {
+        var (client, _) = MakeClient(maxBody: 64);
+        var body = PresendBody();
+
+        var result = await client.HandlePostSendWebhookAsync(new MemoryStream(body), V2(body, DateTimeOffset.UtcNow), Ct);
+
+        Assert.Equal(413, result.StatusCode);
+    }
+
+    [Fact]
+    public async Task ClientSend_OversizedBody_Is413()
+    {
+        var (client, handler) = MakeClient(maxBody: 16);
+
+        var result = await client.HandleClientSendAsync(new MemoryStream(PresendBody()), "user-1", Ct);
+
+        Assert.Equal(413, result.StatusCode);
+        Assert.Empty(handler.Calls);
+    }
+
+    [Fact]
+    public async Task SendAsUser_ForwardsIdempotencyKey()
+    {
+        var (client, handler) = MakeClient();
+        handler.Respond(_ => new HttpResponseMessage(HttpStatusCode.Accepted)
+        {
+            Content = new StringContent("""{"seq":1,"time":"2026-01-01T00:00:00Z"}""", Encoding.UTF8, "application/json"),
+        });
+
+        await client.SendAsUserAsync(Guid.NewGuid(), "user-1", "hi", "retry-key-1", Ct);
+
+        Assert.Equal("retry-key-1", handler.Calls.Single().IdempotencyKey);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData(HttpStatusCode.NotFound)]
+    public async Task StreamEvents_StopsOnTerminalStatus(HttpStatusCode status)
+    {
+        var (client, handler) = MakeClient();
+        handler.Respond(req => req.RequestUri!.AbsolutePath.Contains("/admin/")
+            ? new HttpResponseMessage(HttpStatusCode.NotFound)
+            : new HttpResponseMessage(status));
+
+        await Assert.ThrowsAsync<DotwireApiException>(async () =>
+        {
+            await foreach (var _ in client.StreamEventsAsync(Guid.NewGuid(), "user-1", new StreamOptions(), Ct))
+            {
+            }
+        });
+
+        Assert.True(handler.Calls.Count <= 2);
+    }
+
+    [Fact]
+    public async Task StreamEvents_SkipsMalformedEvents()
+    {
+        var (client, handler) = MakeClient();
+        var roomId = Guid.NewGuid();
+        var sse =
+            "event: message\ndata: {not json\n\n" +
+            $"event: message\ndata: {{\"roomId\":\"{roomId}\",\"seq\":2,\"senderId\":\"a\",\"time\":\"2026-01-01T00:00:00Z\",\"content\":\"ok\",\"replayed\":false}}\n\n" +
+            $"event: revoked\ndata: {{\"roomId\":\"{roomId}\"}}\n\n";
+        handler.Respond(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(sse) });
+
+        var events = new List<RoomEvent>();
+        await foreach (var evt in client.StreamEventsAsync(roomId, "user-1", new StreamOptions(), Ct))
+            events.Add(evt);
+
+        Assert.Collection(events,
+            e => Assert.Equal(2UL, Assert.IsType<MessageEvent>(e).Seq),
+            e => Assert.IsType<RevokedEvent>(e));
+    }
+
+    [Fact]
+    public void MintToken_RejectsUnknownRoles()
+    {
+        var (client, _) = MakeClient();
+
+        Assert.Throws<ArgumentException>(() => client.MintToken("user-1", "root"));
+    }
+
+    [Fact]
+    public void Options_ToStringRedactsSecrets()
+    {
+        var options = new DotwireHostOptions
+        {
+            BaseUrl = new Uri("http://test.local"),
+            Issuer = "i",
+            KeyId = "k",
+            PrivateKeyPem = "-----BEGIN PRIVATE KEY-----secret",
+            WebhookSecret = "hook-secret",
+        };
+
+        var text = options.ToString();
+
+        Assert.DoesNotContain("hook-secret", text);
+        Assert.DoesNotContain("PRIVATE KEY", text);
+        Assert.Contains("[redacted]", text);
+    }
+
+    [Fact]
+    public async Task ModerationQueue_FullQueue_TimesOutInsteadOfBlockingForever()
+    {
+        var queue = new ModerationQueue(capacity: 1, enqueueTimeout: TimeSpan.FromMilliseconds(50));
+        var item = new PendingModeration(Guid.NewGuid(), 1, DateTimeOffset.UtcNow, "u1", "hi");
+        await queue.EnqueueAsync(item, Ct);
+
+        await Assert.ThrowsAsync<TimeoutException>(async () => await queue.EnqueueAsync(item, Ct));
+    }
+
+    private sealed class RecordingHandler : HttpMessageHandler
+    {
+        private Func<HttpRequestMessage, HttpResponseMessage> _respond = _ => new HttpResponseMessage(HttpStatusCode.NotFound);
+
+        public List<(string Path, string? IdempotencyKey)> Calls { get; } = [];
+
+        public void Respond(Func<HttpRequestMessage, HttpResponseMessage> respond) => _respond = respond;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Calls.Add((request.RequestUri!.AbsolutePath,
+                request.Headers.TryGetValues("Idempotency-Key", out var values) ? values.Single() : null));
+            return Task.FromResult(_respond(request));
+        }
     }
 }

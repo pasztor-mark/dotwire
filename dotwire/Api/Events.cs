@@ -34,45 +34,53 @@ public static class Events
             IOptions<NatsOptions> natsOptions,
             RoomInterestManager interestManager,
             Dotwire.Realtime.PresenceCoalescer presenceCoalescer,
+            IAccessStore accessStore,
+            UserConnectionLimiter connectionLimiter,
             IOptions<SseOptions> sseOptionsAccessor,
             ILoggerFactory loggerFactory) =>
         {
             var sseOptions = sseOptionsAccessor.Value;
-            if (!sseOptions.Enabled)
+            if (!sseOptions.Enabled || !Guid.TryParse(roomId, out var roomGuid))
             {
                 http.Response.StatusCode = StatusCodes.Status404NotFound;
                 return;
             }
 
-            var roomGuid = Guid.Parse(roomId);
             var userId = http.User.FindFirstValue("sub")!;
+            var role = http.User.FindFirstValue("dw:role");
             var logger = loggerFactory.CreateLogger("Dotwire.Api.Events");
 
-            ulong? resumeSeq = null;
-            if (http.Request.Headers.TryGetValue("Last-Event-ID", out var lastEventId) &&
-                ulong.TryParse(lastEventId, out var parsedLast))
-            {
-                resumeSeq = parsedLast;
-            }
-            else if (afterSeq.HasValue)
-            {
-                resumeSeq = afterSeq;
-            }
+            http.Request.Headers.TryGetValue("Last-Event-ID", out var lastEventId);
+            var resumeSeq = ResolveResumeSeq(lastEventId, afterSeq);
 
-            http.Response.Headers.CacheControl = "no-cache";
-            http.Response.Headers["X-Accel-Buffering"] = "no";
-            http.Response.ContentType = "text/event-stream";
-            await http.Response.StartAsync(http.RequestAborted);
+            if (!connectionLimiter.TryAcquire(userId))
+            {
+                await ApiResults.RateLimited(1).ExecuteAsync(http);
+                return;
+            }
 
             var connectionId = $"sse-{Guid.NewGuid()}";
             var lastReplayedSeq = resumeSeq ?? 0;
             var revoked = CancellationToken.None;
+            var joined = false;
             try
             {
-                // Register the live subscription FIRST (spec §3.9) so live events start
-                // accumulating in this connection's channel while replay runs below.
-                (var reader, revoked) = await interestManager.RegisterSseConnectionAsync(roomGuid, connectionId, userId, sseOptions.BufferSize);
+                (var reader, revoked) = await interestManager.RegisterSseConnectionAsync(roomGuid, connectionId, userId, sseOptions.BufferSize, role);
+
+                if (!await accessStore.IsMemberAsync(roomGuid, userId, http.RequestAborted))
+                {
+                    interestManager.UnregisterSseConnection(roomGuid, connectionId);
+                    http.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    return;
+                }
+
                 presenceCoalescer.QueueJoin(roomGuid, userId);
+                joined = true;
+
+                http.Response.Headers.CacheControl = "no-cache";
+                http.Response.Headers["X-Accel-Buffering"] = "no";
+                http.Response.ContentType = "text/event-stream";
+                await http.Response.StartAsync(http.RequestAborted);
 
                 using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(http.RequestAborted, revoked);
                 if (long.TryParse(http.User.FindFirstValue("exp"), out var exp))
@@ -84,34 +92,35 @@ public static class Events
 
                 if (resumeSeq.HasValue)
                 {
-                    var current = resumeSeq;
-                    while (true)
-                    {
-                        var (rows, hasMore) = await Messages.QueryHistoryPageAsync(
-                            readDataSource, js, natsOptions.Value, logger, roomGuid, current, null, sseOptions.ReplayPageSize, ct);
-
-                        foreach (var row in rows)
+                    var (replayedTo, truncated) = await ReplayAsync(
+                        resumeSeq.Value,
+                        sseOptions.MaxReplayRows,
+                        (current, token) => Messages.QueryHistoryPageAsync(
+                            readDataSource, js, natsOptions.Value, logger, roomGuid, current, null, sseOptions.ReplayPageSize, token),
+                        async (row, token) =>
                         {
+                            byte[] decrypted;
                             try
                             {
-                                var decrypted = cipher.Decrypt(row.KeyId, row.Content);
-                                var text = Encoding.UTF8.GetString(decrypted);
-                                var payload = new SseMessagePayload(roomGuid, row.Seq, row.SenderId, row.Time, text, Replayed: true);
-                                var data = JsonSerializer.SerializeToUtf8Bytes(payload, DotwireJsonContext.Default.SseMessagePayload);
-                                await WriteEventAsync(http.Response, "message", data, row.Seq, ct);
-                                lastReplayedSeq = row.Seq;
+                                decrypted = cipher.Decrypt(row.KeyId, row.Content, roomGuid, row.SenderId);
                             }
                             catch (Exception ex) when (ex is not OperationCanceledException)
                             {
                                 logger.LogError("Failed to decrypt message {Seq} during SSE replay for room {RoomId}: {Error}",
                                     row.Seq, roomGuid, ex.Message);
+                                return false;
                             }
-                        }
 
-                        if (!hasMore || rows.Count == 0)
-                            break;
-                        current = lastReplayedSeq;
-                    }
+                            var payload = new SseMessagePayload(roomGuid, row.Seq, row.SenderId, row.Time, Encoding.UTF8.GetString(decrypted), Replayed: true);
+                            var data = JsonSerializer.SerializeToUtf8Bytes(payload, DotwireJsonContext.Default.SseMessagePayload);
+                            await WriteEventAsync(http.Response, "message", data, row.Seq, token);
+                            return true;
+                        },
+                        ct);
+
+                    lastReplayedSeq = replayedTo;
+                    if (truncated)
+                        return;
                 }
 
                 using var keepAliveTimer = new PeriodicTimer(TimeSpan.FromSeconds(sseOptions.KeepAliveSeconds));
@@ -158,7 +167,7 @@ public static class Events
                 // Response headers are already flushed by this point, so nothing can turn
                 // into an error status any more - cancellation (client gone) and any
                 // mid-stream I/O fault both just end the connection cleanly.
-                if (revoked.IsCancellationRequested && !http.RequestAborted.IsCancellationRequested)
+                if (revoked.IsCancellationRequested && !http.RequestAborted.IsCancellationRequested && http.Response.HasStarted)
                 {
                     try
                     {
@@ -170,6 +179,10 @@ public static class Events
                         logger.LogDebug("SSE revoked event for room {RoomId} not delivered: {Error}", roomGuid, writeEx.Message);
                     }
                 }
+                else if (!http.Response.HasStarted)
+                {
+                    throw;
+                }
                 else if (ex is not OperationCanceledException)
                 {
                     logger.LogDebug("SSE connection for room {RoomId} ended: {Error}", roomGuid, ex.Message);
@@ -177,10 +190,41 @@ public static class Events
             }
             finally
             {
-                interestManager.UnregisterSseConnection(roomGuid, connectionId);
-                presenceCoalescer.QueueLeave(roomGuid, userId);
+                if (interestManager.UnregisterSseConnection(roomGuid, connectionId) && joined)
+                    presenceCoalescer.QueueLeave(roomGuid, userId);
+                connectionLimiter.Release(userId);
             }
         });
+    }
+
+    internal static ulong? ResolveResumeSeq(string? lastEventId, ulong? afterSeq) =>
+        ulong.TryParse(lastEventId, out var parsed) ? parsed : afterSeq;
+
+    internal static async Task<(ulong LastSeq, bool Truncated)> ReplayAsync(
+        ulong fromSeq,
+        int maxRows,
+        Func<ulong, CancellationToken, Task<(List<(ulong Seq, DateTimeOffset Time, string SenderId, string KeyId, byte[] Content)> Rows, bool HasMore)>> fetchPage,
+        Func<(ulong Seq, DateTimeOffset Time, string SenderId, string KeyId, byte[] Content), CancellationToken, Task<bool>> deliver,
+        CancellationToken ct)
+    {
+        var current = fromSeq;
+        var delivered = 0;
+        while (true)
+        {
+            var (rows, hasMore) = await fetchPage(current, ct);
+            for (var i = 0; i < rows.Count; i++)
+            {
+                if (await deliver(rows[i], ct))
+                    delivered++;
+                current = Math.Max(current, rows[i].Seq);
+
+                if (maxRows > 0 && delivered >= maxRows && (i < rows.Count - 1 || hasMore))
+                    return (current, true);
+            }
+
+            if (!hasMore || rows.Count == 0)
+                return (current, false);
+        }
     }
 
     private static async Task WriteEventAsync(HttpResponse response, string eventName, byte[] data, ulong? id, CancellationToken ct)

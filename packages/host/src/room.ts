@@ -5,6 +5,7 @@ import type {
   RedactMessageResponse,
   RoomEvent,
   RoomHistoryResponse,
+  SendAsUserOptions,
   SendMessageResult,
   SendSystemMessageOptions,
   StreamRoomEventsOptions
@@ -36,8 +37,8 @@ export class DotwireHostRoom {
     return this.client.getRoomParticipants(this.roomId, asUserId);
   }
 
-  sendAsUser(userId: string, content: string): Promise<SendMessageResult> {
-    return this.client.sendAsUser(this.roomId, userId, content);
+  sendAsUser(userId: string, content: string, options?: SendAsUserOptions): Promise<SendMessageResult> {
+    return this.client.sendAsUser(this.roomId, userId, content, options);
   }
 
   sendSystemMessage(content: string, options?: SendSystemMessageOptions): Promise<SendMessageResult> {

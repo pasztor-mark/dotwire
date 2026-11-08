@@ -17,7 +17,7 @@ public static class Audit
     {
         var group = app.MapGroup("/audit")
             .RequireAuthorization()
-            .AddEndpointFilter<RequireAuditorFilter>()
+            .AddEndpointFilter(new RequireRoleFilter("auditor"))
             .RequireRateLimiting("read");
 
         group.MapGet("/", async (
@@ -62,90 +62,18 @@ public static class Audit
             var ct = http.RequestAborted;
             var runFull = full ?? false;
 
-            long fromId;
-            byte[] prevHash;
-            DateOnly? anchor = null;
+            if (runFull && !FullVerifyGate.Wait(0))
+                return ApiResults.RateLimited(5);
 
-            if (!runFull)
+            try
             {
-                await using var cmd = readDataSource.CreateCommand(
-                    "SELECT day, last_id, hash FROM audit_checkpoints ORDER BY day DESC LIMIT 1");
-                await using var reader = await cmd.ExecuteReaderAsync(ct);
-                if (await reader.ReadAsync(ct))
-                {
-                    anchor = DateOnly.FromDateTime(reader.GetDateTime(0));
-                    fromId = reader.GetInt64(1);
-                    prevHash = (byte[])reader.GetValue(2);
-                }
-                else
-                {
-                    fromId = 0;
-                    prevHash = AuditCanonicalForm.GenesisHash();
-                }
+                return await VerifyAsync(runFull, readDataSource, auditPublisher, http, ct);
             }
-            else
+            finally
             {
-                fromId = 0;
-                prevHash = AuditCanonicalForm.GenesisHash();
+                if (runFull)
+                    FullVerifyGate.Release();
             }
-
-            long checkedCount = 0;
-            long lastId = fromId;
-            long? firstInvalidId = null;
-
-            await using (var cmd = readDataSource.CreateCommand(
-                "SELECT id, event_type, room_id, message_seq, actor_id, subject_id, value, event_time, prev_hash, hash " +
-                "FROM audit_log WHERE id > $1 ORDER BY id ASC"))
-            {
-                cmd.Parameters.AddWithValue(fromId);
-                await using var reader = await cmd.ExecuteReaderAsync(ct);
-                while (await reader.ReadAsync(ct))
-                {
-                    var id = reader.GetInt64(0);
-                    var evt = new AuditEvent(
-                        reader.GetString(1),
-                        reader.IsDBNull(2) ? null : reader.GetGuid(2),
-                        reader.IsDBNull(3) ? null : (ulong)reader.GetInt64(3),
-                        reader.IsDBNull(4) ? null : reader.GetString(4),
-                        reader.IsDBNull(5) ? null : reader.GetString(5),
-                        reader.IsDBNull(6) ? null : reader.GetInt64(6),
-                        reader.GetFieldValue<DateTimeOffset>(7));
-                    var storedPrevHash = (byte[])reader.GetValue(8);
-                    var storedHash = (byte[])reader.GetValue(9);
-
-                    checkedCount++;
-                    lastId = id;
-
-                    if (firstInvalidId is not null)
-                        continue; // keep scanning `toId` to the real tail, but stop judging.
-
-                    if (!storedPrevHash.AsSpan().SequenceEqual(prevHash))
-                    {
-                        firstInvalidId = id;
-                        continue;
-                    }
-
-                    var recomputed = AuditCanonicalForm.Hash(prevHash, AuditCanonicalForm.Compute(evt));
-                    if (!recomputed.AsSpan().SequenceEqual(storedHash))
-                    {
-                        firstInvalidId = id;
-                        continue;
-                    }
-
-                    prevHash = storedHash;
-                }
-            }
-
-            if (!await TryEmitAuditReadAsync(auditPublisher, http, ct))
-                return ApiResults.AuditUnavailable();
-
-            return Results.Ok(new AuditVerificationResponse(
-                Ok: firstInvalidId is null,
-                FromId: fromId,
-                ToId: lastId,
-                Checked: checkedCount,
-                FirstInvalidId: firstInvalidId,
-                Anchor: anchor));
         });
 
         group.MapGet("/checkpoints", async (
@@ -178,6 +106,105 @@ public static class Audit
 
             return Results.Ok(new AuditCheckpointsResponse(checkpoints.ToArray()));
         });
+    }
+
+    internal static readonly SemaphoreSlim FullVerifyGate = new(1, 1);
+
+    internal static bool AnchorMatches(byte[] checkpointHash, byte[]? auditRowHash) =>
+        auditRowHash is not null && auditRowHash.AsSpan().SequenceEqual(checkpointHash);
+
+    private static async Task<IResult> VerifyAsync(
+        bool runFull, NpgsqlDataSource readDataSource, AuditPublisher auditPublisher, HttpContext http, CancellationToken ct)
+    {
+        long fromId = 0;
+        byte[] prevHash = AuditCanonicalForm.GenesisHash();
+        DateOnly? anchor = null;
+
+        if (!runFull)
+        {
+            await using (var cmd = readDataSource.CreateCommand(
+                "SELECT day, last_id, hash FROM audit_checkpoints WHERE day <= (now() AT TIME ZONE 'UTC')::date ORDER BY day DESC LIMIT 1"))
+            await using (var reader = await cmd.ExecuteReaderAsync(ct))
+            {
+                if (await reader.ReadAsync(ct))
+                {
+                    anchor = DateOnly.FromDateTime(reader.GetDateTime(0));
+                    fromId = reader.GetInt64(1);
+                    prevHash = (byte[])reader.GetValue(2);
+                }
+            }
+
+            if (anchor.HasValue)
+            {
+                await using var anchorCmd = readDataSource.CreateCommand("SELECT hash FROM audit_log WHERE id = $1");
+                anchorCmd.Parameters.AddWithValue(fromId);
+                var rowHash = await anchorCmd.ExecuteScalarAsync(ct) as byte[];
+                if (!AnchorMatches(prevHash, rowHash))
+                {
+                    if (!await TryEmitAuditReadAsync(auditPublisher, http, ct))
+                        return ApiResults.AuditUnavailable();
+                    return Results.Ok(new AuditVerificationResponse(false, fromId, fromId, 0, fromId, anchor));
+                }
+            }
+        }
+
+        long checkedCount = 0;
+        long lastId = fromId;
+        long? firstInvalidId = null;
+
+        await using (var cmd = readDataSource.CreateCommand(
+            "SELECT id, event_type, room_id, message_seq, actor_id, subject_id, value, event_time, prev_hash, hash " +
+            "FROM audit_log WHERE id > $1 ORDER BY id ASC"))
+        {
+            cmd.Parameters.AddWithValue(fromId);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var id = reader.GetInt64(0);
+                var evt = new AuditEvent(
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetGuid(2),
+                    reader.IsDBNull(3) ? null : (ulong)reader.GetInt64(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                    reader.GetFieldValue<DateTimeOffset>(7));
+                var storedPrevHash = (byte[])reader.GetValue(8);
+                var storedHash = (byte[])reader.GetValue(9);
+
+                checkedCount++;
+                lastId = id;
+
+                if (firstInvalidId is not null)
+                    continue; // keep scanning `toId` to the real tail, but stop judging.
+
+                if (!storedPrevHash.AsSpan().SequenceEqual(prevHash))
+                {
+                    firstInvalidId = id;
+                    continue;
+                }
+
+                var recomputed = AuditCanonicalForm.Hash(prevHash, AuditCanonicalForm.Compute(evt));
+                if (!recomputed.AsSpan().SequenceEqual(storedHash))
+                {
+                    firstInvalidId = id;
+                    continue;
+                }
+
+                prevHash = storedHash;
+            }
+        }
+
+        if (!await TryEmitAuditReadAsync(auditPublisher, http, ct))
+            return ApiResults.AuditUnavailable();
+
+        return Results.Ok(new AuditVerificationResponse(
+            Ok: firstInvalidId is null,
+            FromId: fromId,
+            ToId: lastId,
+            Checked: checkedCount,
+            FirstInvalidId: firstInvalidId,
+            Anchor: anchor));
     }
 
     private static AuditEntry ReadEntry(NpgsqlDataReader reader) => new(

@@ -38,7 +38,7 @@ public sealed partial class DotwireHostClient
 
             if (connectFailure is not null)
             {
-                if (!options.AutoResume)
+                if (!options.AutoResume || IsTerminal(connectFailure))
                     throw connectFailure;
 
                 await Task.Delay(backoff, ct);
@@ -47,6 +47,7 @@ public sealed partial class DotwireHostClient
             }
 
             var revoked = false;
+            backoff = TimeSpan.FromSeconds(1);
             using (response)
             {
                 var stream = await response!.Content.ReadAsStreamAsync(ct);
@@ -74,7 +75,7 @@ public sealed partial class DotwireHostClient
                     {
                         if (eventName is not null)
                         {
-                            var evt = ParseEvent(roomId, eventName, data.ToString());
+                            var evt = TryParseEvent(roomId, eventName, data.ToString());
                             eventName = null;
                             data.Clear();
 
@@ -111,6 +112,21 @@ public sealed partial class DotwireHostClient
 
             await Task.Delay(backoff, ct);
             backoff = NextBackoff(backoff);
+        }
+    }
+
+    private static bool IsTerminal(Exception ex) =>
+        ex is DotwireApiException { StatusCode: HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden or HttpStatusCode.NotFound };
+
+    private static RoomEvent? TryParseEvent(Guid roomId, string eventName, string json)
+    {
+        try
+        {
+            return ParseEvent(roomId, eventName, json);
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 

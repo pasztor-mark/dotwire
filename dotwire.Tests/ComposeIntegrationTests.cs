@@ -29,15 +29,15 @@ namespace dotwire.Tests;
 public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Program>>
 {
     private const string PgConnectionString =
-        "Host=localhost;Port=5432;Database=dotwire;Username=dotwire;Password=";
+        "Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire;Password=";
 
     private readonly WebApplicationFactory<Program> _factory;
     private readonly string _pgPassword;
 
     public ComposeIntegrationTests(WebApplicationFactory<Program> factory)
     {
-        SkipUnlessReachable("localhost", 5432, "Postgres");
-        SkipUnlessReachable("localhost", 4222, "NATS");
+        SkipUnlessReachable("127.0.0.1", 5432, "Postgres");
+        SkipUnlessReachable("127.0.0.1", 4222, "NATS");
 
         // The app loads .env itself (DotNetEnv.TraversePath); tests reuse the same secrets.
         DotNetEnv.Env.TraversePath().Load();
@@ -48,13 +48,13 @@ public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Progr
         _factory = factory.WithWebHostBuilder(b =>
         {
             b.UseSetting("ConnectionStrings:PostgresMigrator",
-                $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire;Password={_pgPassword}");
+                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire;Password={_pgPassword}");
             b.UseSetting("ConnectionStrings:PostgresWrite",
-                $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
+                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
             b.UseSetting("ConnectionStrings:PostgresRead",
-                $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
+                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
             b.UseSetting("Postgres:Migrate", "true");
-            b.UseSetting("Nats:Url", "nats://localhost:4222");
+            b.UseSetting("Nats:Url", "nats://127.0.0.1:4222");
             b.UseSetting("Nats:Enabled", "true");
             b.UseSetting("Auth:Issuer", TestTokens.Issuer);
             b.UseSetting("Auth:Audience", TestTokens.Audience);
@@ -316,7 +316,7 @@ public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Progr
         // Owner bypasses grants . testing as dotwire proves nothing (trap #2).
         var appPassword = Environment.GetEnvironmentVariable("POSTGRES_APP_PASSWORD")!;
         await using var conn = new NpgsqlConnection(
-            $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
+            $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
         await conn.OpenAsync(TestContext.Current.CancellationToken);
 
         await using var cmd = new NpgsqlCommand("UPDATE audit_log SET event_type = 'x'", conn);
@@ -398,7 +398,7 @@ public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Progr
         await Task.Delay(200, TestContext.Current.CancellationToken);
 
         var js = new NatsJSContext(new NATS.Client.Core.NatsConnection(
-            new NATS.Client.Core.NatsOpts { Url = "nats://localhost:4222" }));
+            new NATS.Client.Core.NatsOpts { Url = "nats://127.0.0.1:4222" }));
         var before = (await js.GetStreamAsync("ROOMS", cancellationToken: TestContext.Current.CancellationToken))
             .Info.State.Messages;
 
@@ -707,7 +707,7 @@ public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Progr
         // fail at the grant layer (trap #2: owner bypasses grants, so test as the app role).
         var appPassword = Environment.GetEnvironmentVariable("POSTGRES_APP_PASSWORD")!;
         await using var conn = new NpgsqlConnection(
-            $"Host=localhost;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
+            $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
         await conn.OpenAsync(TestContext.Current.CancellationToken);
 
         await using var cmd = new NpgsqlCommand("DELETE FROM messages WHERE room_id = $1", conn);

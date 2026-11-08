@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useReducer, useRef, useState } from 'react';
-import type { ConnectionState, DotwireClient, RoomMessage, SendAck } from '@dotwire/client';
+import type { ConnectionState, DotwireClient, RoomMessage, SendAck, SendMessageOptions } from '@dotwire/client';
 import { DotwireContext } from './provider.js';
 import {
   initialPresenceState,
@@ -47,7 +47,7 @@ export interface UseRoomResult {
   error: unknown;
   hasMore: boolean;
   loadOlder: () => Promise<void>;
-  send: (content: string) => Promise<SendAck>;
+  send: (content: string, options?: SendMessageOptions) => Promise<SendAck>;
 }
 
 /**
@@ -118,16 +118,12 @@ export function useRoom(roomId: string, options: UseRoomOptions = {}): UseRoomRe
   }, [client, roomId, history]);
 
   const send = useCallback(
-    async (content: string): Promise<SendAck> => {
+    async (content: string, options?: SendMessageOptions): Promise<SendAck> => {
       if (!client) {
         throw new Error('Dotwire client is not ready yet.');
       }
-      try {
-        return await client.sendMessage(roomId, content);
-      } catch (error) {
-        dispatch({ type: 'error', error });
-        throw error;
-      }
+      // A failed send is reported to the caller only: the subscription itself is still healthy.
+      return client.sendMessage(roomId, content, undefined, options);
     },
     [client, roomId]
   );

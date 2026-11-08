@@ -27,7 +27,9 @@ the doc section linked.
   plaintext content at rest. See ARCHITECTURE.md, "Encryption at rest & data lifecycle."
 - **TLS in transit.** Client and inter-service traffic is expected to run over TLS; TLS
   termination and certificate management are a host deployment concern (see "Shared
-  responsibility matrix" below).
+  responsibility matrix" below). The bundled compose files and HAProxy config are plain-HTTP,
+  loopback-bound development topologies, not a TLS deployment. JWKS URLs and webhook URLs must
+  be `https` unless explicitly overridden.
 - **Hash-chained, append-only audit log, with logged audit access and a verify endpoint.** A
   single durable consumer computes `hash = SHA-256(prev_hash ‖ canonical_event)` over every
   audit event and batch-inserts the results into an append-only Postgres table; UPDATE/DELETE
@@ -38,7 +40,8 @@ the doc section linked.
   audit access is self-documenting. **Every admin mutation now emits an audit event** — role
   changes, membership grants/revocations, redaction, message injection, and retention changes
   all leave an ids-only trail, not just the message-lifecycle events the log originally
-  covered. See ARCHITECTURE.md, "Audit log."
+  covered. `audit_log.prev_hash` is unique and checkpoints are validated on insert and again
+  by `/audit/verify`. See ARCHITECTURE.md, "Audit log."
 - **Role cross-check + membership authorization pipeline.** Every authenticated request
   verifies the JWT signature and standard claims, then cross-checks the token's `dw:role`
   claim against the service-side `user_roles` table — the table is authoritative, not the
@@ -127,6 +130,32 @@ full control environment, of which dotwire's technical controls are one input.
 | DSAR export endpoint (GDPR Art. 15 mechanism) | Operate the org-level compliance program: policies, security training, DPAs, BAAs, DPIAs, consent management |
 | Configurable retention, applied consistently to content and metadata | Encrypt and secure backups; dotwire's at-rest encryption does not automatically cover backup storage the host controls |
 | Documentation mapping controls to common frameworks (this document) | Harden the surrounding infrastructure: host OS, network, container runtime, secrets store |
+
+## Accepted limitations (read before mapping a control)
+
+- **Erasure and retention functions are callable by the runtime role.** `redact_message`,
+  `set_message_retention` and `get_message_retention` are `SECURITY DEFINER` functions granted
+  to `dotwire_app` and emit no audit event themselves; the API audits before calling them. Anyone
+  holding `dotwire_app` credentials can call them directly without an audit trail, so treat
+  those credentials as privileged and monitor database access.
+- **The audit chain is unkeyed.** `hash = SHA-256(prev_hash ‖ canonical_event)` detects edits
+  only relative to an anchor the attacker cannot rewrite. Export `audit_checkpoints` rows to
+  WORM or otherwise independent storage on a schedule, and alert on DDL against the audit
+  tables; the database-side checkpoint trigger and `/audit/verify` anchor check stop forged
+  checkpoints written through the app role, not an attacker with owner access.
+- **Audit events are published before the database commit.** A failed commit can leave an
+  audit event for a change that did not happen; retrying the (idempotent) admin call then
+  produces the change and a second event. The chain never misses a change that did happen.
+- **DSAR export bypasses room membership by design** (see AUTH.md) and is audited as
+  `dsar.exported`. Admin reads of role and membership metadata are not individually audited.
+- **Revocation of live sockets is eventually consistent.** A lost NATS broadcast is caught by
+  the gateway membership sweep, so the window is `Dotwire:MembershipSweepSeconds` (default 60),
+  plus read-replica lag where the read pool is a replica.
+- **Applied migrations are checksummed.** Startup fails if an already-applied migration file
+  changed, so schema drift from edited history is visible rather than silent.
+- **Third-party processors are the host's choice.** The moderation samples under `samples/`
+  send message content to Anthropic's Message Batches API. A host that adopts them adds
+  Anthropic as a subprocessor and must cover that in its DPA, records of processing and DPIA.
 
 ## What dotwire deliberately does not do
 

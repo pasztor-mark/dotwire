@@ -14,4 +14,6 @@ public sealed class SseOptions
 
     /// <summary>Rows per page while replaying history on resume.</summary>
     public int ReplayPageSize { get; set; } = 100;
+
+    public int MaxReplayRows { get; set; } = 1000;
 }

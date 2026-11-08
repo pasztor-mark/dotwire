@@ -13,6 +13,10 @@ export interface DotwireHostConfig {
   requestTimeoutMs?: number;
   /** HMAC-SHA256 secret used to verify `X-Dotwire-Signature` on incoming webhook calls. */
   webhookSecret?: string;
+  allowUnsignedWebhooks?: boolean;
+  allowLegacyWebhookSignatures?: boolean;
+  webhookToleranceSeconds?: number;
+  maxWebhookBodyBytes?: number;
   roleCacheTtlMs?: number;
   /** Every request goes through this so tests can inject a fake. Defaults to global `fetch`. */
   fetch?: typeof fetch;
@@ -62,6 +66,15 @@ export interface PostSendContext {
   time: string;
   content: string;
   senderUserId: string;
+}
+
+export interface WebhookSignatureHeaders {
+  timestamp?: string | null;
+  signatureV2?: string | null;
+}
+
+export interface SendAsUserOptions {
+  idempotencyKey?: string;
 }
 
 export interface SendMessageResult {

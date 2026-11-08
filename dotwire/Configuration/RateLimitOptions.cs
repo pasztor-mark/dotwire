@@ -19,6 +19,8 @@ public sealed class RateLimitOptions
 
     /// <summary>Per connection; hub Subscribe/Unsubscribe. Typing keeps its own cooldown, unaffected.</summary>
     public RateLimitBucketOptions Hub { get; set; } = new() { PermitLimit = 30, TokensPerPeriod = 10, PeriodSeconds = 1 };
+
+    public RateLimitBucketOptions Unauthenticated { get; set; } = new() { PermitLimit = 100, TokensPerPeriod = 50, PeriodSeconds = 1 };
 }
 
 public sealed class RateLimitBucketOptions

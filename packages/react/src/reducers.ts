@@ -106,22 +106,12 @@ export function typingReducer(state: TypingState, action: TypingAction): TypingS
       if (action.isTyping) {
         return { ...state, [action.userId]: { updatedAt: action.now } };
       }
-      if (!(action.userId in state)) return state;
-      const next = { ...state };
-      delete next[action.userId];
-      return next;
+      if (!Object.hasOwn(state, action.userId)) return state;
+      return Object.fromEntries(Object.entries(state).filter(([userId]) => userId !== action.userId));
     }
     case 'expire': {
-      let changed = false;
-      const next: TypingState = {};
-      for (const [userId, entry] of Object.entries(state)) {
-        if (action.now - entry.updatedAt < action.ttlMs) {
-          next[userId] = entry;
-        } else {
-          changed = true;
-        }
-      }
-      return changed ? next : state;
+      const kept = Object.entries(state).filter(([, entry]) => action.now - entry.updatedAt < action.ttlMs);
+      return kept.length === Object.keys(state).length ? state : Object.fromEntries(kept);
     }
     default:
       return state;

@@ -236,9 +236,17 @@ export async function POST(req: Request) {
 | `getRoomMembers(roomId)` | `Promise<string[]>` | Retrieves all user IDs authorized in a room. |
 | `getRoomParticipants(roomId, asUserId)` | `Promise<string[]>` | Lists participant IDs using the named user's room access. |
 | `getUserRooms(userId)` | `Promise<string[]>` | Retrieves all room IDs accessible to a user. |
-| `sendAsUser(roomId, userId, content)` | `Promise<SendMessageResult>` | Sends as a room member. |
+| `sendAsUser(roomId, userId, content, options?)` | `Promise<SendMessageResult>` | Sends as a room member; `options.idempotencyKey` becomes the `Idempotency-Key` header. |
 | `sendSystemMessage(roomId, content, options?)` | `Promise<SendMessageResult>` | Sends a host announcement to a room. |
 | `getMessages(roomId, options)` | `Promise<RoomHistoryResponse>` | Queries history as `options.asUserId`. |
+| `handlePresendWebhook(request)` / `handlePostSendWebhook(request)` | `Promise<Response>` | Verifies and handles dotwire's webhook call-outs. Requires `webhookSecret` (or `allowUnsignedWebhooks: true`). |
+| `handlePresendWebhookBody(body, signature, rawBody, { timestamp, signatureV2 })` | `Promise<WebhookResult>` | Express-style variant; pass the raw body and the `X-Dotwire-Timestamp` / `X-Dotwire-Signature-V2` headers. |
+
+Room ids must be UUIDs; anything else throws a `TypeError` before a request is built, and
+`handleClientSend*` answers `400`. Webhook handlers verify `X-Dotwire-Signature-V2` over
+`"<timestamp>.<raw body>"`, reject calls older than `webhookToleranceSeconds` (default 300) and
+bodies over `maxWebhookBodyBytes` (default 1 MiB, `413`). The legacy body-only
+`X-Dotwire-Signature` is accepted only with `allowLegacyWebhookSignatures: true`.
 
 ### `DotwireHostRoom`
 

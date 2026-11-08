@@ -76,13 +76,15 @@ public sealed partial class DotwireHostClient : IDotwireHostClient
 
     // ---- low-level HTTP -----------------------------------------------------
 
-    private async Task<HttpResponseMessage> SendRawAsync(HttpMethod method, string path, string bearerToken, HttpContent? content, CancellationToken ct)
+    private async Task<HttpResponseMessage> SendRawAsync(HttpMethod method, string path, string bearerToken, HttpContent? content, CancellationToken ct, string? idempotencyKey = null)
     {
         using var timeoutCts = new CancellationTokenSource(_options.RequestTimeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
 
         using var request = new HttpRequestMessage(method, path) { Content = content };
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearerToken);
+        if (!string.IsNullOrEmpty(idempotencyKey))
+            request.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
 
         HttpResponseMessage response;
         try
@@ -121,9 +123,9 @@ public sealed partial class DotwireHostClient : IDotwireHostClient
     }
 
     private async Task<TResponse> SendAsync<TResponse>(
-        HttpMethod method, string path, string bearerToken, JsonTypeInfo<TResponse> responseType, CancellationToken ct, HttpContent? content = null)
+        HttpMethod method, string path, string bearerToken, JsonTypeInfo<TResponse> responseType, CancellationToken ct, HttpContent? content = null, string? idempotencyKey = null)
     {
-        using var response = await SendRawAsync(method, path, bearerToken, content, ct);
+        using var response = await SendRawAsync(method, path, bearerToken, content, ct, idempotencyKey);
         return await response.Content.ReadFromJsonAsync(responseType, ct)
                ?? throw new DotwireApiException(method, path, response.StatusCode, "empty_response");
     }

@@ -13,17 +13,55 @@ public sealed class PresenceCoalescer(
     ILogger<PresenceCoalescer> logger) : BackgroundService
 {
     private readonly ConcurrentDictionary<Guid, ConcurrentQueue<(string UserId, bool Joined)>> _events = new();
+    private readonly Dictionary<(Guid RoomId, string UserId), int> _refCounts = new();
+    private readonly Lock _refGate = new();
+
+    public int PendingRooms => _events.Count;
 
     public void QueueJoin(Guid roomId, string userId)
     {
-        var queue = _events.GetOrAdd(roomId, _ => new ConcurrentQueue<(string, bool)>());
-        queue.Enqueue((userId, true));
+        if (!natsOptions.Value.Enabled)
+            return;
+
+        bool first;
+        lock (_refGate)
+        {
+            _refCounts.TryGetValue((roomId, userId), out var count);
+            _refCounts[(roomId, userId)] = count + 1;
+            first = count == 0;
+        }
+
+        if (first)
+            Enqueue(roomId, userId, true);
     }
 
     public void QueueLeave(Guid roomId, string userId)
     {
+        if (!natsOptions.Value.Enabled)
+            return;
+
+        lock (_refGate)
+        {
+            if (!_refCounts.TryGetValue((roomId, userId), out var count))
+                return;
+            if (count > 1)
+            {
+                _refCounts[(roomId, userId)] = count - 1;
+                return;
+            }
+            _refCounts.Remove((roomId, userId));
+        }
+
+        Enqueue(roomId, userId, false);
+    }
+
+    internal IReadOnlyList<(string UserId, bool Joined)> PeekQueued(Guid roomId) =>
+        _events.TryGetValue(roomId, out var queue) ? [.. queue] : [];
+
+    private void Enqueue(Guid roomId, string userId, bool joined)
+    {
         var queue = _events.GetOrAdd(roomId, _ => new ConcurrentQueue<(string, bool)>());
-        queue.Enqueue((userId, false));
+        queue.Enqueue((userId, joined));
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)

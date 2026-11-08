@@ -30,20 +30,22 @@ public static class TestTokens
         string? audience = Audience,
         TimeSpan? ttl = null,
         RSA? rsa = null,
-        string kid = TestKeys.Kid)
+        string kid = TestKeys.Kid,
+        bool includeIat = true,
+        DateTime? issuedAt = null)
     {
         var claims = new Dictionary<string, object> { ["sub"] = sub };
         if (role is not null)
             claims["dw:role"] = role;
 
         var now = DateTime.UtcNow;
-        return new JsonWebTokenHandler().CreateToken(new SecurityTokenDescriptor
+        return new JsonWebTokenHandler { SetDefaultTimesOnTokenCreation = false }.CreateToken(new SecurityTokenDescriptor
         {
             Issuer = issuer,
             Audience = audience,
             Claims = claims,
             NotBefore = now.AddMinutes(-1),
-            IssuedAt = now,
+            IssuedAt = includeIat ? issuedAt ?? now : null,
             Expires = now.Add(ttl ?? TimeSpan.FromMinutes(15)),
             SigningCredentials = new SigningCredentials(
                 new RsaSecurityKey(rsa ?? TestKeys.Rsa) { KeyId = kid },

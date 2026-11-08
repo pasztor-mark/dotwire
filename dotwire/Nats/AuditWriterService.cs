@@ -53,7 +53,7 @@ public sealed class AuditWriterService(
                 // A dropped connection here releases the session-scoped advisory lock on
                 // the server side; looping back to AcquireLockedConnectionAsync opens a
                 // fresh session and re-enters the contest for the lock.
-                logger.LogError(ex, "Audit writer loop error, retrying: {Error}", ex.Message);
+                logger.LogError("Audit writer loop error ({ErrorType}), retrying: {Error}", ex.GetType().Name, ex.Message);
                 await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
             }
             finally
@@ -132,7 +132,8 @@ public sealed class AuditWriterService(
 
     private static async Task<DateOnly?> LoadLatestCheckpointDayAsync(NpgsqlConnection conn, CancellationToken ct)
     {
-        await using var cmd = new NpgsqlCommand("SELECT day FROM audit_checkpoints ORDER BY day DESC LIMIT 1", conn);
+        await using var cmd = new NpgsqlCommand(
+            "SELECT day FROM audit_checkpoints WHERE day <= (now() AT TIME ZONE 'UTC')::date ORDER BY day DESC LIMIT 1", conn);
         var result = await cmd.ExecuteScalarAsync(ct);
         return result is DateTime dt ? DateOnly.FromDateTime(dt) : null;
     }
@@ -154,7 +155,7 @@ public sealed class AuditWriterService(
                 committed.Add(reader.GetInt64(0));
         }
 
-        var rows = new List<(AuditEvent Event, byte[] Hash, byte[] PrevHash, long StreamSeq)>();
+        var rows = new List<(AuditEvent Event, byte[] Hash, byte[] PrevHash, long StreamSeq, DateTimeOffset StreamTime)>();
         var prevHash = tailHash;
 
         foreach (var msg in batch)
@@ -163,13 +164,14 @@ public sealed class AuditWriterService(
             if (!committed.Add(streamSeq))
                 continue;
 
-            var evt = JsonSerializer.Deserialize(msg.Data!, DotwireJsonContext.Default.AuditEvent);
-            if (evt is null)
-                continue;
+            var streamTime = msg.Metadata!.Value.Timestamp;
+            var evt = ParseOrPlaceholder(msg.Data, streamTime);
+            if (evt.EventType == MalformedEventType)
+                logger.LogError("Malformed audit event at stream seq {StreamSeq}; recording an {EventType} placeholder", streamSeq, MalformedEventType);
 
             var canonical = AuditCanonicalForm.Compute(evt);
             var hash = AuditCanonicalForm.Hash(prevHash, canonical);
-            rows.Add((evt, hash, prevHash, streamSeq));
+            rows.Add((evt, hash, prevHash, streamSeq, streamTime));
             prevHash = hash;
         }
 
@@ -183,9 +185,9 @@ public sealed class AuditWriterService(
             var cmd = new NpgsqlBatchCommand(
                 """
                 INSERT INTO audit_log
-                    (event_type, room_id, message_seq, actor_id, subject_id, value, event_time, prev_hash, hash, stream_seq)
+                    (event_type, room_id, message_seq, actor_id, subject_id, value, event_time, prev_hash, hash, stream_seq, stream_time)
                 VALUES
-                    ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 RETURNING id
                 """);
             cmd.Parameters.AddWithValue(row.Event.EventType);
@@ -198,6 +200,7 @@ public sealed class AuditWriterService(
             cmd.Parameters.AddWithValue(row.PrevHash);
             cmd.Parameters.AddWithValue(row.Hash);
             cmd.Parameters.AddWithValue(row.StreamSeq);
+            cmd.Parameters.AddWithValue(row.StreamTime.ToUniversalTime());
             insert.BatchCommands.Add(cmd);
         }
 
@@ -228,9 +231,36 @@ public sealed class AuditWriterService(
         cmd.Parameters.AddWithValue(today.ToDateTime(TimeOnly.MinValue));
         cmd.Parameters.AddWithValue(tailId);
         cmd.Parameters.AddWithValue(tailHash);
-        await cmd.ExecuteNonQueryAsync(ct);
+        try
+        {
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        catch (PostgresException ex)
+        {
+            logger.LogError("Audit checkpoint for {Day} rejected: {Error}", today, ex.MessageText);
+        }
 
         _latestCheckpointDay = today;
+    }
+
+    public const string MalformedEventType = "audit.malformed";
+
+    internal static AuditEvent ParseOrPlaceholder(byte[]? data, DateTimeOffset streamTime)
+    {
+        try
+        {
+            if (data is { Length: > 0 } &&
+                JsonSerializer.Deserialize(data, DotwireJsonContext.Default.AuditEvent) is { EventType.Length: > 0 } evt &&
+                (evt.ActorId is null || Dotwire.Auth.IdValidation.IsValid(evt.ActorId)) &&
+                (evt.SubjectId is null || Dotwire.Auth.IdValidation.IsValid(evt.SubjectId)) &&
+                !evt.EventType.Contains('\n'))
+                return evt;
+        }
+        catch (JsonException)
+        {
+        }
+
+        return new AuditEvent(MalformedEventType, null, null, null, null, null, streamTime);
     }
 
     private async Task<INatsJSConsumer> GetConsumerWithRetryAsync(NatsOptions options, CancellationToken ct)

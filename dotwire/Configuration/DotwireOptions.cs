@@ -24,4 +24,17 @@ public sealed class DotwireOptions
 
     /// <summary>Max message content size in UTF-8 bytes; oversized sends are 400s.</summary>
     public int MaxContentBytes { get; set; } = 65536;
+
+    public long MaxRequestBodyBytes { get; set; } = 256 * 1024;
+
+    public int MaxConnectionsPerUser { get; set; } = 100;
+
+    public int MembershipSweepSeconds { get; set; } = 60;
+}
+
+public sealed class CorsSettings
+{
+    public const string SectionName = "Cors";
+
+    public string[] AllowedOrigins { get; set; } = [];
 }

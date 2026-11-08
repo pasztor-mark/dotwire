@@ -13,9 +13,9 @@ namespace Dotwire.Nats;
 /// With <c>Nats:Enabled=false</c> this is a no-op, matching in-process tests that run
 /// without NATS.
 /// </summary>
-public sealed class AuditPublisher(INatsJSContext js, IOptions<NatsOptions> natsOptions)
+public class AuditPublisher(INatsJSContext js, IOptions<NatsOptions> natsOptions)
 {
-    public async Task PublishAsync(AuditEvent evt, CancellationToken ct)
+    public virtual async Task PublishAsync(AuditEvent evt, CancellationToken ct)
     {
         var options = natsOptions.Value;
         if (!options.Enabled)

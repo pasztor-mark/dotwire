@@ -23,6 +23,10 @@
     </ItemGroup>
 
     <ItemGroup>
+      <InternalsVisibleTo Include="dotwire.Tests" />
+    </ItemGroup>
+
+    <ItemGroup>
       <EmbeddedResource Include="Migrations\**\*.sql" />
     </ItemGroup>
 
