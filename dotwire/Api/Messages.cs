@@ -6,6 +6,7 @@ using Dotwire.Auth;
 using Dotwire.Configuration;
 using Dotwire.Crypto;
 using Dotwire.Data;
+using Dotwire.Nats;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 using NATS.Client.Core;
@@ -140,72 +141,31 @@ public partial class DotwireJsonContext : JsonSerializerContext;
 
 public static class Messages
 {
-    public static void MapMessageEndpoints(WebApplication app)
+    public static void MapMessageEndpoints(WebApplication app, bool hubSend)
     {
         var group = app.MapGroup("/rooms/{roomId}/messages")
-            .RequireAuthorization()
-            .AddEndpointFilter<RoleCrossCheckFilter>()
-            .AddEndpointFilter<RoomMembershipFilter>();
+            .RequireAuthorization();
+        if (hubSend)
+            group.AddEndpointFilter<SendRateLimitFilter>();
+        group.AddEndpointFilter<RoomAccessFilter>();
 
-        group.MapPost("/", async (
+        var post = group.MapPost("/", async (
             string roomId,
             SendMessageRequest request,
             HttpContext http,
-            MessageCipher cipher,
-            INatsJSContext js,
-            INatsConnection nats,
-            IOptions<DotwireOptions> dotwireOptions,
-            IOptions<NatsOptions> natsOptions,
-            Dotwire.Nats.PresendWebhookClient presendClient,
-            Dotwire.Nats.PostSendWebhookService postSendService,
-            ILoggerFactory loggerFactory) =>
+            MessageSend sender) =>
         {
             if (!Guid.TryParse(roomId, out var roomGuid))
                 return Results.NotFound();
-            var logger = loggerFactory.CreateLogger("Dotwire.Api.Messages");
-            var maxBytes = dotwireOptions.Value.MaxContentBytes;
-
-            if (ValidateContent(request.Content, maxBytes) is { } invalid)
-                return invalid;
 
             var senderId = http.User.FindFirstValue("sub")!;
-            if (!IdValidation.IsValid(senderId))
-                return ApiResults.InvalidUserId();
+            var (response, rejection) = await sender.SendAsync(
+                roomGuid, senderId, request.Content, http.Request.Headers["Idempotency-Key"].ToString(), http.RequestAborted);
 
-            var idempotencyKey = http.Request.Headers["Idempotency-Key"].ToString();
-            if (idempotencyKey.Length > 0 && (idempotencyKey.Length > MaxIdempotencyKeyLength || !IdValidation.IsValid(idempotencyKey)))
-                return ApiResults.InvalidRequest("Idempotency-Key must be 1-128 printable characters");
-
-            var time = DateTimeOffset.UtcNow;
-
-            var verdict = await presendClient.EvaluateAsync(roomGuid, senderId, request.Content!, time, "member", http.RequestAborted);
-            var (presendError, content) = ApplyPresend(verdict, request.Content!, maxBytes);
-            if (presendError is not null)
-                return presendError;
-
-            var plaintext = Encoding.UTF8.GetBytes(content);
-
-            MessagePublisher.PublishResult result;
-            try
-            {
-                // 3-4. Encrypt, publish RoomMessage to JetStream, await the ack, then
-                //      best-effort republish a seq-tagged live message on NATS core.
-                result = await MessagePublisher.PublishAsync(
-                    roomGuid, senderId, plaintext, cipher, js, nats, natsOptions.Value, logger, http.RequestAborted,
-                    idempotencyKey.Length > 0 ? $"{roomGuid:N}:{senderId}:{idempotencyKey}" : null);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                logger.LogError("JetStream publish failed for room {RoomId}: {Error}", roomGuid, ex.Message);
-                return ApiResults.StreamUnavailable();
-            }
-
-            if (!result.Duplicate)
-                postSendService.Enqueue(new PostSendWebhookRequest(roomGuid, result.Seq, senderId, content, result.Time, "member"));
-
-            // 6. Return the ack.
-            return Results.Accepted(value: new SendMessageResponse(result.Seq, result.Time));
-        }).RequireRateLimiting("send");
+            return rejection is not null ? ToResult(rejection) : Results.Accepted(value: response);
+        });
+        if (!hubSend)
+            post.RequireRateLimiting("send");
 
         group.MapGet("/", async (
             string roomId,
@@ -214,7 +174,7 @@ public static class Messages
             int? limit,
             [FromKeyedServices(PostgresDataSources.Read)] NpgsqlDataSource readDataSource,
             MessageCipher cipher,
-            INatsJSContext js,
+            RoomsStreamCache streams,
             IOptions<NatsOptions> natsOptions,
             HttpContext http,
             ILoggerFactory loggerFactory) =>
@@ -227,7 +187,7 @@ public static class Messages
 
             var logger = loggerFactory.CreateLogger("Dotwire.Api.Messages");
             var (rawRows, hasMore) = await QueryHistoryPageAsync(
-                readDataSource, js, natsOptions.Value, logger, roomGuid, afterSeq, beforeSeq, pageSize, ct);
+                readDataSource, streams, natsOptions.Value, logger, roomGuid, afterSeq, beforeSeq, pageSize, ct);
 
             if (!isAscending)
             {
@@ -255,24 +215,35 @@ public static class Messages
 
     public const int MaxIdempotencyKeyLength = 128;
 
-    internal static IResult? ValidateContent(string? content, int maxBytes) =>
-        string.IsNullOrEmpty(content) || Encoding.UTF8.GetByteCount(content) > maxBytes ? ApiResults.InvalidContent() : null;
+    internal static SendRejection? ValidateContent(string? content, int maxBytes) =>
+        string.IsNullOrEmpty(content) || Encoding.UTF8.GetByteCount(content) > maxBytes ? new SendRejection("invalid_content") : null;
 
-    internal static (IResult? Error, string Content) ApplyPresend(Dotwire.Nats.PresendVerdict verdict, string content, int maxBytes) =>
+    internal static (SendRejection? Error, string Content) ApplyPresend(Dotwire.Nats.PresendVerdict verdict, string content, int maxBytes) =>
         verdict.Outcome switch
         {
-            Dotwire.Nats.PresendOutcome.Rejected => (ApiResults.PresendRejected(verdict.Reason), content),
-            Dotwire.Nats.PresendOutcome.Unavailable => (ApiResults.PresendUnavailable(), content),
+            Dotwire.Nats.PresendOutcome.Rejected => (new SendRejection("presend_rejected", verdict.Reason), content),
+            Dotwire.Nats.PresendOutcome.Unavailable => (new SendRejection("presend_unavailable"), content),
             Dotwire.Nats.PresendOutcome.AllowedWithRewrite when ValidateContent(verdict.Content, maxBytes) is { } invalid => (invalid, content),
             Dotwire.Nats.PresendOutcome.AllowedWithRewrite => (null, verdict.Content!),
             _ => (null, content),
+        };
+
+    internal static IResult ToResult(SendRejection rejection) =>
+        rejection.Code switch
+        {
+            "invalid_content" => ApiResults.InvalidContent(),
+            "invalid_user_id" => ApiResults.InvalidUserId(),
+            "invalid_request" => ApiResults.InvalidRequest(rejection.Reason),
+            "presend_rejected" => ApiResults.PresendRejected(rejection.Reason),
+            "presend_unavailable" => ApiResults.PresendUnavailable(),
+            _ => ApiResults.StreamUnavailable(),
         };
 
     internal static int TailReadBudget(int limit, bool keepNewest) => keepNewest ? limit * 2 : limit;
 
     /// <summary>Shared history-page query, reused by the REST history endpoint and SSE replay (spec §3.9).</summary>
     internal static async Task<(List<(ulong Seq, DateTimeOffset Time, string SenderId, string KeyId, byte[] Content)> Rows, bool HasMore)> QueryHistoryPageAsync(
-        NpgsqlDataSource readDataSource, INatsJSContext js, NatsOptions natsOptions, ILogger logger,
+        NpgsqlDataSource readDataSource, RoomsStreamCache streams, NatsOptions natsOptions, ILogger logger,
         Guid roomGuid, ulong? afterSeq, ulong? beforeSeq, int pageSize, CancellationToken ct)
     {
         string sql;
@@ -339,7 +310,7 @@ public static class Messages
         try
         {
             tail = await ReadUnpersistedTailAsync(
-                readDataSource, js, natsOptions, roomGuid, persistedTail, newest ? pageSize + 1 : pageSize - rawRows.Count + 1, newest, ct);
+                readDataSource, streams, natsOptions, roomGuid, persistedTail, newest ? pageSize + 1 : pageSize - rawRows.Count + 1, newest, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -370,12 +341,12 @@ public static class Messages
     }
 
     private static async Task<List<(ulong Seq, DateTimeOffset Time, string SenderId, string KeyId, byte[] Content)>> ReadUnpersistedTailAsync(
-        NpgsqlDataSource readDataSource, INatsJSContext js, NatsOptions natsOptions,
+        NpgsqlDataSource readDataSource, RoomsStreamCache streams, NatsOptions natsOptions,
         Guid roomGuid, ulong afterSeq, int limit, bool keepNewest, CancellationToken ct)
     {
         var rows = new List<(ulong Seq, DateTimeOffset Time, string SenderId, string KeyId, byte[] Content)>();
         var subject = $"{natsOptions.RoomSubjectPrefix}{roomGuid}";
-        var stream = await js.GetStreamAsync(natsOptions.RoomsStream, cancellationToken: ct);
+        var stream = await streams.GetAsync(ct);
         var maxReads = TailReadBudget(limit, keepNewest);
         var next = afterSeq + 1;
 
@@ -389,6 +360,11 @@ public static class Messages
             catch (NatsJSApiException ex) when (ex.Error.ErrCode == 10037)
             {
                 break;
+            }
+            catch (NatsJSApiException ex) when (ex.Error.ErrCode == 10059)
+            {
+                streams.Invalidate();
+                throw;
             }
 
             var stored = response.Message;

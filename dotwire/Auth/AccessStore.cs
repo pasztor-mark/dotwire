@@ -9,6 +9,8 @@ public interface IAccessStore
 
     Task<bool> IsMemberAsync(Guid roomId, string userId, CancellationToken ct);
 
+    Task<(string? Role, bool IsMember)> GetRoleAndMembershipAsync(Guid roomId, string userId, CancellationToken ct);
+
     Task<IReadOnlyDictionary<string, string>> GetRolesAsync(IReadOnlyCollection<string> userIds, CancellationToken ct);
 
     Task<IReadOnlySet<(Guid RoomId, string UserId)>> FilterMembersAsync(
@@ -32,6 +34,17 @@ public sealed class PostgresAccessStore(
         cmd.Parameters.AddWithValue(roomId);
         cmd.Parameters.AddWithValue(userId);
         return (bool)(await cmd.ExecuteScalarAsync(ct))!;
+    }
+
+    public async Task<(string? Role, bool IsMember)> GetRoleAndMembershipAsync(Guid roomId, string userId, CancellationToken ct)
+    {
+        await using var cmd = readDataSource.CreateCommand(
+            "SELECT (SELECT role FROM user_roles WHERE user_id = $2), EXISTS (SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2)");
+        cmd.Parameters.AddWithValue(roomId);
+        cmd.Parameters.AddWithValue(userId);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        await reader.ReadAsync(ct);
+        return (reader.IsDBNull(0) ? null : reader.GetString(0), reader.GetBoolean(1));
     }
 
     public async Task<IReadOnlyDictionary<string, string>> GetRolesAsync(IReadOnlyCollection<string> userIds, CancellationToken ct)

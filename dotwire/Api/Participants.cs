@@ -14,7 +14,7 @@ public static class Participants
                 [FromKeyedServices(PostgresDataSources.Read)] NpgsqlDataSource readDataSource,
                 HttpContext http) =>
             {
-                var roomGuid = Guid.Parse(roomId); // RoomMembershipFilter validated the route value.
+                var roomGuid = Guid.Parse(roomId); // RoomAccessFilter validated the route value.
                 var userIds = new List<string>();
                 await using var cmd = readDataSource.CreateCommand(
                     "SELECT user_id FROM room_members WHERE room_id = $1 ORDER BY user_id ASC");
@@ -26,8 +26,7 @@ public static class Participants
                 return Results.Json(userIds.ToArray(), DotwireJsonContext.Default.StringArray);
             })
             .RequireAuthorization()
-            .AddEndpointFilter<RoleCrossCheckFilter>()
-            .AddEndpointFilter<RoomMembershipFilter>()
+            .AddEndpointFilter<RoomAccessFilter>()
             .RequireRateLimiting("read");
     }
 }

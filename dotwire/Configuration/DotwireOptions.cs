@@ -30,6 +30,13 @@ public sealed class DotwireOptions
     public int MaxConnectionsPerUser { get; set; } = 100;
 
     public int MembershipSweepSeconds { get; set; } = 60;
+
+    public HubSendOptions HubSend { get; set; } = new();
+}
+
+public sealed class HubSendOptions
+{
+    public bool Enabled { get; set; }
 }
 
 public sealed class CorsSettings

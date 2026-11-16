@@ -19,7 +19,10 @@ public sealed class RoomHub(
     TypingThrottle typingThrottle,
     UserConnectionLimiter connectionLimiter,
     INatsConnection nats,
-    IOptions<NatsOptions> natsOptions) : Hub
+    IOptions<NatsOptions> natsOptions,
+    MessageSend messageSend,
+    SendRateLimiter sendRateLimiter,
+    IOptions<DotwireOptions> dotwireOptions) : Hub
 {
     private const string ConnectionSlotKey = "dotwire_connection_slot";
 
@@ -45,10 +48,8 @@ public sealed class RoomHub(
             throw new HubException("Unauthorized");
 
         var ct = Context.ConnectionAborted;
-        if (await accessStore.GetRoleAsync(sub, ct) != claimedRole)
-            throw new HubException("Forbidden");
-
-        if (!await accessStore.IsMemberAsync(roomId, sub, ct))
+        var (role, isMember) = await accessStore.GetRoleAndMembershipAsync(roomId, sub, ct);
+        if (role != claimedRole || !isMember)
             throw new HubException("Forbidden");
 
         if (!await interestManager.SubscribeAsync(roomId, Context.ConnectionId, sub, claimedRole))
@@ -103,6 +104,28 @@ public sealed class RoomHub(
         var payload = JsonSerializer.SerializeToUtf8Bytes(notification, DotwireJsonContext.Default.TypingNotification);
 
         await nats.PublishAsync<byte[]>($"room.{roomId}.ephemeral.typing", payload, cancellationToken: Context.ConnectionAborted);
+    }
+
+    public async Task<SendMessageResponse> Send(Guid roomId, string content, string? idempotencyKey)
+    {
+        if (!dotwireOptions.Value.HubSend.Enabled)
+            throw new HubException("HubSendDisabled");
+
+        var sub = Context.User?.FindFirstValue("sub");
+        if (string.IsNullOrEmpty(sub))
+            throw new HubException("Unauthorized");
+
+        if (!sendRateLimiter.TryAcquire(sub, out _))
+            throw new HubException("RateLimited");
+
+        if (!interestManager.IsSubscribed(Context.ConnectionId, roomId))
+            throw new HubException("Forbidden");
+
+        var (response, rejection) = await messageSend.SendAsync(roomId, sub, content, idempotencyKey, Context.ConnectionAborted);
+        if (rejection is not null)
+            throw new HubException(rejection.Reason is null ? rejection.Code : $"{rejection.Code}:{rejection.Reason}");
+
+        return response!;
     }
 
     public override async Task OnDisconnectedAsync(Exception? exception)

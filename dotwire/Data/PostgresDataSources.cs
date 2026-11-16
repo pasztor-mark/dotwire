@@ -1,3 +1,5 @@
+using Npgsql;
+
 namespace Dotwire.Data;
 
 /// <summary>
@@ -9,4 +11,29 @@ public static class PostgresDataSources
 {
     public const string Read = "postgres-read";
     public const string Write = "postgres-write";
+
+    public static async Task<int> WarmAsync(NpgsqlDataSource dataSource, int count, TimeSpan budget, ILogger logger)
+    {
+        if (count <= 0)
+            return 0;
+
+        var held = new List<NpgsqlConnection>(count);
+        try
+        {
+            using var cts = new CancellationTokenSource(budget);
+            for (var i = 0; i < count; i++)
+                held.Add(await dataSource.OpenConnectionAsync(cts.Token));
+        }
+        catch (Exception ex) when (ex is NpgsqlException or OperationCanceledException)
+        {
+            logger.LogWarning("Postgres read pool warm-up stopped after {Opened} of {Count} connections: {Message}", held.Count, count, ex.Message);
+        }
+        finally
+        {
+            foreach (var connection in held)
+                await connection.DisposeAsync();
+        }
+
+        return held.Count;
+    }
 }

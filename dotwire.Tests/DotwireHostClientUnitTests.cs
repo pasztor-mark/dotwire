@@ -100,6 +100,27 @@ public class DotwireHostClientUnitTests
         Assert.Equal(TimeSpan.FromSeconds(7), ex.RetryAfter);
     }
 
+    [Fact]
+    public async Task SendAsUserAsync_RateLimited_SurfacesRetryAfterWithoutRetry()
+    {
+        var (client, handler) = MakeClient();
+        var calls = 0;
+        handler.Respond(_ =>
+        {
+            calls++;
+            var response = MakeResponse(HttpStatusCode.TooManyRequests, """{"error":"rate_limited"}""");
+            response.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(3));
+            return response;
+        });
+
+        var ex = await Assert.ThrowsAsync<DotwireApiException>(() =>
+            client.SendAsUserAsync(Guid.NewGuid(), "user-1", "hi", "k1", TestContext.Current.CancellationToken));
+
+        Assert.Equal(DotwireErrorKind.RateLimited, ex.Kind);
+        Assert.Equal(TimeSpan.FromSeconds(3), ex.RetryAfter);
+        Assert.Equal(1, calls);
+    }
+
     // ---- role resolution -------------------------------------------------------
 
     [Fact]

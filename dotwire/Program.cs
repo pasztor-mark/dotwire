@@ -134,7 +134,8 @@ builder.Services.AddRateLimiter(options =>
         return RateLimitPartition.GetTokenBucketLimiter($"ip:{httpContext.Connection.RemoteIpAddress}", _ => BucketOptions(bucket));
     });
 
-    AddUserBucketPolicy(options, "send", o => o.Send);
+    if (!dotwireOptions.HubSend.Enabled)
+        AddUserBucketPolicy(options, "send", o => o.Send);
     AddUserBucketPolicy(options, "read", o => o.Read);
     AddUserBucketPolicy(options, "admin", o => o.Admin);
 });
@@ -152,6 +153,7 @@ builder.Services.AddSingleton<INatsConnection>(sp =>
 });
 builder.Services.AddSingleton<INatsJSContext>(sp =>
     new NatsJSContext(sp.GetRequiredService<INatsConnection>()));
+builder.Services.AddSingleton<RoomsStreamCache>();
 
 builder.Services.AddSingleton<RoomHubLifetimeManager>();
 builder.Services.AddSingleton<HubLifetimeManager<RoomHub>>(sp => sp.GetRequiredService<RoomHubLifetimeManager>());
@@ -169,6 +171,8 @@ builder.Services.AddHttpClient(PresendWebhookClient.HttpClientName, client =>
         PooledConnectionLifetime = TimeSpan.FromMinutes(2),
     });
 builder.Services.AddSingleton<PresendWebhookClient>();
+builder.Services.AddSingleton<SendRateLimiter>();
+builder.Services.AddSingleton<MessageSend>();
 builder.Services.AddSingleton<PostSendWebhookService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PostSendWebhookService>());
 
@@ -205,7 +209,7 @@ app.UseAuthorization();
 
 if (nodeRole is NodeRole.All or NodeRole.Api)
 {
-    Messages.MapMessageEndpoints(app);
+    Messages.MapMessageEndpoints(app, dotwireOptions.HubSend.Enabled);
     Participants.MapParticipantEndpoints(app);
     Admin.MapAdminEndpoints(app);
     Audit.MapAuditEndpoints(app);
@@ -253,6 +257,12 @@ if (nats.Enabled)
 }
 
 await keyRing.RefreshAsync();
+
+await PostgresDataSources.WarmAsync(
+    app.Services.GetRequiredKeyedService<NpgsqlDataSource>(PostgresDataSources.Read),
+    new NpgsqlConnectionStringBuilder(RequireConnectionString(app.Configuration, "PostgresRead")).MinPoolSize,
+    TimeSpan.FromSeconds(5),
+    app.Logger);
 
 app.Run();
 return 0;

@@ -41,11 +41,10 @@ dotwire is a free, open-source chat layer you embed in your own application. You
 │ dotwire Gateway Node (.NET 10 Native AOT)                                                    │
 │                                                                                              │
 │  1. JwtBearer: Validate RS256 Signature + Exp + Claims                                       │
-│  2. RoleCrossCheckFilter: SELECT role FROM user_roles (Read Pool)                            │
-│  3. RoomMembershipFilter: SELECT EXISTS FROM room_members (Read Pool)                        │
-│  4. MessageCipher: Encrypt Payload (AES-256-GCM under active key)                            │
-│  5. JetStream Publish: Publish to NATS stream ROOMS (subject: room.{roomId})                  │
-│  6. Client Ack: Return HTTP 202 Accepted with (seq, time)                                    │
+│  2. RoomAccessFilter: role + membership in one query (Read Pool)                             │
+│  3. MessageCipher: Encrypt Payload (AES-256-GCM under active key)                            │
+│  4. JetStream Publish: Publish to NATS stream ROOMS (subject: room.{roomId})                  │
+│  5. Client Ack: Return HTTP 202 Accepted with (seq, time)                                    │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
                                                    │
                         JetStream Ingest (TCP)     │     Background Batch Insert
@@ -99,7 +98,7 @@ echo "Auth__Keys__dev=\"$(awk '{printf "%s\\n",$0}' dev-jwt.pub)\"" >> .env
 docker compose up -d --build
 ```
 
-Omit `--build` to run the published image, `ghcr.io/pasztor-mark/dotwire:<version>` (`linux/amd64` and `linux/arm64`; set `DOTWIRE_VERSION`, default `0.3.0`).
+Omit `--build` to run the published image, `ghcr.io/pasztor-mark/dotwire:<version>` (`linux/amd64` and `linux/arm64`; set `DOTWIRE_VERSION`, default `0.4.0`).
 
 The compose stacks publish plain HTTP on `127.0.0.1` only. Before exposing dotwire, put TLS in front of it, set `Cors:AllowedOrigins` and `AllowedHosts` to your real origins and host names, keep `ConnectionStrings:PostgresMigrator` on the migrating node only, and for `compose.multinode.yaml` set `NATS_USER`, `NATS_PASSWORD`, `POSTGRES_REPLICATION_PASSWORD` and `HAPROXY_STATS_PASSWORD` in `.env`. Connection strings in compose `environment:` are visible through `docker inspect`; in production supply them from your secret store instead. Point the host SDKs at an `https` `baseUrl` outside localhost. See ARCHITECTURE.md, "Deployment posture".
 
@@ -166,7 +165,7 @@ The architecture is governed by normative contracts:
 4. **[COMPLIANCE.md](COMPLIANCE.md)** — Compliance controls inventory, encryption, redaction, and audit logging.
 5. **[AGENTS.md](AGENTS.md)** — Hard architectural conventions for AI pair programmers and human contributors.
 
-Upgrading from 0.2.x? See **[UPGRADING.md](UPGRADING.md)** for the 0.3.0 breaking changes.
+Upgrading? See **[UPGRADING.md](UPGRADING.md)** (0.3 to 0.4 has no breaking changes; 0.2 to 0.3 does).
 
 ---
 

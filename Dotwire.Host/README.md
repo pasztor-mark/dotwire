@@ -147,6 +147,16 @@ the ack (the send already happened - never retry it). The webhook handler varian
 throwing `PostSend` instead, since the server's own postsend contract is best-effort and the
 send it describes has already happened either way.
 
+When the server runs with `Dotwire:HubSend:Enabled=true`, `POST /rooms/{roomId}/messages`
+shares one per-user send bucket with the hub `Send` method. The bucket is checked before the
+role and membership checks (a malformed body still gets `400` first), and an exhausted bucket
+returns `429` with `Retry-After`, surfaced as `DotwireApiException` with `Kind ==
+DotwireErrorKind.RateLimited` and `RetryAfter` set. Other errors keep their mapping: `403`
+`Forbidden`, `422` `PresendRejected`, `503` `Unavailable`. `SendAsUserAsync` never retries a
+`429` itself, and `Idempotency-Key` semantics are unchanged. This SDK has no hub transport:
+hub sending is member-facing and lives in `@dotwire/client` (`hubSend: true`), as with
+`Typing`.
+
 ```csharp
 client.Presend = (ctx, ct) => Task.FromResult(
     Blocklist.Hits(ctx.Content) ? PresendResult.Reject("blocked term") : PresendResult.Accept());

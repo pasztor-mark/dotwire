@@ -94,7 +94,8 @@ The order matters: each stage is only meaningful once the stage before it has pa
    not per message** — the result is cached on the connection and invalidated only by
    membership-change events, per ARCHITECTURE.md's "Concurrency and fanout disciplines." A
    per-message membership query would put the database on the fanout hot path; this contract
-   is what keeps it off.
+   is what keeps it off. Hub sends (`Dotwire:HubSend:Enabled`) rely on that same connection-cached
+   subscription.
 
 **Audit access is not room access.** The `auditor` role grants read access to the audit log
 and nothing else — it does not, by itself, grant membership in any room. `admin` manages the

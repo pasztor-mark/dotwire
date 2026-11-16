@@ -136,6 +136,76 @@ public class SecurityFixesComposeTests : IClassFixture<WebApplicationFactory<Pro
             })
             .Build();
 
+    private HubConnection HubOn(WebApplicationFactory<Program> app, string token) =>
+        new HubConnectionBuilder()
+            .WithUrl(new Uri(app.Server.BaseAddress, "/hub/rooms"), options =>
+            {
+                options.HttpMessageHandlerFactory = _ => app.Server.CreateHandler();
+                options.WebSocketFactory = async (context, ct) =>
+                {
+                    var ws = app.Server.CreateWebSocketClient();
+                    ws.ConfigureRequest = request => request.Headers.Authorization = $"Bearer {token}";
+                    return await ws.ConnectAsync(context.Uri, ct);
+                };
+                options.AccessTokenProvider = () => Task.FromResult<string?>(token);
+            })
+            .Build();
+
+    [Fact]
+    public async Task HubSend_IsDeliveredAndAckSeqMatches()
+    {
+        var app = _baseFactory.WithWebHostBuilder(b => b.UseSetting("Dotwire:HubSend:Enabled", "true"));
+        var room = Guid.NewGuid();
+        var u1 = $"it-hs-{Guid.NewGuid():N}";
+        var u2 = $"it-hs-{Guid.NewGuid():N}";
+        await SeedAsync(u1, "member", room);
+        await SeedAsync(u2, "member", room);
+
+        await using var sender = HubOn(app, TestTokens.Mint(u1));
+        await using var receiver = HubOn(app, TestTokens.Mint(u2));
+        var delivered = new TaskCompletionSource<RoomMessageDelivery>();
+        receiver.On<RoomMessageDelivery>("ReceiveMessage", m => delivered.TrySetResult(m));
+        await sender.StartAsync(Ct);
+        await receiver.StartAsync(Ct);
+        await sender.InvokeAsync("Subscribe", room, Ct);
+        await receiver.InvokeAsync("Subscribe", room, Ct);
+        await Task.Delay(200, Ct);
+
+        var ack = await sender.InvokeAsync<SendMessageResponse>("Send", room, "over the hub", null, Ct);
+        var received = await delivered.Task.WaitAsync(TimeSpan.FromSeconds(5), Ct);
+
+        Assert.Equal(ack.Seq, received.Seq);
+        Assert.Equal("over the hub", received.Content);
+        var client = Client(app, TestTokens.Mint(u1));
+        RoomHistoryResponse? history = null;
+        for (var i = 0; i < 40; i++)
+        {
+            history = await client.GetFromJsonAsync<RoomHistoryResponse>($"/rooms/{room}/messages", Ct);
+            if (history!.Messages.Any(m => m.Seq == ack.Seq))
+                break;
+            await Task.Delay(250, Ct);
+        }
+        Assert.Contains(ack.Seq, history!.Messages.Select(m => m.Seq));
+    }
+
+    [Fact]
+    public async Task HubSend_RetryWithSameIdempotencyKey_ReturnsTheOriginalSeq()
+    {
+        var app = _baseFactory.WithWebHostBuilder(b => b.UseSetting("Dotwire:HubSend:Enabled", "true"));
+        var room = Guid.NewGuid();
+        var u1 = $"it-hs-{Guid.NewGuid():N}";
+        await SeedAsync(u1, "member", room);
+
+        await using var sender = HubOn(app, TestTokens.Mint(u1));
+        await sender.StartAsync(Ct);
+        await sender.InvokeAsync("Subscribe", room, Ct);
+
+        var first = await sender.InvokeAsync<SendMessageResponse>("Send", room, "once", "key-1", Ct);
+        var second = await sender.InvokeAsync<SendMessageResponse>("Send", room, "once", "key-1", Ct);
+
+        Assert.Equal(first.Seq, second.Seq);
+    }
+
     [Fact]
     public async Task RoleChange_RevokesLiveHubSubscriptions()
     {

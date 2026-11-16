@@ -71,7 +71,10 @@ public class RealtimeFanoutUnitTests
             new TypingThrottle(),
             new UserConnectionLimiter(Options.Create(new DotwireOptions())),
             nats,
-            Options.Create(new NatsOptions()))
+            Options.Create(new NatsOptions()),
+            null!,
+            null!,
+            Options.Create(new DotwireOptions()))
         {
             Context = new FakeCallerContext("conn-1", "user-1"),
         };

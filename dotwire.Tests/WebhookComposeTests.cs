@@ -6,6 +6,9 @@ using System.Security.Cryptography;
 using System.Text;
 using Dotwire.Api;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.SignalR.Client;
+using Microsoft.AspNetCore.TestHost;
 using Xunit;
 
 namespace dotwire.Tests;
@@ -318,6 +321,72 @@ public class WebhookComposeTests
         var payload = await received.Task;
         Assert.Equal(roomId, payload.RoomId);
         Assert.Equal(sub, payload.SenderId);
+    }
+
+    private static HubConnection HubFor(WebApplicationFactory<Program> app, string token) =>
+        new HubConnectionBuilder()
+            .WithUrl(new Uri(app.Server.BaseAddress, "/hub/rooms"), options =>
+            {
+                options.HttpMessageHandlerFactory = _ => app.Server.CreateHandler();
+                options.WebSocketFactory = async (context, ct) =>
+                {
+                    var ws = app.Server.CreateWebSocketClient();
+                    ws.ConfigureRequest = request => request.Headers.Authorization = $"Bearer {token}";
+                    return await ws.ConnectAsync(context.Uri, ct);
+                };
+                options.AccessTokenProvider = () => Task.FromResult<string?>(token);
+            })
+            .Build();
+
+    [Fact]
+    public async Task HubSend_PresendReject_IsPresendRejectedWithReason()
+    {
+        await using var stub = new StubWebhookServer(_ => (200, """{"allow":false,"reason":"blocked"}"""));
+        await using var factory = BuildFactory(s =>
+        {
+            s.UseSetting("Dotwire:Webhooks:Presend:Url", stub.Url);
+            s.UseSetting("Dotwire:HubSend:Enabled", "true");
+        });
+        var roomId = Guid.NewGuid();
+        var sub = $"wh-hub-reject-{Guid.NewGuid():N}";
+        await using var _ = await SeedMemberAsync(sub, roomId);
+
+        await using var connection = HubFor(factory, TestTokens.Mint(sub));
+        await connection.StartAsync(TestContext.Current.CancellationToken);
+        await connection.InvokeAsync("Subscribe", roomId, TestContext.Current.CancellationToken);
+        var ex = await Assert.ThrowsAsync<HubException>(() =>
+            connection.InvokeAsync<SendMessageResponse>("Send", roomId, "hi", null, TestContext.Current.CancellationToken));
+
+        Assert.Contains("presend_rejected:blocked", ex.Message);
+    }
+
+    [Fact]
+    public async Task HubSend_DuplicateIdempotencyKey_PostSendOnce()
+    {
+        var postSendCalls = 0;
+        await using var stub = new StubWebhookServer(_ =>
+        {
+            Interlocked.Increment(ref postSendCalls);
+            return (200, "{}");
+        });
+        await using var factory = BuildFactory(s =>
+        {
+            s.UseSetting("Dotwire:Webhooks:PostSend:Url", stub.Url);
+            s.UseSetting("Dotwire:HubSend:Enabled", "true");
+        });
+        var roomId = Guid.NewGuid();
+        var sub = $"wh-hub-dup-{Guid.NewGuid():N}";
+        await using var _ = await SeedMemberAsync(sub, roomId);
+
+        await using var connection = HubFor(factory, TestTokens.Mint(sub));
+        await connection.StartAsync(TestContext.Current.CancellationToken);
+        await connection.InvokeAsync("Subscribe", roomId, TestContext.Current.CancellationToken);
+        var first = await connection.InvokeAsync<SendMessageResponse>("Send", roomId, "dup", "k1", TestContext.Current.CancellationToken);
+        var second = await connection.InvokeAsync<SendMessageResponse>("Send", roomId, "dup", "k1", TestContext.Current.CancellationToken);
+        await Task.Delay(1500, TestContext.Current.CancellationToken);
+
+        Assert.Equal(first.Seq, second.Seq);
+        Assert.Equal(1, postSendCalls);
     }
 
     [Fact]

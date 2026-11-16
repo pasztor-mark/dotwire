@@ -300,6 +300,16 @@ reconnect) happen internally; consumers just see `onMessage` fire once per new s
 | `release()` | `void` | Cancels timers, unbinds listeners, and lets the client drop the handle, without leaving the room (for handles that share a subscription). |
 | `dispose()` | `void` | `release()`, then leaves the room. |
 
+### Sending over the hub (`hubSend`)
+
+Opt in with `new DotwireClient({ ..., hubSend: true })` to send over the SignalR connection
+instead of REST. The hub path is used only while the client is connected and the room is
+subscribed, and never when `sendUrl` is set; otherwise `sendMessage` uses REST as before. The
+server must run with `Dotwire:HubSend:Enabled=true`; if it does not, the client falls back to
+REST. Domain errors (`Forbidden`, `RateLimited`, `PresendRejected`, ...) are never retried over
+REST and reject with the same `DotwireClientError` kinds. The idempotency key and
+`timeoutMs` behave as on REST.
+
 ### Errors
 
 Failed requests reject with a `DotwireClientError { status, kind, code?, reason?, retryAfterMs? }`,

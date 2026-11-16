@@ -5,6 +5,7 @@ using Dotwire.Auth;
 using Dotwire.Configuration;
 using Dotwire.Crypto;
 using Dotwire.Data;
+using Dotwire.Nats;
 using Dotwire.Realtime;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
@@ -20,8 +21,7 @@ public static class Events
     {
         var group = app.MapGroup("/rooms/{roomId}/events")
             .RequireAuthorization()
-            .AddEndpointFilter<RoleCrossCheckFilter>()
-            .AddEndpointFilter<RoomMembershipFilter>()
+            .AddEndpointFilter<RoomAccessFilter>()
             .RequireRateLimiting("read");
 
         group.MapGet("/", async (
@@ -30,7 +30,7 @@ public static class Events
             HttpContext http,
             [FromKeyedServices(PostgresDataSources.Read)] NpgsqlDataSource readDataSource,
             MessageCipher cipher,
-            INatsJSContext js,
+            RoomsStreamCache streams,
             IOptions<NatsOptions> natsOptions,
             RoomInterestManager interestManager,
             Dotwire.Realtime.PresenceCoalescer presenceCoalescer,
@@ -96,7 +96,7 @@ public static class Events
                         resumeSeq.Value,
                         sseOptions.MaxReplayRows,
                         (current, token) => Messages.QueryHistoryPageAsync(
-                            readDataSource, js, natsOptions.Value, logger, roomGuid, current, null, sseOptions.ReplayPageSize, token),
+                            readDataSource, streams, natsOptions.Value, logger, roomGuid, current, null, sseOptions.ReplayPageSize, token),
                         async (row, token) =>
                         {
                             byte[] decrypted;

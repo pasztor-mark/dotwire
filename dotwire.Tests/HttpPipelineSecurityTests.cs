@@ -33,6 +33,16 @@ public class HttpPipelineSecurityTests(WebApplicationFactory<Program> factory) :
     }
 
     [Fact]
+    public async Task Startup_ReadPoolWarmupFails_AppStillHealthy()
+    {
+        var (app, _) = App(b => b.UseSetting("ConnectionStrings:PostgresRead", "Host=127.0.0.1;Port=1;Database=dotwire;Minimum Pool Size=2;Timeout=1"));
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        var response = await app.CreateClient().GetAsync("/healthz", Ct);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(started.Elapsed < TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
     public async Task RoleCrossCheck_TokenAdminButTableMember_Is403()
     {
         var (app, store) = App();
@@ -43,7 +53,7 @@ public class HttpPipelineSecurityTests(WebApplicationFactory<Program> factory) :
             .GetAsync($"/rooms/{Room}/participants", Ct);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
-        Assert.Equal(0, store.MembershipChecks);
+        Assert.Equal(1, store.CombinedChecks);
     }
 
     [Fact]
@@ -70,6 +80,50 @@ public class HttpPipelineSecurityTests(WebApplicationFactory<Program> factory) :
 
         Assert.Equal(HttpStatusCode.NotFound, nonUuid.StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, nonMember.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("POST", "/rooms/{0}/messages")]
+    [InlineData("GET", "/rooms/{0}/messages")]
+    [InlineData("GET", "/rooms/{0}/events")]
+    [InlineData("GET", "/rooms/{0}/participants")]
+    public async Task RoomAccess_DenialOutcomesAreUnchanged(string method, string route)
+    {
+        var (app, store) = App();
+        store.Roles["u1"] = "member";
+        var client = WithToken(app.CreateClient(), TestTokens.Mint("u1"));
+        var badRole = WithToken(app.CreateClient(), TestTokens.Mint("u1", role: "admin"));
+
+        Task<HttpResponseMessage> Send(HttpClient c, string room)
+        {
+            var request = new HttpRequestMessage(new HttpMethod(method), string.Format(route, room));
+            if (method == "POST")
+                request.Content = JsonContent.Create(new { content = "hi" });
+            return c.SendAsync(request, Ct);
+        }
+
+        var badRoleUnparseableRoom = await Send(badRole, "not-a-uuid");
+        var goodRoleUnparseableRoom = await Send(client, "not-a-uuid");
+        var goodRoleNonMember = await Send(client, Room.ToString());
+
+        Assert.Equal(HttpStatusCode.Forbidden, badRoleUnparseableRoom.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, goodRoleUnparseableRoom.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, goodRoleNonMember.StatusCode);
+    }
+
+    [Fact]
+    public async Task RoomAccess_MemberPasses_WithOneCombinedCall()
+    {
+        var (app, store) = App();
+        store.Roles["u1"] = "member";
+        store.Members[(Room, "u1")] = true;
+
+        var response = await WithToken(app.CreateClient(), TestTokens.Mint("u1"))
+            .PostAsJsonAsync($"/rooms/{Room}/messages", new { content = "" }, Ct);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(1, store.CombinedChecks);
+        Assert.Equal(1, store.MembershipChecks);
     }
 
     [Theory]
@@ -356,6 +410,96 @@ public class HttpPipelineSecurityTests(WebApplicationFactory<Program> factory) :
 
         Assert.Equal(HttpStatusCode.Forbidden, first.StatusCode);
         Assert.Equal(HttpStatusCode.TooManyRequests, second.StatusCode);
+    }
+
+    [Fact]
+    public async Task RestSend_RateLimitedBeforeAccessCheck_Is429()
+    {
+        var (app, _) = App(b =>
+        {
+            TinyRouteBuckets(b);
+            b.UseSetting("Dotwire:HubSend:Enabled", "true");
+        });
+        var client = WithToken(app.CreateClient(), TestTokens.Mint("u1"));
+
+        var statuses = new List<HttpStatusCode>();
+        HttpResponseMessage last = null!;
+        for (var i = 0; i < 2; i++)
+        {
+            last = await client.PostAsJsonAsync($"/rooms/{Room}/messages", new { content = "hi" }, Ct);
+            statuses.Add(last.StatusCode);
+        }
+
+        Assert.Equal([HttpStatusCode.Forbidden, HttpStatusCode.TooManyRequests], statuses);
+        Assert.True(last.Headers.Contains("Retry-After"));
+    }
+
+    [Fact]
+    public async Task RestSend_FlagOff_RateLimitedBeforeAccessCheck_Is429()
+    {
+        var (app, _) = App(TinyRouteBuckets);
+        var client = WithToken(app.CreateClient(), TestTokens.Mint("u1"));
+
+        var statuses = new List<HttpStatusCode>();
+        HttpResponseMessage last = null!;
+        for (var i = 0; i < 2; i++)
+        {
+            last = await client.PostAsJsonAsync($"/rooms/{Room}/messages", new { content = "hi" }, Ct);
+            statuses.Add(last.StatusCode);
+        }
+
+        Assert.Equal([HttpStatusCode.Forbidden, HttpStatusCode.TooManyRequests], statuses);
+        Assert.True(last.Headers.Contains("Retry-After"));
+    }
+
+    [Fact]
+    public async Task RestSend_FlagOff_ExhaustedBucketWithMalformedBody_Is429Not400()
+    {
+        var (app, _) = App(TinyRouteBuckets);
+        var client = WithToken(app.CreateClient(), TestTokens.Mint("u1"));
+
+        var statuses = new List<HttpStatusCode>();
+        for (var i = 0; i < 2; i++)
+        {
+            using var body = new StringContent("{not json", System.Text.Encoding.UTF8, "application/json");
+            statuses.Add((await client.PostAsync($"/rooms/{Room}/messages", body, Ct)).StatusCode);
+        }
+
+        Assert.Equal([HttpStatusCode.BadRequest, HttpStatusCode.TooManyRequests], statuses);
+    }
+
+    [Fact]
+    public async Task RestSend_FlagOn_ExhaustedBucketWithMalformedBody_Is400BeforeRateLimit()
+    {
+        var (app, _) = App(b =>
+        {
+            TinyRouteBuckets(b);
+            b.UseSetting("Dotwire:HubSend:Enabled", "true");
+        });
+        var client = WithToken(app.CreateClient(), TestTokens.Mint("u1"));
+
+        var statuses = new List<HttpStatusCode>();
+        for (var i = 0; i < 2; i++)
+        {
+            using var body = new StringContent("{not json", System.Text.Encoding.UTF8, "application/json");
+            statuses.Add((await client.PostAsync($"/rooms/{Room}/messages", body, Ct)).StatusCode);
+        }
+
+        Assert.Equal([HttpStatusCode.BadRequest, HttpStatusCode.BadRequest], statuses);
+    }
+
+    [Theory]
+    [InlineData(false, "send")]
+    [InlineData(true, null)]
+    public void RestSend_BuiltInSendPolicy_IsAppliedOnlyWhenTheFlagIsOff(bool enabled, string? policy)
+    {
+        var (app, _) = App(b => b.UseSetting("Dotwire:HubSend:Enabled", enabled ? "true" : "false"));
+        var endpoint = Assert.Single(app.Services.GetRequiredService<Microsoft.AspNetCore.Routing.EndpointDataSource>().Endpoints
+            .OfType<Microsoft.AspNetCore.Routing.RouteEndpoint>(),
+            e => e.RoutePattern.RawText == "/rooms/{roomId}/messages/"
+                 && e.Metadata.GetMetadata<Microsoft.AspNetCore.Routing.IHttpMethodMetadata>()!.HttpMethods.Contains("POST"));
+
+        Assert.Equal(policy, endpoint.Metadata.GetMetadata<Microsoft.AspNetCore.RateLimiting.EnableRateLimitingAttribute>()?.PolicyName);
     }
 
     [Fact]

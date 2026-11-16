@@ -91,3 +91,33 @@ function classifyKind(status: number, code?: string): DotwireErrorKind {
       return 'Unknown';
   }
 }
+
+const HUB_EXCEPTION_MARKER = 'HubException: ';
+
+function hubErrorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+  const at = message.lastIndexOf(HUB_EXCEPTION_MARKER);
+  return at === -1 ? message : message.slice(at + HUB_EXCEPTION_MARKER.length);
+}
+
+export function isHubSendUnavailable(error: unknown): boolean {
+  const text = hubErrorText(error);
+  return text.split(':', 1)[0].trim() === 'HubSendDisabled' || text.includes('does not exist');
+}
+
+export function toDotwireHubError(error: unknown): DotwireClientError {
+  if (error instanceof DotwireClientError) return error;
+  const text = hubErrorText(error).trim();
+  const colon = text.indexOf(':');
+  const code = colon === -1 ? text : text.slice(0, colon);
+  const reason = colon === -1 ? undefined : text.slice(colon + 1).trim() || undefined;
+
+  if (code === 'Forbidden') return new DotwireClientError({ status: 403, kind: 'Forbidden', code });
+  if (code === 'RateLimited') return new DotwireClientError({ status: 429, kind: 'RateLimited', code });
+  if (code.startsWith('invalid_')) return new DotwireClientError({ status: 400, kind: 'BadRequest', code, reason });
+  if (code === 'presend_rejected') return new DotwireClientError({ status: 422, kind: 'PresendRejected', code, reason });
+  if (code === 'presend_unavailable' || code === 'stream_unavailable') {
+    return new DotwireClientError({ status: 503, kind: 'Unavailable', code, reason });
+  }
+  return new DotwireClientError({ status: 0, kind: 'Unknown', code: code || undefined, reason: reason ?? (code ? undefined : text) });
+}

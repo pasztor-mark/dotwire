@@ -113,7 +113,9 @@ SignalR hubs are the **primary subscribe path**. The one alternative is the SSE 
 harnesses that rides the same NATS fanout. Sending does not require holding a socket at all: a **REST send
 endpoint exists regardless of SignalR**, specifically so host backends can inject system
 messages (bot replies, notifications, moderation actions) without maintaining a live
-connection just to publish.
+connection just to publish. Members may also send over the hub when `Dotwire:HubSend:Enabled`
+(default off), authorized by their live subscription; Gateway nodes then publish to JetStream, and
+REST stays for hosts.
 
 Horizontal scaling of SignalR requires a backplane, and no official NATS backplane exists, so
 dotwire ships a custom backplane: a `HubLifetimeManager<T>` implemented over NATS core. It is

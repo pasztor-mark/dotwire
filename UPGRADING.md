@@ -1,3 +1,21 @@
+# Upgrading to 0.4.0
+
+Applies to upgrading from 0.3.x. No breaking changes and no database migrations. 0.3 SDKs work
+against a 0.4 server, and a 0.4 `@dotwire/client` with `hubSend: true` falls back to REST against
+a 0.3 server.
+
+| Area | 0.4.0 behavior | What to do |
+|---|---|---|
+| Hub sends | `Dotwire:HubSend:Enabled` (default `false`) adds the hub `Send(roomId, content, idempotencyKey)` method, returning `{ seq, time }`. Same validation, presend/postsend and idempotency as REST. | Optional: enable on `All`/`Gateway` nodes, then set `hubSend: true` in `@dotwire/client`. |
+| Send rate limit | With hub sends on, REST sends and hub `Send` share one per-user `send` bucket per node. | Raise `RateLimits:Send` if clients use both paths at once. |
+| Hub send authorization | Authorized by the live subscription: revocations apply at once, role changes at the next `Dotwire:MembershipSweepSeconds` sweep. REST still checks per request. | Lower the sweep interval if role changes must apply faster. |
+| Gateways | With hub sends on, gateways publish to JetStream and call the presend/postsend webhooks. | Let gateways reach your webhook URLs. |
+| Read pool | `compose.yaml` sets `Minimum Pool Size=20;Maximum Pool Size=100` on `PostgresRead`; each node opens the minimum on startup (5 s budget, warning on shortfall). | Size pools for your node count against Postgres `max_connections`. |
+| Room access | Role cross-check and membership run as one query (`RoomAccessFilter`). Responses unchanged. | Nothing. |
+
+Rollout: roll servers with hub sends off, then SDKs, then enable `Dotwire:HubSend:Enabled` on every
+`All`/`Gateway` node and ship clients with `hubSend: true`. Roll back by unsetting the flag.
+
 # Upgrading to 0.3.0
 
 Applies to upgrading from 0.2.x. The server image, `Dotwire.Host` and `@dotwire/client`,

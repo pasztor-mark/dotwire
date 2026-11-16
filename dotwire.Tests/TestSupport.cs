@@ -16,11 +16,24 @@ public sealed class FakeAccessStore : IAccessStore
     public ConcurrentDictionary<(Guid RoomId, string UserId), bool> Members { get; } = new();
     public Func<Guid, string, int, bool>? MembershipOverride { get; set; }
     private int _membershipChecks;
+    private int _combinedChecks;
+    private int _roleChecks;
 
     public int MembershipChecks => _membershipChecks;
+    public int CombinedChecks => _combinedChecks;
+    public int RoleChecks => _roleChecks;
 
-    public Task<string?> GetRoleAsync(string userId, CancellationToken ct) =>
-        Task.FromResult(Roles.TryGetValue(userId, out var role) ? role : null);
+    public async Task<(string? Role, bool IsMember)> GetRoleAndMembershipAsync(Guid roomId, string userId, CancellationToken ct)
+    {
+        Interlocked.Increment(ref _combinedChecks);
+        return (await GetRoleAsync(userId, ct), await IsMemberAsync(roomId, userId, ct));
+    }
+
+    public Task<string?> GetRoleAsync(string userId, CancellationToken ct)
+    {
+        Interlocked.Increment(ref _roleChecks);
+        return Task.FromResult(Roles.TryGetValue(userId, out var role) ? role : null);
+    }
 
     public Task<bool> IsMemberAsync(Guid roomId, string userId, CancellationToken ct)
     {
