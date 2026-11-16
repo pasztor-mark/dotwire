@@ -197,6 +197,17 @@ test('a second 403 after role resolution surfaces as a Forbidden DotwireApiError
   );
 });
 
+test('sendAsUser surfaces a 429 as RateLimited with retryAfterMs and does not retry', async () => {
+  const { fetchImpl, calls } = createFakeFetch(() => jsonRes(429, { error: 'rate_limited' }, { 'retry-after': '3' }));
+  const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
+  await assert.rejects(
+    () => client.sendAsUser('11111111-1111-4111-8111-111111111111', 'dave', 'hi', { idempotencyKey: 'k1' }),
+    (err: unknown) => err instanceof DotwireApiError && err.kind === 'RateLimited' && err.status === 429 && err.retryAfterMs === 3000
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].headers['idempotency-key'] ?? calls[0].headers['Idempotency-Key'], 'k1');
+});
+
 test('local presend hook can reject before any network call', async () => {
   const { fetchImpl, calls } = createFakeFetch(() => {
     throw new Error('should not reach the network');

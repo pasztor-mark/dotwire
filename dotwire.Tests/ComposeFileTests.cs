@@ -38,6 +38,14 @@ public class ComposeFileTests
         }
     }
 
+    [Fact]
+    public void ReadPool_HasAWarmFloor()
+    {
+        var line = File.ReadLines(Path.Combine(RepoRoot(), "compose.yaml")).Single(l => l.Contains("ConnectionStrings__PostgresRead"));
+        Assert.Contains("Minimum Pool Size=20", line);
+        Assert.Contains("Maximum Pool Size=100", line);
+    }
+
     private static string RepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

@@ -6,7 +6,7 @@ import {
   IHttpConnectionOptions,
   LogLevel
 } from '@microsoft/signalr';
-import { toDotwireClientError } from './errors.js';
+import { isHubSendUnavailable, toDotwireClientError, toDotwireHubError } from './errors.js';
 import { BoundedSeqSet } from './seq-set.js';
 import { DotwireRoomHandle } from './room.js';
 import { TokenManager } from './token.js';
@@ -323,6 +323,20 @@ export class DotwireClient {
     const timer = setTimeout(() => controller.abort(), timeout);
 
     try {
+      if (
+        this.options.hubSend &&
+        !this.options.sendUrl &&
+        this.connection.state === HubConnectionState.Connected &&
+        this.subscribedRooms.has(roomId)
+      ) {
+        try {
+          return await this.sendOverHub(roomId, content, options.idempotencyKey, controller.signal);
+        } catch (error) {
+          if (error instanceof DOMException && error.name === 'AbortError') throw error;
+          if (!isHubSendUnavailable(error)) throw toDotwireHubError(error);
+        }
+      }
+
       let response: Response;
       if (this.options.sendUrl) {
         response = await fetch(this.options.sendUrl, {
@@ -354,6 +368,18 @@ export class DotwireClient {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  private sendOverHub(roomId: string, content: string, idempotencyKey: string | undefined, signal: AbortSignal): Promise<SendAck> {
+    return new Promise<SendAck>((resolve, reject) => {
+      const abort = () => reject(new DOMException('The operation was aborted.', 'AbortError'));
+      if (signal.aborted) return abort();
+      signal.addEventListener('abort', abort, { once: true });
+      this.connection
+        .invoke<SendAck>('Send', roomId, content, idempotencyKey ?? null)
+        .then(resolve, reject)
+        .finally(() => signal.removeEventListener('abort', abort));
+    });
   }
 
   public async getHistory(roomId: string, options: GetHistoryOptions = {}): Promise<HistoryPage> {

@@ -125,6 +125,23 @@ public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Progr
     }
 
     [Fact]
+    public async Task ReadPoolWarmup_OpensMinPoolSizeBackends()
+    {
+        var appPassword = Environment.GetEnvironmentVariable("POSTGRES_APP_PASSWORD")!;
+        var applicationName = $"dw-warm-{Guid.NewGuid():N}";
+        var app = _factory.WithWebHostBuilder(b => b.UseSetting("ConnectionStrings:PostgresRead",
+            $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword};Minimum Pool Size=3;Application Name={applicationName}"));
+        _ = app.Services;
+
+        await using var conn = await OpenOwnerConnectionAsync();
+        await using var cmd = new NpgsqlCommand("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1", conn);
+        cmd.Parameters.AddWithValue(applicationName);
+        var count = (long)(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken))!;
+
+        Assert.True(count >= 3, $"expected at least 3 backends, saw {count}");
+    }
+
+    [Fact]
     public async Task Participants_ListsRoomMembersOnlyForAnotherMember()
     {
         var roomId = Guid.NewGuid();
@@ -269,6 +286,26 @@ public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Progr
 
         var response = await client.PostAsJsonAsync(
             $"/rooms/{Guid.NewGuid()}/messages", new { content = "hi" },
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task RoomAccess_MemberWithoutRoleRow_Is403()
+    {
+        var sub = $"it-user-{Guid.NewGuid():N}";
+        var roomId = Guid.NewGuid();
+        await using (var conn = await OpenOwnerConnectionAsync())
+        await using (var cmd = new NpgsqlCommand("INSERT INTO room_members (room_id, user_id) VALUES ($1, $2)", conn))
+        {
+            cmd.Parameters.AddWithValue(roomId);
+            cmd.Parameters.AddWithValue(sub);
+            await cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken);
+        }
+
+        var response = await Client(TestTokens.Mint(sub)).PostAsJsonAsync(
+            $"/rooms/{roomId}/messages", new { content = "hi" },
             TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
@@ -577,6 +614,32 @@ public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Progr
         Assert.Equal(2, gapFill.Messages.Length);
         Assert.Equal("history message 2", gapFill.Messages[0].Content);
         Assert.Equal("history message 3", gapFill.Messages[1].Content);
+    }
+
+    [Fact]
+    public async Task History_NewestPage_IncludesJustAckedMessage_WithWarmStreamCache()
+    {
+        var roomId = Guid.NewGuid();
+        var sub = $"it-user-{Guid.NewGuid():N}";
+        await SeedUserAsync(sub, "member", roomId);
+        var client = Client(TestTokens.Mint(sub));
+
+        var warm = await client.GetFromJsonAsync<RoomHistoryResponse>(
+            $"/rooms/{roomId}/messages", TestContext.Current.CancellationToken);
+        Assert.NotNull(warm);
+
+        var send = await client.PostAsJsonAsync(
+            $"/rooms/{roomId}/messages", new SendMessageRequest("warm cache"), TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.Accepted, send.StatusCode);
+        var ack = (await send.Content.ReadFromJsonAsync<SendAck>(TestContext.Current.CancellationToken))!;
+
+        var first = (await client.GetFromJsonAsync<RoomHistoryResponse>(
+            $"/rooms/{roomId}/messages", TestContext.Current.CancellationToken))!;
+        var second = (await client.GetFromJsonAsync<RoomHistoryResponse>(
+            $"/rooms/{roomId}/messages", TestContext.Current.CancellationToken))!;
+
+        Assert.Contains(ack.Seq, first.Messages.Select(m => m.Seq));
+        Assert.Contains(ack.Seq, second.Messages.Select(m => m.Seq));
     }
 
     private async Task<long> CountRowsAsync(Guid roomId, ulong seq)
@@ -911,6 +974,45 @@ public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Progr
         await WaitForAuditRowCountAsync("member.removed", admin, 1);
 
         await connection.StopAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task Revoke_LeavesOtherUsersInRoomSubscribed()
+    {
+        var roomId = Guid.NewGuid();
+        var u1 = $"it-user-{Guid.NewGuid():N}";
+        var u2 = $"it-user-{Guid.NewGuid():N}";
+        var admin = $"it-admin-{Guid.NewGuid():N}";
+        await SeedUserAsync(u1, "member", roomId);
+        await SeedUserAsync(u2, "member", roomId);
+        await SeedUserAsync(admin, "admin");
+
+        await using var c1 = BuildHubConnection(TestTokens.Mint(u1));
+        await using var c2 = BuildHubConnection(TestTokens.Mint(u2));
+        var revokedForU1 = new TaskCompletionSource<MembershipRevoked>();
+        var u2Received = new TaskCompletionSource<RoomMessageDelivery>();
+        c1.On<MembershipRevoked>("MembershipRevoked", r => revokedForU1.TrySetResult(r));
+        c2.On<RoomMessageDelivery>("ReceiveMessage", m => u2Received.TrySetResult(m));
+        await c1.StartAsync(TestContext.Current.CancellationToken);
+        await c2.StartAsync(TestContext.Current.CancellationToken);
+        await c1.InvokeAsync("Subscribe", roomId, TestContext.Current.CancellationToken);
+        await c2.InvokeAsync("Subscribe", roomId, TestContext.Current.CancellationToken);
+        await Task.Delay(200, TestContext.Current.CancellationToken);
+
+        var revoke = await Client(TestTokens.Mint(admin, role: "admin")).DeleteAsync(
+            $"/admin/rooms/{roomId}/members/{u1}", TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.NoContent, revoke.StatusCode);
+
+        var send = await Client(TestTokens.Mint(u2)).PostAsJsonAsync(
+            $"/rooms/{roomId}/messages", new { content = "still here" }, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.Accepted, send.StatusCode);
+        var ack = await send.Content.ReadFromJsonAsync<SendAck>(TestContext.Current.CancellationToken);
+
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+            timeoutCts.Token, TestContext.Current.CancellationToken);
+        Assert.Equal(roomId, (await revokedForU1.Task.WaitAsync(linkedCts.Token)).RoomId);
+        Assert.Equal(ack!.Seq, (await u2Received.Task.WaitAsync(linkedCts.Token)).Seq);
     }
 
     [Fact]

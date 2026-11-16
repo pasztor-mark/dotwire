@@ -242,6 +242,15 @@ export async function POST(req: Request) {
 | `handlePresendWebhook(request)` / `handlePostSendWebhook(request)` | `Promise<Response>` | Verifies and handles dotwire's webhook call-outs. Requires `webhookSecret` (or `allowUnsignedWebhooks: true`). |
 | `handlePresendWebhookBody(body, signature, rawBody, { timestamp, signatureV2 })` | `Promise<WebhookResult>` | Express-style variant; pass the raw body and the `X-Dotwire-Timestamp` / `X-Dotwire-Signature-V2` headers. |
 
+When the server runs with `Dotwire:HubSend:Enabled=true`, `POST /rooms/{roomId}/messages`
+shares one per-user send bucket with the hub `Send` method. The bucket is checked before the
+role and membership checks (a malformed body still gets `400` first), and an exhausted bucket
+returns `429` with `Retry-After`, surfaced as `DotwireApiError { kind: 'RateLimited', retryAfterMs }`.
+Other errors keep their mapping: `403` `Forbidden`, `422` `PresendRejected`, `503` `Unavailable`.
+`sendAsUser` never retries a `429` itself, and `Idempotency-Key` semantics are unchanged. This
+SDK has no hub transport: hub sending is member-facing and lives in `@dotwire/client`
+(`hubSend: true`), as with `Typing`.
+
 Room ids must be UUIDs; anything else throws a `TypeError` before a request is built, and
 `handleClientSend*` answers `400`. Webhook handlers verify `X-Dotwire-Signature-V2` over
 `"<timestamp>.<raw body>"`, reject calls older than `webhookToleranceSeconds` (default 300) and

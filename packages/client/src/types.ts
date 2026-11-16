@@ -17,6 +17,8 @@ export interface DotwireClientOptions {
   tokenRefreshMarginMs?: number;
   /** POST `{roomId, content}` with `credentials: 'include'`, no bearer header; a host route. */
   sendUrl?: string;
+  /** Default false. Sends over the SignalR hub when connected and subscribed; needs `Dotwire:HubSend:Enabled` on the server, else falls back to REST. Ignored when `sendUrl` is set. */
+  hubSend?: boolean;
   /** Default `/hub/rooms`. */
   hubPath?: string;
   /** Default `'websockets'` (skipNegotiation). */

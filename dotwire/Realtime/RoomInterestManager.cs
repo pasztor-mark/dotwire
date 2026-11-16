@@ -296,7 +296,11 @@ public sealed class RoomInterestManager : IAsyncDisposable
     {
         lock (_gate)
         {
-            return _connections.TryGetValue(connectionId, out var info) && info.Rooms.Contains(roomId);
+            if (!_connections.TryGetValue(connectionId, out var info) || !info.Rooms.Contains(roomId))
+                return false;
+
+            return !_natsOptions.Enabled
+                || _subscriptions.TryGetValue(roomId, out var subscription) && subscription.Connections.ContainsKey(connectionId);
         }
     }
 
@@ -310,7 +314,10 @@ public sealed class RoomInterestManager : IAsyncDisposable
         List<(string ConnectionId, ConnectionInfo Info)> affected = [];
         lock (_gate)
         {
-            foreach (var (connectionId, info) in _connections)
+            var source = _natsOptions.Enabled && _subscriptions.TryGetValue(roomId, out var sub)
+                ? sub.Connections
+                : _connections;
+            foreach (var (connectionId, info) in source)
             {
                 if (info.UserId == userId && info.Rooms.Contains(roomId))
                     affected.Add((connectionId, info));

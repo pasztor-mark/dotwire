@@ -1,6 +1,6 @@
 services:
   dotwire:
-    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.3.0}
+    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.0}
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -19,7 +19,7 @@ services:
       DOTNET_GCDynamicAdaptationMode: "1"
       ConnectionStrings__PostgresMigrator: "Host=postgres;Port=5432;Database=dotwire;Username=dotwire;Password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
       ConnectionStrings__PostgresWrite: "Host=postgres;Port=5432;Database=dotwire;Username=dotwire_app;Password=${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}"
-      ConnectionStrings__PostgresRead: "Host=postgres;Port=5432;Database=dotwire;Username=dotwire_app;Password=${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}"
+      ConnectionStrings__PostgresRead: "Host=postgres;Port=5432;Database=dotwire;Username=dotwire_app;Password=${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env};Pooling=true;Minimum Pool Size=20;Maximum Pool Size=100"
       Postgres__AppRolePassword: "${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}"
       Dotwire__Encryption__ActiveKeyId: "${Dotwire__Encryption__ActiveKeyId:-k1}"
       Dotwire__Encryption__Keys__k1: "${Dotwire__Encryption__Keys__k1:?set Dotwire__Encryption__Keys__k1 in .env}"

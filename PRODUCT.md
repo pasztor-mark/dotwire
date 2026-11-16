@@ -102,7 +102,7 @@ These are deliberate exclusions. Do not add them "helpfully."
 - **Multi-region** — out of scope at this scale; the scale contract does not require it.
 - **Federation** — the single biggest complexity driver in Matrix-style systems, and not a
   problem dotwire's host-owns-identity model needs to solve.
-- **gRPC** — one wire protocol (SignalR/WebSockets, plus REST for send) keeps the surface
+- **gRPC** — one wire protocol (SignalR/WebSockets, with member sends over the hub or REST) keeps the surface
   area small; a second RPC protocol would only add maintenance cost.
 - **Admin dashboard UI** — dotwire ships APIs (admin, DSAR, redaction); a host builds or buys
   whatever UI it wants on top, rather than dotwire maintaining a UI most hosts would replace

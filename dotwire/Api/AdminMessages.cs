@@ -41,7 +41,7 @@ public static partial class Admin
             var maxBytes = dotwireOptions.Value.MaxContentBytes;
 
             if (Messages.ValidateContent(request.Content, maxBytes) is { } invalid)
-                return invalid;
+                return Messages.ToResult(invalid);
 
             var senderId = string.IsNullOrEmpty(request.SenderId) ? "system" : request.SenderId;
             if (!IdValidation.IsValid(senderId))
@@ -56,7 +56,7 @@ public static partial class Admin
                 var verdict = await presendClient.EvaluateAsync(roomId, senderId, content, time, "admin", http.RequestAborted);
                 var (presendError, rewritten) = Messages.ApplyPresend(verdict, content, maxBytes);
                 if (presendError is not null)
-                    return presendError;
+                    return Messages.ToResult(presendError);
                 content = rewritten;
             }
 

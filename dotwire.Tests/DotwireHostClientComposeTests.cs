@@ -204,7 +204,7 @@ public class DotwireHostClientComposeTests
         var roomId = Guid.NewGuid();
         var userId = $"admin-sender-{Guid.NewGuid():N}";
         // Actual role is admin (not member) - the initial `member` attempt 403s via
-        // RoleCrossCheckFilter, so the SDK must resolve and retry.
+        // RoomAccessFilter, so the SDK must resolve and retry.
         await SeedRoleAsync(userId, "admin");
         await using (var conn = new NpgsqlConnection(PgConnectionString + _pgPassword))
         {

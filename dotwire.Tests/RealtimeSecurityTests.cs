@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Reflection;
 using System.Security.Claims;
 using System.Security.Cryptography;
@@ -54,6 +55,22 @@ public class RealtimeSecurityTests(WebApplicationFactory<Program> factory) : ICl
         var ex = await Assert.ThrowsAsync<HubException>(() => connection.InvokeAsync("Subscribe", room, Ct));
 
         Assert.Contains("Forbidden", ex.Message);
+        Assert.Empty(app.Services.GetRequiredService<RoomInterestManager>().LiveSubscriptions());
+    }
+
+    [Fact]
+    public async Task Subscribe_NonMember_IsForbidden()
+    {
+        var store = new FakeAccessStore();
+        store.Roles["u1"] = "member";
+        var app = OfflineApp.Create(factory, store);
+
+        await using var connection = Connect(app, TestTokens.Mint("u1"));
+        await connection.StartAsync(Ct);
+        var ex = await Assert.ThrowsAsync<HubException>(() => connection.InvokeAsync("Subscribe", Guid.NewGuid(), Ct));
+
+        Assert.Contains("Forbidden", ex.Message);
+        Assert.Equal(1, store.MembershipChecks);
         Assert.Empty(app.Services.GetRequiredService<RoomInterestManager>().LiveSubscriptions());
     }
 
@@ -115,6 +132,167 @@ public class RealtimeSecurityTests(WebApplicationFactory<Program> factory) : ICl
         await using var second = Connect(app, TestTokens.Mint("u1"));
 
         await Assert.ThrowsAnyAsync<Exception>(() => second.StartAsync(Ct));
+    }
+
+    private WebApplicationFactory<Program> HubSendApp(
+        FakeAccessStore store, bool enabled = true, Action<Microsoft.AspNetCore.Hosting.IWebHostBuilder>? configure = null) =>
+        OfflineApp.Create(factory, store, b =>
+        {
+            b.UseSetting("Dotwire:HubSend:Enabled", enabled ? "true" : "false");
+            configure?.Invoke(b);
+        });
+
+    private static void OneSendToken(Microsoft.AspNetCore.Hosting.IWebHostBuilder b)
+    {
+        b.UseSetting("Dotwire:RateLimits:Send:PermitLimit", "1");
+        b.UseSetting("Dotwire:RateLimits:Send:TokensPerPeriod", "1");
+        b.UseSetting("Dotwire:RateLimits:Send:PeriodSeconds", "3600");
+    }
+
+    private static async Task<HubConnection> Subscribed(WebApplicationFactory<Program> app, Guid room, string sub = "u1")
+    {
+        var connection = Connect(app, TestTokens.Mint(sub));
+        await connection.StartAsync(Ct);
+        await connection.InvokeAsync("Subscribe", room, Ct);
+        return connection;
+    }
+
+    private static FakeAccessStore MemberStore(Guid room)
+    {
+        var store = new FakeAccessStore();
+        store.Roles["u1"] = "member";
+        store.Members[(room, "u1")] = true;
+        return store;
+    }
+
+    [Fact]
+    public async Task HubSend_Disabled_IsHubSendDisabled()
+    {
+        var room = Guid.NewGuid();
+        var app = HubSendApp(MemberStore(room), enabled: false);
+        await using var connection = await Subscribed(app, room);
+
+        var ex = await Assert.ThrowsAsync<HubException>(() =>
+            connection.InvokeAsync<SendMessageResponse>("Send", room, "hi", null, Ct));
+
+        Assert.Contains("HubSendDisabled", ex.Message);
+    }
+
+    [Fact]
+    public async Task HubSend_NotSubscribed_IsForbidden()
+    {
+        var room = Guid.NewGuid();
+        var app = HubSendApp(MemberStore(room));
+        await using var connection = Connect(app, TestTokens.Mint("u1"));
+        await connection.StartAsync(Ct);
+
+        var ex = await Assert.ThrowsAsync<HubException>(() =>
+            connection.InvokeAsync<SendMessageResponse>("Send", room, "hi", null, Ct));
+
+        Assert.Contains("Forbidden", ex.Message);
+    }
+
+    [Fact]
+    public async Task HubSend_AfterRevoke_IsForbidden()
+    {
+        var room = Guid.NewGuid();
+        var app = HubSendApp(MemberStore(room));
+        await using var connection = await Subscribed(app, room);
+
+        app.Services.GetRequiredService<RoomInterestManager>().Revoke(room, "u1");
+        var ex = await Assert.ThrowsAsync<HubException>(() =>
+            connection.InvokeAsync<SendMessageResponse>("Send", room, "hi", null, Ct));
+
+        Assert.Contains("Forbidden", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("ééééééééé")]
+    public async Task HubSend_InvalidContent_IsInvalidContent(string content)
+    {
+        var room = Guid.NewGuid();
+        var app = HubSendApp(MemberStore(room), configure: b => b.UseSetting("Dotwire:MaxContentBytes", "10"));
+        await using var connection = await Subscribed(app, room);
+
+        var ex = await Assert.ThrowsAsync<HubException>(() =>
+            connection.InvokeAsync<SendMessageResponse>("Send", room, content, null, Ct));
+
+        Assert.Contains("invalid_content", ex.Message);
+    }
+
+    [Fact]
+    public async Task HubSend_InvalidIdempotencyKey_IsInvalidRequest()
+    {
+        var room = Guid.NewGuid();
+        var app = HubSendApp(MemberStore(room));
+        await using var connection = await Subscribed(app, room);
+
+        var ex = await Assert.ThrowsAsync<HubException>(() =>
+            connection.InvokeAsync<SendMessageResponse>("Send", room, "hi", new string('k', 129), Ct));
+
+        Assert.Contains("invalid_request", ex.Message);
+    }
+
+    [Fact]
+    public async Task HubSend_PresendUnavailable_IsPresendUnavailable()
+    {
+        var room = Guid.NewGuid();
+        var app = HubSendApp(MemberStore(room), configure: b =>
+            b.UseSetting("Dotwire:Webhooks:Presend:Url", "http://127.0.0.1:1/presend"));
+        await using var connection = await Subscribed(app, room);
+
+        var ex = await Assert.ThrowsAsync<HubException>(() =>
+            connection.InvokeAsync<SendMessageResponse>("Send", room, "hi", null, Ct));
+
+        Assert.Contains("presend_unavailable", ex.Message);
+    }
+
+    [Fact]
+    public async Task HubSend_RateLimited_IsRateLimited()
+    {
+        var room = Guid.NewGuid();
+        var app = HubSendApp(MemberStore(room), configure: OneSendToken);
+        await using var connection = await Subscribed(app, room);
+
+        var first = await Assert.ThrowsAsync<HubException>(() =>
+            connection.InvokeAsync<SendMessageResponse>("Send", room, "", null, Ct));
+        var second = await Assert.ThrowsAsync<HubException>(() =>
+            connection.InvokeAsync<SendMessageResponse>("Send", room, "", null, Ct));
+
+        Assert.Contains("invalid_content", first.Message);
+        Assert.Contains("RateLimited", second.Message);
+    }
+
+    [Fact]
+    public async Task HubSend_Disabled_DoesNotSpendTheSendBucket()
+    {
+        var room = Guid.NewGuid();
+        var app = HubSendApp(MemberStore(room), enabled: false, configure: OneSendToken);
+        await using var connection = await Subscribed(app, room);
+
+        for (var i = 0; i < 3; i++)
+        {
+            var ex = await Assert.ThrowsAsync<HubException>(() =>
+                connection.InvokeAsync<SendMessageResponse>("Send", room, "", null, Ct));
+            Assert.Contains("HubSendDisabled", ex.Message);
+        }
+    }
+
+    [Fact]
+    public async Task HubAndRest_ShareTheSendBucket()
+    {
+        var room = Guid.NewGuid();
+        var app = HubSendApp(MemberStore(room), configure: OneSendToken);
+        await using var connection = await Subscribed(app, room);
+        await Assert.ThrowsAsync<HubException>(() =>
+            connection.InvokeAsync<SendMessageResponse>("Send", room, "", null, Ct));
+
+        var client = app.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", TestTokens.Mint("u1"));
+        var rest = await client.PostAsJsonAsync($"/rooms/{room}/messages", new { content = "hi" }, Ct);
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, rest.StatusCode);
     }
 
     [Fact]
@@ -311,6 +489,24 @@ public class RealtimeUnitSecurityTests
     }
 
     [Fact]
+    public async Task Revoke_DropsOnlyThatUsersConnectionsInThatRoom()
+    {
+        var interest = CreateInterestManager();
+        var room1 = Guid.NewGuid();
+        var room2 = Guid.NewGuid();
+        var (_, u1Room1) = await interest.RegisterSseConnectionAsync(room1, "c-u1-r1", "u1", 8, "member");
+        var (_, u2Room1) = await interest.RegisterSseConnectionAsync(room1, "c-u2-r1", "u2", 8, "member");
+        var (_, u1Room2) = await interest.RegisterSseConnectionAsync(room2, "c-u1-r2", "u1", 8, "member");
+
+        interest.Revoke(room1, "u1");
+
+        Assert.True(u1Room1.IsCancellationRequested);
+        Assert.False(u2Room1.IsCancellationRequested);
+        Assert.False(u1Room2.IsCancellationRequested);
+        Assert.Equal(2, interest.LiveSubscriptions().Count);
+    }
+
+    [Fact]
     public async Task Sse_EphemeralEventsAreShedBeforeMessages()
     {
         var interest = CreateInterestManager();
@@ -379,6 +575,22 @@ public class RealtimeUnitSecurityTests
 
         await reader.Completion.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         Assert.False(interest.HasSubscription(RoomId));
+    }
+
+    [Fact]
+    public async Task FailedSubscription_IsNoLongerSubscribed()
+    {
+        var nats = DispatchProxy.Create<INatsConnection, SubscribingNats>();
+        var interest = CreateInterestManager(nats, natsEnabled: true);
+        var (reader, _) = await interest.RegisterSseConnectionAsync(RoomId, "sse-1", "u1", bufferSize: 8);
+        Assert.True(interest.IsSubscribed("sse-1", RoomId));
+
+        var subs = ((SubscribingNats)(object)nats).Subs;
+        lock (subs)
+            subs[0].Channel.Writer.Complete();
+
+        await reader.Completion.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.False(interest.IsSubscribed("sse-1", RoomId));
     }
 
     [Fact]
