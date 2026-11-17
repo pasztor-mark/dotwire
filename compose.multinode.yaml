@@ -17,7 +17,7 @@ services:
 
   # WS holders
   dotwire-gateway-1:
-    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.0}
+    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.1}
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -67,7 +67,7 @@ services:
         condition: service_healthy
 
   dotwire-gateway-2:
-    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.0}
+    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.1}
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -118,7 +118,7 @@ services:
 
   # Rest and postgres
   dotwire-api-1:
-    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.0}
+    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.1}
     build:
       context: .
       dockerfile: dotwire/Dockerfile

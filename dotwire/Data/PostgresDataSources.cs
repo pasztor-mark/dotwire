@@ -12,6 +12,16 @@ public static class PostgresDataSources
     public const string Read = "postgres-read";
     public const string Write = "postgres-write";
 
+    public static NpgsqlDataSource Create(string connectionString, bool noResetOnClose = false)
+    {
+        var builder = new NpgsqlDataSourceBuilder(connectionString);
+        if (builder.ConnectionStringBuilder.MaxAutoPrepare == 0)
+            builder.ConnectionStringBuilder.MaxAutoPrepare = 64;
+        if (noResetOnClose)
+            builder.ConnectionStringBuilder.NoResetOnClose = true;
+        return builder.Build();
+    }
+
     public static async Task<int> WarmAsync(NpgsqlDataSource dataSource, int count, TimeSpan budget, ILogger logger)
     {
         if (count <= 0)

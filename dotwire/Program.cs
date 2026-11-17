@@ -141,9 +141,9 @@ builder.Services.AddRateLimiter(options =>
 });
 
 builder.Services.AddKeyedSingleton<NpgsqlDataSource>(PostgresDataSources.Read,
-    (sp, _) => NpgsqlDataSource.Create(RequireConnectionString(sp.GetRequiredService<IConfiguration>(), "PostgresRead")));
+    (sp, _) => PostgresDataSources.Create(RequireConnectionString(sp.GetRequiredService<IConfiguration>(), "PostgresRead"), noResetOnClose: true));
 builder.Services.AddKeyedSingleton<NpgsqlDataSource>(PostgresDataSources.Write,
-    (sp, _) => NpgsqlDataSource.Create(RequireConnectionString(sp.GetRequiredService<IConfiguration>(), "PostgresWrite")));
+    (sp, _) => PostgresDataSources.Create(RequireConnectionString(sp.GetRequiredService<IConfiguration>(), "PostgresWrite")));
 builder.Services.AddSingleton<IAccessStore, PostgresAccessStore>();
 
 builder.Services.AddSingleton<INatsConnection>(sp =>
