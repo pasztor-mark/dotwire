@@ -37,7 +37,7 @@ builder.Services.AddSingleton<MessageCipher>();
 
 var dotwireOptions = builder.Configuration.GetSection(DotwireOptions.SectionName).Get<DotwireOptions>() ?? new DotwireOptions();
 builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = dotwireOptions.MaxRequestBodyBytes);
-
+builder.WebHost.UseSockets(o => o.Backlog = 65535);
 var authOptions = builder.Configuration.GetSection(AuthOptions.SectionName).Get<AuthOptions>() ?? new AuthOptions();
 var keyRing = new SigningKeyRing(
     authOptions,
