@@ -11,6 +11,9 @@ public interface IAccessStore
 
     Task<(string? Role, bool IsMember)> GetRoleAndMembershipAsync(Guid roomId, string userId, CancellationToken ct);
 
+    Task<IReadOnlyDictionary<(Guid RoomId, string UserId), (string? Role, bool IsMember)>> GetRolesAndMembershipsAsync(
+        IReadOnlyCollection<(Guid RoomId, string UserId)> pairs, CancellationToken ct);
+
     Task<IReadOnlyDictionary<string, string>> GetRolesAsync(IReadOnlyCollection<string> userIds, CancellationToken ct);
 
     Task<IReadOnlySet<(Guid RoomId, string UserId)>> FilterMembersAsync(
@@ -45,6 +48,28 @@ public sealed class PostgresAccessStore(
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         await reader.ReadAsync(ct);
         return (reader.IsDBNull(0) ? null : reader.GetString(0), reader.GetBoolean(1));
+    }
+
+    public async Task<IReadOnlyDictionary<(Guid RoomId, string UserId), (string? Role, bool IsMember)>> GetRolesAndMembershipsAsync(
+        IReadOnlyCollection<(Guid RoomId, string UserId)> pairs, CancellationToken ct)
+    {
+        var result = new Dictionary<(Guid RoomId, string UserId), (string? Role, bool IsMember)>();
+        if (pairs.Count == 0)
+            return result;
+
+        await using var cmd = readDataSource.CreateCommand(
+            "SELECT p.room_id, p.user_id, r.role, " +
+            "EXISTS (SELECT 1 FROM room_members m WHERE m.room_id = p.room_id AND m.user_id = p.user_id) " +
+            "FROM unnest($1::uuid[], $2::text[]) AS p(room_id, user_id) " +
+            "LEFT JOIN user_roles r ON r.user_id = p.user_id");
+        cmd.Parameters.AddWithValue(pairs.Select(p => p.RoomId).ToArray());
+        cmd.Parameters.AddWithValue(pairs.Select(p => p.UserId).ToArray());
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            result[(reader.GetGuid(0), reader.GetString(1))] = (reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetBoolean(3));
+        foreach (var pair in pairs)
+            result.TryAdd(pair, (null, false));
+        return result;
     }
 
     public async Task<IReadOnlyDictionary<string, string>> GetRolesAsync(IReadOnlyCollection<string> userIds, CancellationToken ct)

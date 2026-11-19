@@ -83,3 +83,13 @@ Treat a participant list and `usePresence(roomId).present` differently: the firs
 - Never treat the `dw:role` claim as the sole grant. Dotwire cross-checks it against `user_roles`, then checks `room_members` for room reads.
 - Use admin membership methods to change membership. Use member participant methods for a member-facing list.
 - Preserve `room_id` in room queries and use the read data source for reads.
+
+## Tuning dotwire for the host's scenario
+
+Leave every setting at its default unless the host's scenario needs a change. Before changing any:
+
+1. Read the host's deployment files (compose, `.env`, connection strings, node roles, rate limits) to see what is already set.
+2. Ask the host owner a few short questions: expected concurrent REST clients and peak messages per second; one node or several; whether the database is on another network; how quickly a removed member must lose access; any retention or compliance needs. Do not ask them to benchmark.
+3. Pick the row of the "Recommended settings by scenario" table in the README that matches the expected traffic, apply it, and state which values are measured and which are untested guesses.
+4. Never relax a security setting (`AllowInsecure*`, `RateLimits:Enabled`, encryption options) without the owner's explicit approval.
+5. Never change `Nats:RoomsSubjectFilter`, NATS stream, subject or consumer names, or the encryption keys.

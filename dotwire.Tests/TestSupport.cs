@@ -18,10 +18,22 @@ public sealed class FakeAccessStore : IAccessStore
     private int _membershipChecks;
     private int _combinedChecks;
     private int _roleChecks;
+    private int _batchChecks;
 
     public int MembershipChecks => _membershipChecks;
     public int CombinedChecks => _combinedChecks;
     public int RoleChecks => _roleChecks;
+    public int BatchChecks => _batchChecks;
+
+    public Task<IReadOnlyDictionary<(Guid RoomId, string UserId), (string? Role, bool IsMember)>> GetRolesAndMembershipsAsync(
+        IReadOnlyCollection<(Guid RoomId, string UserId)> pairs, CancellationToken ct)
+    {
+        Interlocked.Increment(ref _batchChecks);
+        return Task.FromResult<IReadOnlyDictionary<(Guid, string), (string?, bool)>>(
+            pairs.Distinct().ToDictionary(
+                p => p,
+                p => (Roles.TryGetValue(p.UserId, out var role) ? role : null, Members.ContainsKey(p))));
+    }
 
     public async Task<(string? Role, bool IsMember)> GetRoleAndMembershipAsync(Guid roomId, string userId, CancellationToken ct)
     {

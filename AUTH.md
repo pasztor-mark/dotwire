@@ -88,7 +88,13 @@ The order matters: each stage is only meaningful once the stage before it has pa
    `user_roles` table for that `sub`. **The table is authoritative, not the claim** — if they
    disagree, the request is denied. This is what makes a stolen or stale token claiming
    `admin` harmless if the table says otherwise: revoking or demoting a user in `user_roles`
-   takes effect immediately, without waiting for outstanding tokens to expire.
+   takes effect immediately, without waiting for outstanding tokens to expire. This holds with
+   the default configuration. When `Dotwire:AuthCacheSeconds` is above `0` (opt-in, default `0`,
+   maximum `60`), REST room routes reuse an allowed decision for up to that many seconds on each
+   node. Admin-API revocations invalidate it over NATS core, but a missed revocation (for example a lost
+   broadcast, a direct database edit, or a concurrent membership add during a role change) can
+   leave a revoked user authorized on REST for up to that window (at most 60 seconds) per node.
+   `Dotwire:AuthBatching:Enabled` changes how lookups reach the database, not this guarantee.
 4. **Room membership check.** For room-scoped operations, membership is checked against the
    `room_members` table (host-managed via the admin API). This check happens **at CONNECT,
    not per message** — the result is cached on the connection and invalidated only by
@@ -258,8 +264,20 @@ const token = jwt.sign(
 - **Why the role cross-check exists.** A JWT's claims are only as trustworthy as the moment
   they were signed — a token can be stolen, or a role legitimately granted at mint time can be
   revoked before the token expires. Cross-checking `dw:role` against `user_roles` on every
-  authorization decision means a demotion or revocation in the table takes effect immediately,
-  independent of how long the outstanding token has left to live.
+  authorization decision means a demotion or revocation in the table takes effect immediately
+  (with the default configuration; see the cache caution below), independent of how long the
+  outstanding token has left to live.
+- **Why the REST decision cache is opt-in.** `Dotwire:AuthCacheSeconds` (default `0`, capped at
+  `60`) lets REST room routes reuse an allowed decision for that many seconds per node. A revoked
+  user can keep REST access for up to that window if a revocation is missed (for example a lost
+  broadcast, a direct database edit, or a concurrent membership add during a role change). The
+  node's NATS user needs subscribe permission on `room.*.ephemeral.revoked`; if it is denied, the
+  cache can run without receiving revocations. Enable it only if that window is acceptable, and keep it as low as
+  the load allows. Denials are never cached. With an asynchronous read replica, the replica-lag
+  note in ARCHITECTURE.md still applies, and the cache does not extend it while replica lag is
+  shorter than `AuthCacheSeconds`, because a post-revocation tombstone blocks re-caching for that
+  long. If replica lag is longer, a stale read after the tombstone expires can be cached for one
+  more window, so read from the primary or a synchronous replica in that case.
 - **Why live sockets are re-checked.** Revocation is broadcast over NATS core, which can drop
   a message; gateways therefore re-check membership right after registering a subscription and
   sweep all live subscriptions against `user_roles`/`room_members` every

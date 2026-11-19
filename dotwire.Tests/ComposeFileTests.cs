@@ -46,6 +46,68 @@ public class ComposeFileTests
         Assert.Contains("Maximum Pool Size=100", line);
     }
 
+    [Fact]
+    public void AuthLookupKeys_PassedThroughOnEveryDotwireService()
+    {
+        string[] passthrough =
+        [
+            "Dotwire__AuthBatching__Enabled: \"${Dotwire__AuthBatching__Enabled:-false}\"",
+            "Dotwire__AuthBatching__MaxInFlight: \"${Dotwire__AuthBatching__MaxInFlight:-2}\"",
+            "Dotwire__AuthBatching__MaxBatchSize: \"${Dotwire__AuthBatching__MaxBatchSize:-512}\"",
+            "Dotwire__AuthCacheSeconds: \"${Dotwire__AuthCacheSeconds:-0}\"",
+        ];
+
+        foreach (var file in new[] { "compose.yaml", "compose.multinode.yaml" })
+        {
+            var lines = File.ReadAllLines(Path.Combine(RepoRoot(), file));
+            var services = lines.Count(l => l.Contains("Dotwire__Encryption__ActiveKeyId:"));
+
+            Assert.True(services >= 1, $"{file} has no dotwire service");
+            foreach (var entry in passthrough)
+                Assert.Equal(services, lines.Count(l => l.Contains(entry)));
+        }
+    }
+
+    [Fact]
+    public void LoggingKeys_PassedThroughOnEveryDotwireService()
+    {
+        string[] passthrough =
+        [
+            "Dotwire__DisableDebugLogging: \"${Dotwire__DisableDebugLogging:-false}\"",
+            "Dotwire__DisableAllLogging: \"${Dotwire__DisableAllLogging:-false}\"",
+        ];
+
+        foreach (var file in new[] { "compose.yaml", "compose.multinode.yaml" })
+        {
+            var lines = File.ReadAllLines(Path.Combine(RepoRoot(), file));
+            var services = lines.Count(l => l.Contains("Dotwire__Encryption__ActiveKeyId:"));
+
+            Assert.True(services >= 1, $"{file} has no dotwire service");
+            foreach (var entry in passthrough)
+                Assert.Equal(services, lines.Count(l => l.Contains(entry)));
+        }
+    }
+
+    [Fact]
+    public void EnvExample_ListsLoggingKeys()
+    {
+        var lines = File.ReadAllLines(Path.Combine(RepoRoot(), ".env.example"));
+
+        Assert.Contains(lines, l => l.StartsWith("# Dotwire__DisableDebugLogging=false"));
+        Assert.Contains(lines, l => l.StartsWith("# Dotwire__DisableAllLogging=false"));
+    }
+
+    [Fact]
+    public void EnvExample_ListsAuthLookupKeys()
+    {
+        var lines = File.ReadAllLines(Path.Combine(RepoRoot(), ".env.example"));
+
+        Assert.Contains(lines, l => l.StartsWith("# Dotwire__AuthBatching__Enabled=false"));
+        Assert.Contains(lines, l => l.StartsWith("# Dotwire__AuthBatching__MaxInFlight=2"));
+        Assert.Contains(lines, l => l.StartsWith("# Dotwire__AuthBatching__MaxBatchSize=512"));
+        Assert.Contains(lines, l => l.StartsWith("# Dotwire__AuthCacheSeconds=0"));
+    }
+
     private static string RepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);

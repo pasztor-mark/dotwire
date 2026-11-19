@@ -1,7 +1,7 @@
 services:
   # Load balancer
   lb:
-    image: haproxy:3.4.6-alpine
+    image: haproxy:3.4.7-alpine
     restart: always
     ports:
       - "127.0.0.1:8080:8080"
@@ -17,7 +17,7 @@ services:
 
   # WS holders
   dotwire-gateway-1:
-    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.1}
+    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.2}
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -38,6 +38,12 @@ services:
       ConnectionStrings__PostgresRead: "Host=postgres-replica;Port=5432;Database=dotwire;Username=dotwire_app;Password=${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env};Pooling=true;Minimum Pool Size=20;Maximum Pool Size=100"
       Postgres__Migrate: "false"
       Dotwire__Encryption__ActiveKeyId: "${Dotwire__Encryption__ActiveKeyId:-k1}"
+      Dotwire__AuthBatching__Enabled: "${Dotwire__AuthBatching__Enabled:-false}"
+      Dotwire__AuthBatching__MaxInFlight: "${Dotwire__AuthBatching__MaxInFlight:-2}"
+      Dotwire__AuthBatching__MaxBatchSize: "${Dotwire__AuthBatching__MaxBatchSize:-512}"
+      Dotwire__AuthCacheSeconds: "${Dotwire__AuthCacheSeconds:-0}"
+      Dotwire__DisableDebugLogging: "${Dotwire__DisableDebugLogging:-false}"
+      Dotwire__DisableAllLogging: "${Dotwire__DisableAllLogging:-false}"
       Dotwire__Encryption__Keys__k1: "${Dotwire__Encryption__Keys__k1:?set Dotwire__Encryption__Keys__k1 in .env}"
       Nats__Url: "nats://${NATS_USER:?set NATS_USER in .env}:${NATS_PASSWORD:?set NATS_PASSWORD in .env}@nats-1:4222,nats://${NATS_USER}:${NATS_PASSWORD}@nats-2:4222,nats://${NATS_USER}:${NATS_PASSWORD}@nats-3:4222"
       Auth__Issuer: "${Auth__Issuer:?set Auth__Issuer in .env}"
@@ -67,7 +73,7 @@ services:
         condition: service_healthy
 
   dotwire-gateway-2:
-    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.1}
+    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.2}
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -88,6 +94,12 @@ services:
       ConnectionStrings__PostgresRead: "Host=postgres-replica;Port=5432;Database=dotwire;Username=dotwire_app;Password=${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env};Pooling=true;Minimum Pool Size=20;Maximum Pool Size=100"
       Postgres__Migrate: "false"
       Dotwire__Encryption__ActiveKeyId: "${Dotwire__Encryption__ActiveKeyId:-k1}"
+      Dotwire__AuthBatching__Enabled: "${Dotwire__AuthBatching__Enabled:-false}"
+      Dotwire__AuthBatching__MaxInFlight: "${Dotwire__AuthBatching__MaxInFlight:-2}"
+      Dotwire__AuthBatching__MaxBatchSize: "${Dotwire__AuthBatching__MaxBatchSize:-512}"
+      Dotwire__AuthCacheSeconds: "${Dotwire__AuthCacheSeconds:-0}"
+      Dotwire__DisableDebugLogging: "${Dotwire__DisableDebugLogging:-false}"
+      Dotwire__DisableAllLogging: "${Dotwire__DisableAllLogging:-false}"
       Dotwire__Encryption__Keys__k1: "${Dotwire__Encryption__Keys__k1:?set Dotwire__Encryption__Keys__k1 in .env}"
       Nats__Url: "nats://${NATS_USER:?set NATS_USER in .env}:${NATS_PASSWORD:?set NATS_PASSWORD in .env}@nats-1:4222,nats://${NATS_USER}:${NATS_PASSWORD}@nats-2:4222,nats://${NATS_USER}:${NATS_PASSWORD}@nats-3:4222"
       Auth__Issuer: "${Auth__Issuer:?set Auth__Issuer in .env}"
@@ -118,7 +130,7 @@ services:
 
   # Rest and postgres
   dotwire-api-1:
-    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.1}
+    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.2}
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -141,6 +153,12 @@ services:
       Postgres__AppRolePassword: "${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}"
       Postgres__Migrate: "true"
       Dotwire__Encryption__ActiveKeyId: "${Dotwire__Encryption__ActiveKeyId:-k1}"
+      Dotwire__AuthBatching__Enabled: "${Dotwire__AuthBatching__Enabled:-false}"
+      Dotwire__AuthBatching__MaxInFlight: "${Dotwire__AuthBatching__MaxInFlight:-2}"
+      Dotwire__AuthBatching__MaxBatchSize: "${Dotwire__AuthBatching__MaxBatchSize:-512}"
+      Dotwire__AuthCacheSeconds: "${Dotwire__AuthCacheSeconds:-0}"
+      Dotwire__DisableDebugLogging: "${Dotwire__DisableDebugLogging:-false}"
+      Dotwire__DisableAllLogging: "${Dotwire__DisableAllLogging:-false}"
       Dotwire__Encryption__Keys__k1: "${Dotwire__Encryption__Keys__k1:?set Dotwire__Encryption__Keys__k1 in .env}"
       Nats__Url: "nats://${NATS_USER:?set NATS_USER in .env}:${NATS_PASSWORD:?set NATS_PASSWORD in .env}@nats-1:4222,nats://${NATS_USER}:${NATS_PASSWORD}@nats-2:4222,nats://${NATS_USER}:${NATS_PASSWORD}@nats-3:4222"
       Auth__Issuer: "${Auth__Issuer:?set Auth__Issuer in .env}"

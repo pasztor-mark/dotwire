@@ -32,11 +32,28 @@ public sealed class DotwireOptions
     public int MembershipSweepSeconds { get; set; } = 60;
 
     public HubSendOptions HubSend { get; set; } = new();
+
+    public AuthBatchingOptions AuthBatching { get; set; } = new();
+
+    public int AuthCacheSeconds { get; set; }
+
+    public bool DisableDebugLogging { get; set; }
+
+    public bool DisableAllLogging { get; set; }
 }
 
 public sealed class HubSendOptions
 {
     public bool Enabled { get; set; }
+}
+
+public sealed class AuthBatchingOptions
+{
+    public bool Enabled { get; set; }
+
+    public int MaxInFlight { get; set; } = 2;
+
+    public int MaxBatchSize { get; set; } = 512;
 }
 
 public sealed class CorsSettings

@@ -158,6 +158,13 @@ The worst-case window for a lost broadcast is therefore one sweep interval, not 
 If the NATS fanout loop for a room dies unexpectedly, the node drops that room's local
 subscribers so they reconnect and gap-fill instead of silently going deaf.
 
+With `Dotwire:AuthCacheSeconds` above `0`, REST room routes can skip the per-request database read:
+they reuse an allowed decision for up to that many seconds (at most 60) per
+node. Revocations evict it over the same NATS core subject. A lost broadcast, or a direct database edit
+that publishes nothing, leaves REST access open for that window. The cache suspends while NATS is
+disconnected and flushes on reconnect, because NATS core drops revocations published during an outage.
+The cache is off by default.
+
 ## Data layout
 
 Storage is PostgreSQL with the Timescale extension. The `messages` table is a hypertable keyed
@@ -168,7 +175,15 @@ routed to the read pool; this split exists from the start specifically so it nev
 retrofitted under load. Authorization lookups (`user_roles`, `room_members`) are reads and go
 through the read pool too, behind one `IAccessStore` seam. When the read pool points at an
 asynchronous replica, a demotion or membership removal takes effect after replica lag; deploy
-the read pool against the primary or a synchronous replica if that window matters. **Shard-key discipline:** every hot-path query includes `room_id`.
+the read pool against the primary or a synchronous replica if that window matters. With
+`Dotwire:AuthBatching:Enabled` (opt-in, default `false`),
+`AccessLookupBatcher` sends room authorization lookups to `IAccessStore.GetRolesAndMembershipsAsync`,
+a single `unnest` query over `(room_id, user_id)` pairs. A request joins only a batch that has not
+been sent yet, so every decision still comes from a read that started after the request arrived,
+and a batch of one uses the single-row lookup. At most `Dotwire:AuthBatching:MaxInFlight` batches run
+per node (default `2`, range `1..64`), each with at most `Dotwire:AuthBatching:MaxBatchSize` pairs
+(default `512`, range `1..4096`). The optional REST decision cache (`Dotwire:AuthCacheSeconds`, default
+`0`, range `0..60`) is described under "Concurrency and fanout disciplines." **Shard-key discipline:** every hot-path query includes `room_id`.
 Sharding itself is out of scope for v1 (see PRODUCT.md's out-of-scope list), but the schema and
 query discipline are shard-*ready* by construction — nothing is built that would foreclose
 sharding later.
@@ -288,6 +303,19 @@ there is no excuse to relax them under schedule pressure.
   at join time, cached in connection state, and invalidated via membership-change events
   carried on NATS core. WHY: this keeps the database off the send/fanout hot path entirely —
   the expensive check happens once per connection lifetime, not once per message.
+- **Optional REST auth cache, off by default.** `Dotwire:AuthCacheSeconds` (default `0`, range
+  `0..60`; a value outside the range fails startup). `0` registers no cache, subscription or NATS
+  handler. Only allowed room decisions are cached, so denials always reach the database. Expiry is
+  absolute from the start of the read, never sliding. A read whose epoch changed before it was stored
+  is not cached. A revocation evicts the key and tombstones it for `AuthCacheSeconds`, so a
+  lagging replica read cannot re-cache the old row. A node-wide NATS core subscription on
+  `room.*.ephemeral.revoked` runs on `All` and `Api` nodes only; Gateway nodes never use the cache. A
+  dropped message or slow consumer on that subscription flushes the cache. A disconnect suspends it,
+  and it is usable again only after the subscription is confirmed. The node's NATS user needs
+  subscribe permission on `room.*.ephemeral.revoked`; if it is denied, the cache can run without
+  receiving revocations. With `Nats:Enabled=false` the cache
+  never serves, and startup logs a warning. WHY: this removes one database read per REST room request
+  at the cost of a bounded revocation window (see AUTH.md, "Threat notes").
 - **Serialize once per message, not once per connection.** JSON-only AOT source-generation
   makes a single serialized payload naturally shareable across every fanout target. WHY:
   fanout cost would otherwise scale with connections × messages instead of just messages.

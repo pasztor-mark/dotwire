@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using NATS.Client.Core;
@@ -36,15 +37,21 @@ builder.Services.Configure<RetentionOptions>(builder.Configuration.GetSection(Re
 builder.Services.AddSingleton<MessageCipher>();
 
 var dotwireOptions = builder.Configuration.GetSection(DotwireOptions.SectionName).Get<DotwireOptions>() ?? new DotwireOptions();
+LogSwitches.Apply(builder.Logging, dotwireOptions);
 builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = dotwireOptions.MaxRequestBodyBytes);
 builder.WebHost.UseSockets(o => o.Backlog = 65535);
 var authOptions = builder.Configuration.GetSection(AuthOptions.SectionName).Get<AuthOptions>() ?? new AuthOptions();
 var keyRing = new SigningKeyRing(
     authOptions,
-    logger: LoggerFactory.Create(b => b.AddConsole()).CreateLogger(nameof(SigningKeyRing)));
+    logger: LoggerFactory.Create(b =>
+    {
+        b.AddConsole();
+        LogSwitches.Apply(b, dotwireOptions);
+    }).CreateLogger(nameof(SigningKeyRing)));
 
 var webhooksOptions = builder.Configuration.GetSection(WebhooksOptions.SectionName).Get<WebhooksOptions>() ?? new WebhooksOptions();
 WebhookUrlRules.Validate(webhooksOptions);
+AuthLookupRules.Validate(dotwireOptions);
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -145,6 +152,8 @@ builder.Services.AddKeyedSingleton<NpgsqlDataSource>(PostgresDataSources.Read,
 builder.Services.AddKeyedSingleton<NpgsqlDataSource>(PostgresDataSources.Write,
     (sp, _) => PostgresDataSources.Create(RequireConnectionString(sp.GetRequiredService<IConfiguration>(), "PostgresWrite")));
 builder.Services.AddSingleton<IAccessStore, PostgresAccessStore>();
+if (dotwireOptions.AuthBatching.Enabled)
+    builder.Services.AddSingleton<AccessLookupBatcher>();
 
 builder.Services.AddSingleton<INatsConnection>(sp =>
 {
@@ -177,6 +186,12 @@ builder.Services.AddSingleton<PostSendWebhookService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PostSendWebhookService>());
 
 var nodeRole = dotwireOptions.Role;
+if (dotwireOptions.AuthCacheSeconds > 0 && nodeRole is NodeRole.All or NodeRole.Api)
+{
+    builder.Services.TryAddSingleton(TimeProvider.System);
+    builder.Services.AddSingleton<AccessCache>();
+    builder.Services.AddHostedService<AccessCacheRevocationListener>();
+}
 if (nodeRole is NodeRole.All or NodeRole.Api)
 {
     builder.Services.AddHostedService<PostgresWriterService>();
@@ -192,6 +207,9 @@ if (!string.IsNullOrEmpty(webhooksOptions.Presend.Url) || !string.IsNullOrEmpty(
     if (string.IsNullOrEmpty(webhooksOptions.Secret))
         app.Logger.LogWarning("Webhook URLs are configured without Dotwire:Webhooks:Secret; hosts cannot verify webhook calls.");
 }
+
+if (dotwireOptions.AuthCacheSeconds > 0 && !app.Services.GetRequiredService<IOptions<NatsOptions>>().Value.Enabled)
+    app.Logger.LogWarning("Dotwire:AuthCacheSeconds is set but NATS is disabled; the auth cache stays off.");
 
 app.UseCors();
 app.Use((context, next) =>

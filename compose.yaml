@@ -1,6 +1,6 @@
 services:
   dotwire:
-    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.1}
+    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.2}
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -22,6 +22,12 @@ services:
       ConnectionStrings__PostgresRead: "Host=postgres;Port=5432;Database=dotwire;Username=dotwire_app;Password=${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env};Pooling=true;Minimum Pool Size=20;Maximum Pool Size=100"
       Postgres__AppRolePassword: "${POSTGRES_APP_PASSWORD:?set POSTGRES_APP_PASSWORD in .env}"
       Dotwire__Encryption__ActiveKeyId: "${Dotwire__Encryption__ActiveKeyId:-k1}"
+      Dotwire__AuthBatching__Enabled: "${Dotwire__AuthBatching__Enabled:-false}"
+      Dotwire__AuthBatching__MaxInFlight: "${Dotwire__AuthBatching__MaxInFlight:-2}"
+      Dotwire__AuthBatching__MaxBatchSize: "${Dotwire__AuthBatching__MaxBatchSize:-512}"
+      Dotwire__AuthCacheSeconds: "${Dotwire__AuthCacheSeconds:-0}"
+      Dotwire__DisableDebugLogging: "${Dotwire__DisableDebugLogging:-false}"
+      Dotwire__DisableAllLogging: "${Dotwire__DisableAllLogging:-false}"
       Dotwire__Encryption__Keys__k1: "${Dotwire__Encryption__Keys__k1:?set Dotwire__Encryption__Keys__k1 in .env}"
       Nats__Url: "nats://nats:4222"
       Auth__Issuer: "${Auth__Issuer:?set Auth__Issuer in .env}"
@@ -80,7 +86,7 @@ services:
   # A new named volume is root-owned (the nats image has no /data to inherit from), so hand it
   # to the unprivileged user nats runs as before nats starts.
   nats-init:
-    image: nats:2.15.1-alpine
+    image: nats:2.15.2-alpine
     entrypoint: ["chown", "1000:1000", "/data"]
     user: "0:0"
     read_only: true
@@ -94,7 +100,7 @@ services:
       - natsdata:/data
 
   nats:
-    image: nats:2.15.1-alpine
+    image: nats:2.15.2-alpine
     command: ["-js", "-sd", "/data", "-m", "8222"]
     user: "1000:1000"
     depends_on:

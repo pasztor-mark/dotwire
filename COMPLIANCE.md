@@ -98,6 +98,11 @@ full control environment, of which dotwire's technical controls are one input.
 | A.8.15 — logging | Hash-chained, append-only audit log (ARCHITECTURE.md) | Ship/retain logs per organizational policy; review the audit log periodically |
 | A.8.24 — use of cryptography | Both key systems: AES-256-GCM at-rest encryption keys and RS256 JWT signing keys (AUTH.md, "The two key systems") | Custody and rotate the encryption key and JWT private key; document key management procedures |
 
+**Operator note (CC6.1, CC6.6 and A.5.15):** the mappings above describe the default configuration,
+with the REST auth cache off. Enabling `Dotwire:AuthCacheSeconds` widens the REST revocation window to
+that many seconds (at most 60) per node, so that choice is the operator's to make and record in access-control
+policy. Keep the value as low as load allows.
+
 ### HIPAA technical safeguards (§164.312)
 
 | Framework requirement | dotwire mechanism | Host obligation |
@@ -151,6 +156,10 @@ full control environment, of which dotwire's technical controls are one input.
 - **Revocation of live sockets is eventually consistent.** A lost NATS broadcast is caught by
   the gateway membership sweep, so the window is `Dotwire:MembershipSweepSeconds` (default 60),
   plus read-replica lag where the read pool is a replica.
+- **REST revocation is eventually consistent when the auth cache is enabled.** With
+  `Dotwire:AuthCacheSeconds` above `0` (opt-in, default `0`, maximum `60`), a revoked user can keep
+  REST room access on a node for up to `Dotwire:AuthCacheSeconds`, plus read-replica lag where the
+  read pool is a replica. With the default `0`, REST checks the database on every request.
 - **Applied migrations are checksummed.** Startup fails if an already-applied migration file
   changed, so schema drift from edited history is visible rather than silent.
 - **Third-party processors are the host's choice.** The moderation samples under `samples/`

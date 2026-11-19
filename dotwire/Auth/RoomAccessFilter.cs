@@ -17,7 +17,21 @@ public sealed class RoomAccessFilter : IEndpointFilter
                 ? TypedResults.NotFound()
                 : TypedResults.StatusCode(StatusCodes.Status403Forbidden);
 
-        var (role, isMember) = await store.GetRoleAndMembershipAsync(roomId, sub, http.RequestAborted);
+        var cache = http.RequestServices.GetService<AccessCache>();
+        if (cache?.TryGet(roomId, sub, out var cachedRole) == true)
+            return cachedRole == claimedRole
+                ? await next(context)
+                : TypedResults.StatusCode(StatusCodes.Status403Forbidden);
+
+        var token = cache?.BeginRead();
+        var batcher = http.RequestServices.GetService<AccessLookupBatcher>();
+        var (role, isMember) = batcher is not null
+            ? await batcher.LookupAsync(roomId, sub, http.RequestAborted)
+            : await store.GetRoleAndMembershipAsync(roomId, sub, http.RequestAborted);
+
+        if (role is not null && isMember)
+            cache?.Store(roomId, sub, role, token!.Value);
+
         if (role is null || role != claimedRole || !isMember)
             return TypedResults.StatusCode(StatusCodes.Status403Forbidden);
 
