@@ -5,6 +5,7 @@
 [![NATS JetStream](https://img.shields.io/badge/NATS-JetStream%202.15-27AAE1?style=flat&logo=natsdotio)](https://nats.io/)
 [![Encryption](https://img.shields.io/badge/At--Rest-AES--256--GCM-blueviolet?style=flat)]()
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+[![Benchmark DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24406317.svg)](https://doi.org/10.5281/zenodo.24406317)
 
 **[Key highlights](#key-highlights) · [Architecture](#architecture) · [Quickstart](#quickstart) · [Benchmarks](#benchmarks) · [Official SDKs](#official-sdks) · [Docs](#docs) · [Contributing](#contributing) · [License](#license)**
 
@@ -107,6 +108,8 @@ Follow the [`@dotwire/host`](packages/host/README.md) and [`@dotwire/client`](pa
 ![v0.4.1 benchmarks on 2× Hetzner CCX33, 3 reps: 10× the sustained msg/s of Tinode at default durability; 6 ms p99 at 100 msg/s across 100 rooms × 10 members; 50k concurrent connections with 0 failures; 0 messages lost, even saturated at ~7.5k msg/s.](docs/banners/benchmarks-results.png)
 
 Open-loop load, with latency measured from the intended send time. dotwire acks once JetStream accepts a message; Tinode acks after a disk flush. At 5,000-member rooms, fanout is even.
+
+[![Benchmark DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24406317.svg)](https://doi.org/10.5281/zenodo.24406317) Methodology, raw data and notebook: [dw-benchmarks](https://github.com/pasztor-mark/dw-benchmarks) · [full results](https://dotwire.pasztormark.dev/docs/benchmarks)
 
 ---
 
