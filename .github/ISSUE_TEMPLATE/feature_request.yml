@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest a change or addition to dotwire.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: Check PRODUCT.md's out-of-scope list first. Requests on that list will be closed.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what stops you today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: I checked PRODUCT.md's out-of-scope list and this is not on it.
+          required: true

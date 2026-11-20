@@ -1,0 +1,38 @@
+name: Bug report
+description: Something in dotwire or one of its SDKs does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not report security vulnerabilities here. See SECURITY.md. Never paste message content, tokens, or keys.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: dotwire server version and, if relevant, the SDK package and version.
+      placeholder: dotwire 0.4.0, @dotwire/client 0.4.0
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Node role (All, Gateway, Api), deployment (compose, Kubernetes, ...), and any non-default settings.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      render: text
