@@ -365,6 +365,24 @@ public class HttpPipelineSecurityTests(WebApplicationFactory<Program> factory) :
         Assert.Equal([HttpStatusCode.Unauthorized, HttpStatusCode.Unauthorized, HttpStatusCode.TooManyRequests], statuses);
     }
 
+    [Fact]
+    public async Task Healthz_IsNotStarvedByUnauthenticatedFlood()
+    {
+        var (app, _) = App(b =>
+        {
+            b.UseSetting("Dotwire:RateLimits:Unauthenticated:PermitLimit", "2");
+            b.UseSetting("Dotwire:RateLimits:Unauthenticated:TokensPerPeriod", "1");
+            b.UseSetting("Dotwire:RateLimits:Unauthenticated:PeriodSeconds", "3600");
+        });
+        var flood = WithToken(app.CreateClient(), "not.a.jwt");
+        for (var i = 0; i < 3; i++)
+            await flood.GetAsync($"/rooms/{Room}/participants", Ct);
+
+        var response = await app.CreateClient().GetAsync("/healthz", Ct);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
     private static void TinyRouteBuckets(Microsoft.AspNetCore.Hosting.IWebHostBuilder b)
     {
         foreach (var bucket in new[] { "Read", "Send" })

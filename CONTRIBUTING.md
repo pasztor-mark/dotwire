@@ -15,7 +15,7 @@ For anything larger than a bug fix, open an issue first so the approach can be a
 
 ## Building & testing locally
 
-Requires the **.NET 10 SDK** (`global.json` pins `10.0.0`):
+Requires the **.NET 10 SDK** `10.0.403` or a later `10.0` feature band (`global.json` pins `10.0.403` with `rollForward: latestFeature`; older SDKs ship a vulnerable Native AOT compiler):
 
 ```bash
 # Build the solution

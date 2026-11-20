@@ -1,3 +1,13 @@
+# v0.4.3
+
+No breaking changes and no database migrations.
+
+| Area | Behavior | What to do |
+|---|---|---|
+| AUDIT stream | Switches from limits to interest retention on startup: events leave JetStream once written to Postgres, freeing the space they held. `Nats:AuditMaxBytes` (default 1 GiB) caps the unwritten backlog; at the cap audited admin calls answer `503 audit_unavailable` instead of dropping events. | Nothing. Keep the `audit-writer` consumer; make any extra `AUDIT` consumer ack. |
+| Health check | `/healthz` is exempt from rate limiting, so a flood of unauthenticated traffic through a proxy can no longer fail the proxy's health checks. | Nothing. |
+| SDK | `global.json` requires SDK `10.0.403` or a later `10.0` feature band; older SDKs ship a Native AOT compiler with GHSA-p3jp-9v83-76w9. | Install a current .NET 10 SDK before building. |
+
 # Upgrading to 0.4.0
 
 Applies to upgrading from 0.3.x. No breaking changes and no database migrations. 0.3 SDKs work

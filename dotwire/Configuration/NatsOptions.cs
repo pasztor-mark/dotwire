@@ -45,6 +45,8 @@ public sealed class NatsOptions
 
     public string AuditSubject { get; set; } = "audit.events";
 
+    public long AuditMaxBytes { get; set; } = 1024L * 1024 * 1024;
+
     /// <summary>Durable consumer that batch-inserts messages into Postgres.</summary>
     public string PostgresWriterConsumer { get; set; } = "postgres-writer";
 

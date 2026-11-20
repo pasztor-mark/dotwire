@@ -243,7 +243,7 @@ if (nodeRole is NodeRole.All or NodeRole.Gateway)
     Events.MapEventEndpoints(app);
 }
 
-app.MapGet("/healthz", () => Results.Ok());
+app.MapGet("/healthz", () => Results.Ok()).DisableRateLimiting();
 
 var postgres = app.Services.GetRequiredService<IOptions<PostgresOptions>>().Value;
 if (postgres.Migrate)

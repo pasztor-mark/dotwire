@@ -263,6 +263,16 @@ so the real tamper anchor is exporting `audit_checkpoints` to storage the databa
 write. Default verification starts at the latest checkpoint; run `?full=true` (single-flight
 per node) to re-check rows below it.
 
+**The AUDIT stream is a queue, not the record.** The stream uses interest retention: an event
+leaves JetStream once the `audit-writer` consumer acks it, and the writer acks only after the
+Postgres transaction that chained it commits. It has no `MaxAge`; instead `Nats:AuditMaxBytes`
+(default 1 GiB) caps the unwritten backlog with `discard: new`, so a stalled writer makes new
+audit publishes fail (`503 audit_unavailable`, the admin change rolls back) rather than drop an
+event nobody has stored. An event published while no consumer exists is dropped under interest
+retention, so never delete the `audit-writer` consumer by hand (startup provisioning recreates
+it), and any extra consumer on `AUDIT` must ack, or the backlog fills to the cap. Existing
+streams switch from limits to interest retention in place on the next startup.
+
 **Single-writer via Postgres advisory lock.** Exactly one process may run the audit writer at
 a time — required for the strict total order hash-chaining depends on (see WHY above) — and
 that exclusivity is enforced with a Postgres session-level advisory lock

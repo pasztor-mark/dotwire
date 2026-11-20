@@ -19,8 +19,8 @@ you're touching the area they cover:
 
 ## Build & run
 
-Verified against this repo (.NET 10 SDK, `global.json` pins `10.0.0` with `rollForward:
-latestMajor`):
+Verified against this repo (.NET 10 SDK, `global.json` pins `10.0.403` with `rollForward:
+latestFeature`, no prereleases; older SDKs ship a vulnerable Native AOT compiler):
 
 ```
 dotnet build dotwire.slnx

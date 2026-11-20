@@ -52,6 +52,9 @@ public static class JetStreamProvisioner
             new StreamConfig(options.AuditStream, [options.AuditSubject])
             {
                 Storage = StreamConfigStorage.File,
+                Retention = StreamConfigRetention.Interest,
+                Discard = StreamConfigDiscard.New,
+                MaxBytes = options.AuditMaxBytes,
             }, ct);
 
         await js.CreateOrUpdateConsumerAsync(

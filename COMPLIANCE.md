@@ -41,7 +41,9 @@ the doc section linked.
   changes, membership grants/revocations, redaction, message injection, and retention changes
   all leave an ids-only trail, not just the message-lifecycle events the log originally
   covered. `audit_log.prev_hash` is unique and checkpoints are validated on insert and again
-  by `/audit/verify`. See ARCHITECTURE.md, "Audit log."
+  by `/audit/verify`. The JetStream AUDIT stream only queues events until they are chained into
+  Postgres: written events are removed, and a full queue (`Nats:AuditMaxBytes`) fails audited
+  calls closed instead of discarding events. See ARCHITECTURE.md, "Audit log."
 - **Role cross-check + membership authorization pipeline.** Every authenticated request
   verifies the JWT signature and standard claims, then cross-checks the token's `dw:role`
   claim against the service-side `user_roles` table — the table is authoritative, not the

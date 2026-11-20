@@ -15,6 +15,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
+using NATS.Client.JetStream.Models;
 using Npgsql;
 using Xunit;
 
@@ -688,7 +689,7 @@ public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Progr
 
         var js = _factory.Services.GetRequiredService<INatsJSContext>();
         var audit = await js.GetStreamAsync("AUDIT", cancellationToken: TestContext.Current.CancellationToken);
-        var auditBefore = audit.Info.State.Messages;
+        var auditBefore = audit.Info.State.LastSeq;
 
         var adminClient = Client(TestTokens.Mint(admin, role: "admin"));
         var redact = await adminClient.DeleteAsync(
@@ -707,7 +708,7 @@ public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Progr
         // Exactly one audit event appended, ids only - the payload is checked by shape here
         // (the AuditEvent record has no content field at all), the count by stream state.
         await audit.RefreshAsync(TestContext.Current.CancellationToken);
-        Assert.Equal(auditBefore + 1, audit.Info.State.Messages);
+        Assert.Equal(auditBefore + 1, audit.Info.State.LastSeq);
 
         // The live subscriber was told to drop it.
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -778,6 +779,46 @@ public class ComposeIntegrationTests : IClassFixture<WebApplicationFactory<Progr
         var ex = await Assert.ThrowsAsync<PostgresException>(
             () => cmd.ExecuteNonQueryAsync(TestContext.Current.CancellationToken));
         Assert.Equal("42501", ex.SqlState); // insufficient_privilege
+    }
+
+    [Fact]
+    public async Task AuditStream_RemovesEventsOnceWrittenToPostgres()
+    {
+        var js = _factory.Services.GetRequiredService<INatsJSContext>();
+        var audit = await js.GetStreamAsync("AUDIT", cancellationToken: TestContext.Current.CancellationToken);
+        Assert.Equal(StreamConfigRetention.Interest, audit.Info.Config.Retention);
+        Assert.Equal(StreamConfigDiscard.New, audit.Info.Config.Discard);
+        Assert.True(audit.Info.Config.MaxBytes > 0);
+
+        var admin = $"it-admin-{Guid.NewGuid():N}";
+        await SeedUserAsync(admin, "admin");
+        var set = await Client(TestTokens.Mint(admin, role: "admin")).PutAsJsonAsync(
+            $"/admin/users/it-user-{Guid.NewGuid():N}/role", new { role = "member" }, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.OK, set.StatusCode);
+        await WaitForAuditRowCountAsync("role.set.member", admin, 1);
+
+        long streamSeq;
+        await using (var conn = await OpenOwnerConnectionAsync())
+        await using (var cmd = new NpgsqlCommand(
+            "SELECT stream_seq FROM audit_log WHERE event_type = 'role.set.member' AND actor_id = $1", conn))
+        {
+            cmd.Parameters.AddWithValue(admin);
+            streamSeq = (long)(await cmd.ExecuteScalarAsync(TestContext.Current.CancellationToken))!;
+        }
+
+        for (var i = 0; i < 40; i++)
+        {
+            try
+            {
+                await audit.GetAsync(new StreamMsgGetRequest { Seq = (ulong)streamSeq }, TestContext.Current.CancellationToken);
+            }
+            catch (NatsJSApiException ex) when (ex.Error.ErrCode == 10037)
+            {
+                return;
+            }
+            await Task.Delay(250, TestContext.Current.CancellationToken);
+        }
+        Assert.Fail($"audit event at stream seq {streamSeq} was still in the AUDIT stream 10s after it reached audit_log");
     }
 
     private async Task<int> WaitForAuditRowCountAsync(string eventType, string actorId, int expectedAtLeast)
