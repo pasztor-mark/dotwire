@@ -185,7 +185,7 @@ services:
 
   # Nats
   nats-1:
-    image: nats:2.15.1-alpine
+    image: nats:2.15.3-alpine
     restart: always
     ports:
       - "127.0.0.1:8222:8222"
@@ -215,7 +215,7 @@ services:
       retries: 10
 
   nats-2:
-    image: nats:2.15.1-alpine
+    image: nats:2.15.3-alpine
     restart: always
     command:
       - "-js"
@@ -243,7 +243,7 @@ services:
       retries: 10
 
   nats-3:
-    image: nats:2.15.1-alpine
+    image: nats:2.15.3-alpine
     restart: always
     command:
       - "-js"
