@@ -1,6 +1,6 @@
 {
   "name": "@dotwire/client",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "Browser/Node client SDK for dotwire: scoped room handles, SignalR subscription with sequence-based gap-fill, typing, presence, and history.",
   "repository": {
     "type": "git",

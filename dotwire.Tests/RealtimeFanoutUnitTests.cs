@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Security.Claims;
 using System.Security.Cryptography;
+using Dotwire.Api;
 using Dotwire.Configuration;
 using Dotwire.Crypto;
 using Dotwire.Realtime;
@@ -54,7 +55,8 @@ public class RealtimeFanoutUnitTests
             new MessageCipher(Options.Create(encryption)),
             new PresenceCoalescer(nats, disabled, NullLogger<PresenceCoalescer>.Instance),
             disabled,
-            NullLogger<RoomInterestManager>.Instance);
+            NullLogger<RoomInterestManager>.Instance,
+            TestMetrics.Create().Metrics);
     }
 
     private static async Task<(RoomHub Hub, CountingNats Nats)> CreateSubscribedHubAsync()
@@ -74,11 +76,46 @@ public class RealtimeFanoutUnitTests
             Options.Create(new NatsOptions()),
             null!,
             null!,
-            Options.Create(new DotwireOptions()))
+            Options.Create(new DotwireOptions()),
+            TestMetrics.Create().Metrics)
         {
             Context = new FakeCallerContext("conn-1", "user-1"),
         };
         return (hub, counting);
+    }
+
+    [Fact]
+    public async Task Send_RateLimitedRecordsHubRejection()
+    {
+        var (metrics, scope) = TestMetrics.Create();
+        using var capture = new MetricCapture(scope);
+        var nats = DispatchProxy.Create<INatsConnection, CountingNats>();
+        var disabled = Options.Create(new NatsOptions { Enabled = false });
+        var sendLimiter = new SendRateLimiter(Options.Create(new RateLimitOptions
+        {
+            Send = new RateLimitBucketOptions { PermitLimit = 1, TokensPerPeriod = 1, PeriodSeconds = 3600 },
+        }));
+        Assert.True(sendLimiter.TryAcquire("user-1", out _));
+        var hub = new RoomHub(
+            new FakeAccessStore(),
+            CreateInterestManager(nats),
+            new PresenceCoalescer(nats, disabled, NullLogger<PresenceCoalescer>.Instance),
+            new TypingThrottle(),
+            new UserConnectionLimiter(Options.Create(new DotwireOptions())),
+            nats,
+            Options.Create(new NatsOptions()),
+            null!,
+            sendLimiter,
+            Options.Create(new DotwireOptions { HubSend = new HubSendOptions { Enabled = true } }),
+            metrics)
+        {
+            Context = new FakeCallerContext("conn-1", "user-1"),
+        };
+
+        var ex = await Assert.ThrowsAsync<HubException>(() => hub.Send(RoomId, "hi", null));
+
+        Assert.Equal("RateLimited", ex.Message);
+        Assert.Equal(1, capture.Sum("dotwire.rejections", ("transport", "hub"), ("reason", "rate_limited"), ("operation", "send")));
     }
 
     [Fact]

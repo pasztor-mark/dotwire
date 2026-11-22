@@ -77,7 +77,7 @@ echo "Auth__Keys__dev=\"$(awk '{printf "%s\\n",$0}' dev-jwt.pub)\"" >> .env
 docker compose up -d --build
 ```
 
-Omit `--build` to run the published image, `ghcr.io/pasztor-mark/dotwire:<version>` (`linux/amd64` and `linux/arm64`; set `DOTWIRE_VERSION`, default `0.4.3`).
+Omit `--build` to run the published image, `ghcr.io/pasztor-mark/dotwire:<version>` (`linux/amd64` and `linux/arm64`; set `DOTWIRE_VERSION`, default `0.5.0`).
 
 The compose stacks publish plain HTTP on `127.0.0.1` only. Before exposing dotwire, put TLS in front of it, set `Cors:AllowedOrigins` and `AllowedHosts` to your real origins and host names, keep `ConnectionStrings:PostgresMigrator` on the migrating node only, and for `compose.multinode.yaml` set `NATS_USER`, `NATS_PASSWORD`, `POSTGRES_REPLICATION_PASSWORD` and `HAPROXY_STATS_PASSWORD` in `.env`. Connection strings in compose `environment:` are visible through `docker inspect`; in production supply them from your secret store instead. Point the host SDKs at an `https` `baseUrl` outside localhost. See ARCHITECTURE.md, "Deployment posture".
 
@@ -176,6 +176,84 @@ Keep these at their defaults in every scenario: `Nats__RoomsSubjectFilter`, NATS
 
 * **REST auth batching is opt-in.** `Dotwire__AuthBatching__Enabled` (default `false`) groups concurrent REST room-authorization lookups into one query, with at most `Dotwire__AuthBatching__MaxInFlight` (default `2`) queries in flight per node. Requests are grouped only when they have to wait for a free slot, so a small limit batches more and a large limit rarely batches at all. A local test showed no difference at light load and clear gains at 128 to 1024 concurrent requests (about +44%, +63% and +38% throughput with a limit of 16). Turn it on from about 100 concurrent REST clients upward (see "Recommended settings by scenario"). Raise `MaxInFlight` (8 to 16, untested guidance) if lookups are slow, for example a database on another network.
 * **Logging costs CPU under load.** `Dotwire__DisableDebugLogging=true` drops Trace, Debug and Information logs; `Dotwire__DisableAllLogging=true` turns all logging off.
+
+## Metrics
+
+dotwire pushes OpenTelemetry metrics over OTLP. Metrics are on by default. Traces are opt-in (see "Tracing"). Logs are not exported. No room, message, user or sender id, no subject, no SQL text and no message content is ever exported as a metric or tag.
+
+* **Turn off:** `Dotwire__DisableMetrics=true`. With it set, no meter provider is registered and the JetStream poller does not run.
+* **Exporter:** the standard OTel variables apply: `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4317`), `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES`.
+* **Compose:** inside a container, `localhost` is the container itself. `compose.yaml` and `compose.multinode.yaml` pass `OTEL_EXPORTER_OTLP_ENDPOINT` through with the default, so set it to your collector's address.
+* **Multi-node:** the JetStream gauges describe the cluster, not one node. Every `All` and `Api` node runs the poller and reports the same values, so take `max()` across nodes, never a sum. Each process is its own series (`service.instance.id`).
+
+Instruments (meter `Dotwire`):
+
+| Instrument | Kind | Unit | Tags | Recorded at |
+|---|---|---|---|---|
+| `dotwire.jetstream.consumer.pending` | ObservableGauge<long> | `{message}` | `stream`, `consumer` | poller snapshot: `NumPending + NumAckPending` |
+| `dotwire.jetstream.consumer.oldest_pending.age` | ObservableGauge<double> | `s` | `stream`, `consumer` | poller snapshot; `0` when pending is 0 |
+| `dotwire.jetstream.stream.bytes` | ObservableGauge<long> | `By` | `stream` | poller snapshot: `StreamState.Bytes` |
+| `dotwire.jetstream.stream.messages` | ObservableGauge<long> | `{message}` | `stream` | poller snapshot: `StreamState.Messages` |
+| `dotwire.jetstream.stream.max_bytes` | ObservableGauge<long> | `By` | `stream` | server `StreamConfig.MaxBytes`, only when > 0 (AUDIT) |
+| `dotwire.jetstream.stream.max_age` | ObservableGauge<double> | `s` | `stream` | server `StreamConfig.MaxAge`, only when > 0 (ROOMS) |
+| `dotwire.audit.writer.lock_held` | ObservableGauge<int> | `1` | none | `AuditWriterService`: 1 while the advisory lock is held, else 0 |
+| `dotwire.audit.unavailable` | Counter<long> | `{response}` | none | `ApiResults.AuditUnavailable()` |
+| `dotwire.rejections` | Counter<long> | `{rejection}` | `transport` (`hub`, `rest`, `sse`), `reason` (`rate_limited`, `too_many_connections`, `busy`), `operation` (`connect`, `subscribe`, `unsubscribe`, `send`, `audit_verify`) | sites that bypass the rate-limit middleware: `RoomHub.OnConnectedAsync`, `RoomHub.Send`, `HubRateLimitFilter.InvokeMethodAsync`, `SendRateLimitFilter` (REST send when `HubSend:Enabled=true`), the SSE connection cap in `Events`, the full-verify gate in `Audit` |
+| `dotwire.sse.active_connections` | ObservableGauge<long> | `{connection}` | none | `RoomInterestManager`: sum of `_sseChannels` per-room counts |
+| `dotwire.webhook.presend.results` | Counter<long> | `{call}` | `outcome` (`allowed`, `allowed_with_rewrite`, `rejected`, `unavailable`, `failed_open`) | `PresendWebhookClient.EvaluateAsync` / `Unavailable` |
+| `dotwire.webhook.postsend.dropped` | Counter<long> | `{event}` | `reason` (`queue_bytes`, `queue_full`, `max_attempts`) | `PostSendWebhookService` |
+| `dotwire.message.send.duration` | Histogram<double> | `s` | `transport` (`hub`, `rest`), `outcome` (`accepted`, `rejected`, `unavailable`) | `MessageSend.SendAsync`: validation, presend, encrypt, JetStream ack and live republish. Admin injection is not included |
+| `dotwire.jetstream.publish.duration` | Histogram<double> | `s` | `outcome` (`ok`, `error`) | `MessagePublisher`: the JetStream publish and ack only, for member sends and admin injection |
+| `dotwire.fanout.lag` | Histogram<double> | `s` | none | `RoomInterestManager`: message timestamp (set by the sending node before the publish) to local fanout. Includes clock skew between nodes |
+| `dotwire.fanout.dropped` | Counter<long> | `{event}` | `transport` (`hub`, `sse`), `reason` (`slow_consumer`, `ephemeral_shed`) | `RoomInterestManager`: `slow_consumer` is an event that found the client's buffer full, which disconnects that client; `ephemeral_shed` is a typing/presence event skipped because the buffer was half full |
+| `dotwire.auth.cache.lookups` | Counter<long> | `{lookup}` | `result` (`hit`, `miss`) | `RoomAccessFilter`, only when `Dotwire__AuthCacheSeconds` > 0 |
+| `dotwire.auth.lookup.duration` | Histogram<double> | `s` | `path` (`direct`, `batched`) | `RoomAccessFilter`: membership lookups that missed the cache |
+| `dotwire.auth.batch.size` | Histogram<int> | `{lookup}` | none | `AccessLookupBatcher`, only when `Dotwire__AuthBatching__Enabled=true` |
+
+Built-in meters are exported too: ASP.NET Core (`Microsoft.AspNetCore.Hosting`, Kestrel, SignalR connections, rate limiting, which includes `aspnetcore.rate_limiting.requests` for middleware rejections), `System.Net.Http`, `System.Runtime`, `Npgsql` and `NATS.Net`. Third-party tags are scrubbed by views: `NATS.Net` `messaging.client.*` is dropped (it carries subjects), `nats.client.*` has no tags, and `db.client.*` keeps only `db.client.connection.state`, `db.client.connection.pool.name`, `db.operation.name` and `error.type`. The pool name is `read` or `write`: both data sources are given a fixed name, because without one Npgsql fills that tag with connection-string fragments.
+
+A JetStream gauge that disappears means the poller is failing or NATS is unreachable. Alert on its absence.
+
+In Prometheus (via OTLP) names become snake case with unit suffixes: `dotwire.rejections` is `dotwire_rejections_total`, `dotwire.jetstream.consumer.oldest_pending.age` is `dotwire_jetstream_consumer_oldest_pending_age_seconds`, and `dotwire.audit.writer.lock_held` is `dotwire_audit_writer_lock_held_ratio`. `service.name` and `service.instance.id` become the `service_name` and `service_instance_id` labels; the node role is on `target_info` as `dotwire_node_role`.
+
+### Local dashboard (Grafana)
+
+`compose.observability.yaml` adds a single `grafana/otel-lgtm` container (OTel Collector, Prometheus, Tempo, Loki and Grafana) with a provisioned **dotwire** dashboard: health stats with the thresholds below, traffic and latency by route, connections, send duration, JetStream ack time, fanout lag and drops, rejections and webhooks, JetStream lag, database (per pool) and .NET runtime, auth lookups, and recent traces.
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://lgtm:4317 Dotwire__EnableTracing=true \
+  docker compose -f compose.yaml -f compose.observability.yaml up -d
+```
+
+Open http://localhost:3000 and go to Dashboards → dotwire. The same overlay works with `compose.multinode.yaml`; every node reports to it.
+
+* **Dev and demo use.** Grafana runs with anonymous admin access, so the overlay publishes it on `127.0.0.1` only and keeps the OTLP ports internal. Data lives in the `lgtmdata` volume. For production, point `OTEL_EXPORTER_OTLP_ENDPOINT` at your own collector and import `observability/grafana/dotwire.json` into your Grafana; it expects Prometheus and Tempo data sources with uids `prometheus` and `tempo`.
+* **Editing the dashboard:** Grafana in this image loads `observability/grafana/dotwire.json` at startup only, so run `docker compose -f compose.yaml -f compose.observability.yaml restart lgtm` after changing it. Data survives the restart.
+* **Empty panels are normal** until something happens: webhook panels stay empty without webhooks configured, and `dotwire_rejections_total` appears on the first hub or SSE rejection.
+
+### Suggested alert thresholds
+
+Each limit is emitted as its own gauge, so these are ratios. The thresholds are starting points.
+
+| Signal | Warn | Critical |
+|---|---|---|
+| ROOMS `oldest_pending.age / max_age` (take `max()` across nodes) | > 0.25 | > 0.5 |
+| AUDIT `stream.bytes / max_bytes` | > 0.5 | > 0.8 |
+| `sum(audit.writer.lock_held)` across nodes | | == 0 for 5 min (no audit writer) |
+| `rate(audit.unavailable)` | | > 0 |
+| `rate(webhook.presend.results{outcome=unavailable or failed_open})` | > 0 for 5 min | |
+| `rate(webhook.postsend.dropped)` | > 0 | |
+| JetStream gauges absent | | 5 min (poller failing or NATS unreachable) |
+| Rejections (`dotwire.rejections`, `aspnetcore.rate_limiting.requests`) | deployment-specific, no default | |
+
+## Tracing
+
+Traces are off by default. `Dotwire__EnableTracing=true` turns them on, independently of `Dotwire__DisableMetrics`. Spans go to the same OTLP endpoint as metrics.
+
+* **Spans:** ASP.NET Core server requests (named by route template, e.g. `GET /rooms/{roomId}/participants`), SignalR hub invocations (`Dotwire.Realtime.RoomHub/Send`), outbound HTTP (webhooks, JWKS) and Npgsql commands. NATS spans are not exported: their names carry subjects, and enabling them would inject trace headers into stored JetStream messages.
+* **Scrubbing:** `TraceScrubber` runs before the exporter and keeps only these tags: `http.request.method`, `http.response.status_code`, `http.route`, `url.scheme`, `network.protocol.version`, `server.address`, `server.port`, `error.type`, `rpc.system`, `rpc.service`, `rpc.method`, `db.system.name`, `db.operation.name`, `db.response.status_code`. URL paths and queries, SQL text, client addresses, user agents and connection-string fragments are removed. Status descriptions and incoming `tracestate` are cleared.
+* **Exception events:** span events cannot be stripped, and a failed query's exception message can contain parameter values. A span with any tagged event (in practice, a recorded exception) is not exported. The parent request span still carries `error.type` and the status code.
+* **Sampling:** the default is parent-based always-on, so an incoming `traceparent` decides. Set the standard `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` (e.g. `parentbased_traceidratio` and `0.1`) to sample less under load.
 
 ## License
 

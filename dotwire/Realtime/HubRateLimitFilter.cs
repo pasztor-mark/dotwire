@@ -6,7 +6,7 @@ using Microsoft.Extensions.Options;
 
 namespace Dotwire.Realtime;
 
-public sealed class HubRateLimitFilter(IOptions<RateLimitOptions> options) : IHubFilter, IDisposable
+public sealed class HubRateLimitFilter(IOptions<RateLimitOptions> options, DotwireMetrics metrics) : IHubFilter, IDisposable
 {
     private readonly PartitionedRateLimiter<string> _limiter = PartitionedRateLimiter.Create<string, string>(key =>
         RateLimitPartition.GetTokenBucketLimiter(key, _ =>
@@ -29,7 +29,10 @@ public sealed class HubRateLimitFilter(IOptions<RateLimitOptions> options) : IHu
         {
             using var lease = _limiter.AttemptAcquire(PartitionKey(invocationContext.Context));
             if (!lease.IsAcquired)
+            {
+                metrics.Rejection("hub", "rate_limited", invocationContext.HubMethodName.ToLowerInvariant());
                 throw new HubException("RateLimited");
+            }
         }
 
         return await next(invocationContext);

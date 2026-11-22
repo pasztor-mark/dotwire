@@ -1,16 +1,19 @@
+using System.Diagnostics.Metrics;
 using System.Text.Json;
 using Dotwire.Api;
+using Dotwire.Configuration;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace dotwire.Tests;
 
 public class ApiResultsTests
 {
-    private static async Task<(int StatusCode, string? RetryAfter, JsonDocument Body)> ExecuteAsync(IResult result)
+    private static async Task<(int StatusCode, string? RetryAfter, JsonDocument Body)> ExecuteAsync(IResult result, IServiceProvider? services = null)
     {
-        var services = new ServiceCollection()
+        services ??= new ServiceCollection()
             .AddLogging()
             .Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(_ => { })
             .BuildServiceProvider();
@@ -85,6 +88,50 @@ public class ApiResultsTests
         var (status, _, body) = await ExecuteAsync(ApiResults.AuditUnavailable());
         Assert.Equal(503, status);
         Assert.Equal("audit_unavailable", body.RootElement.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task AuditUnavailable_RecordsOncePerExecution()
+    {
+        var services = new ServiceCollection()
+            .AddLogging()
+            .AddMetrics()
+            .AddSingleton<DotwireMetrics>()
+            .Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(_ => { })
+            .BuildServiceProvider();
+        using var capture = new MetricCapture(services.GetRequiredService<IMeterFactory>());
+
+        var (status, _, body) = await ExecuteAsync(ApiResults.AuditUnavailable(), services);
+
+        Assert.Equal(503, status);
+        Assert.Equal("audit_unavailable", body.RootElement.GetProperty("error").GetString());
+        Assert.Equal(1, capture.Sum("dotwire.audit.unavailable"));
+    }
+
+    [Fact]
+    public async Task SendRateLimitFilter_RecordsRestSendRejection()
+    {
+        var services = new ServiceCollection()
+            .AddMetrics()
+            .AddSingleton<DotwireMetrics>()
+            .BuildServiceProvider();
+        using var capture = new MetricCapture(services.GetRequiredService<IMeterFactory>());
+        var options = Options.Create(new RateLimitOptions
+        {
+            Send = new RateLimitBucketOptions { PermitLimit = 1, TokensPerPeriod = 1, PeriodSeconds = 3600 },
+        });
+        var filter = new SendRateLimitFilter(new SendRateLimiter(options), services.GetRequiredService<DotwireMetrics>());
+        var http = new DefaultHttpContext { RequestServices = services };
+        http.Request.Method = HttpMethods.Post;
+        http.User = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity([new System.Security.Claims.Claim("sub", "u1")]));
+
+        static ValueTask<object?> Next(EndpointFilterInvocationContext _) => ValueTask.FromResult<object?>(Results.Ok());
+        await filter.InvokeAsync(EndpointFilterInvocationContext.Create(http), Next);
+        var second = await filter.InvokeAsync(EndpointFilterInvocationContext.Create(http), Next) as IResult;
+
+        var (status, _, _) = await ExecuteAsync(second!);
+        Assert.Equal(429, status);
+        Assert.Equal(1, capture.Sum("dotwire.rejections", ("transport", "rest"), ("reason", "rate_limited"), ("operation", "send")));
     }
 
     [Fact]

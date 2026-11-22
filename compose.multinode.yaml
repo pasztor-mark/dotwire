@@ -17,7 +17,7 @@ services:
 
   # WS holders
   dotwire-gateway-1:
-    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.3}
+    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.5.0}
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -44,6 +44,9 @@ services:
       Dotwire__AuthCacheSeconds: "${Dotwire__AuthCacheSeconds:-0}"
       Dotwire__DisableDebugLogging: "${Dotwire__DisableDebugLogging:-false}"
       Dotwire__DisableAllLogging: "${Dotwire__DisableAllLogging:-false}"
+      Dotwire__DisableMetrics: "${Dotwire__DisableMetrics:-false}"
+      Dotwire__EnableTracing: "${Dotwire__EnableTracing:-false}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4317}"
       Dotwire__Encryption__Keys__k1: "${Dotwire__Encryption__Keys__k1:?set Dotwire__Encryption__Keys__k1 in .env}"
       Nats__Url: "nats://${NATS_USER:?set NATS_USER in .env}:${NATS_PASSWORD:?set NATS_PASSWORD in .env}@nats-1:4222,nats://${NATS_USER}:${NATS_PASSWORD}@nats-2:4222,nats://${NATS_USER}:${NATS_PASSWORD}@nats-3:4222"
       Auth__Issuer: "${Auth__Issuer:?set Auth__Issuer in .env}"
@@ -73,7 +76,7 @@ services:
         condition: service_healthy
 
   dotwire-gateway-2:
-    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.3}
+    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.5.0}
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -100,6 +103,9 @@ services:
       Dotwire__AuthCacheSeconds: "${Dotwire__AuthCacheSeconds:-0}"
       Dotwire__DisableDebugLogging: "${Dotwire__DisableDebugLogging:-false}"
       Dotwire__DisableAllLogging: "${Dotwire__DisableAllLogging:-false}"
+      Dotwire__DisableMetrics: "${Dotwire__DisableMetrics:-false}"
+      Dotwire__EnableTracing: "${Dotwire__EnableTracing:-false}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4317}"
       Dotwire__Encryption__Keys__k1: "${Dotwire__Encryption__Keys__k1:?set Dotwire__Encryption__Keys__k1 in .env}"
       Nats__Url: "nats://${NATS_USER:?set NATS_USER in .env}:${NATS_PASSWORD:?set NATS_PASSWORD in .env}@nats-1:4222,nats://${NATS_USER}:${NATS_PASSWORD}@nats-2:4222,nats://${NATS_USER}:${NATS_PASSWORD}@nats-3:4222"
       Auth__Issuer: "${Auth__Issuer:?set Auth__Issuer in .env}"
@@ -130,7 +136,7 @@ services:
 
   # Rest and postgres
   dotwire-api-1:
-    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.4.3}
+    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.5.0}
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -159,6 +165,9 @@ services:
       Dotwire__AuthCacheSeconds: "${Dotwire__AuthCacheSeconds:-0}"
       Dotwire__DisableDebugLogging: "${Dotwire__DisableDebugLogging:-false}"
       Dotwire__DisableAllLogging: "${Dotwire__DisableAllLogging:-false}"
+      Dotwire__DisableMetrics: "${Dotwire__DisableMetrics:-false}"
+      Dotwire__EnableTracing: "${Dotwire__EnableTracing:-false}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4317}"
       Dotwire__Encryption__Keys__k1: "${Dotwire__Encryption__Keys__k1:?set Dotwire__Encryption__Keys__k1 in .env}"
       Nats__Url: "nats://${NATS_USER:?set NATS_USER in .env}:${NATS_PASSWORD:?set NATS_PASSWORD in .env}@nats-1:4222,nats://${NATS_USER}:${NATS_PASSWORD}@nats-2:4222,nats://${NATS_USER}:${NATS_PASSWORD}@nats-3:4222"
       Auth__Issuer: "${Auth__Issuer:?set Auth__Issuer in .env}"

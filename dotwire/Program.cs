@@ -38,6 +38,7 @@ builder.Services.AddSingleton<MessageCipher>();
 
 var dotwireOptions = builder.Configuration.GetSection(DotwireOptions.SectionName).Get<DotwireOptions>() ?? new DotwireOptions();
 LogSwitches.Apply(builder.Logging, dotwireOptions);
+Telemetry.Apply(builder.Services, dotwireOptions, builder.Configuration["OTEL_SERVICE_NAME"]);
 builder.WebHost.ConfigureKestrel(k => k.Limits.MaxRequestBodySize = dotwireOptions.MaxRequestBodyBytes);
 builder.WebHost.UseSockets(o => o.Backlog = 65535);
 var authOptions = builder.Configuration.GetSection(AuthOptions.SectionName).Get<AuthOptions>() ?? new AuthOptions();
@@ -148,9 +149,9 @@ builder.Services.AddRateLimiter(options =>
 });
 
 builder.Services.AddKeyedSingleton<NpgsqlDataSource>(PostgresDataSources.Read,
-    (sp, _) => PostgresDataSources.Create(RequireConnectionString(sp.GetRequiredService<IConfiguration>(), "PostgresRead"), noResetOnClose: true));
+    (sp, _) => PostgresDataSources.Create(RequireConnectionString(sp.GetRequiredService<IConfiguration>(), "PostgresRead"), "read", noResetOnClose: true));
 builder.Services.AddKeyedSingleton<NpgsqlDataSource>(PostgresDataSources.Write,
-    (sp, _) => PostgresDataSources.Create(RequireConnectionString(sp.GetRequiredService<IConfiguration>(), "PostgresWrite")));
+    (sp, _) => PostgresDataSources.Create(RequireConnectionString(sp.GetRequiredService<IConfiguration>(), "PostgresWrite"), "write"));
 builder.Services.AddSingleton<IAccessStore, PostgresAccessStore>();
 if (dotwireOptions.AuthBatching.Enabled)
     builder.Services.AddSingleton<AccessLookupBatcher>();
@@ -257,8 +258,8 @@ if (postgres.Migrate)
     var retentionDays = app.Services.GetRequiredService<IOptions<RetentionOptions>>().Value.MessagesDays;
     if (retentionDays.HasValue)
     {
-        await using var conn = new NpgsqlConnection(RequireConnectionString(app.Configuration, "PostgresMigrator"));
-        await conn.OpenAsync();
+        await using var dataSource = new NpgsqlDataSourceBuilder(RequireConnectionString(app.Configuration, "PostgresMigrator")) { Name = "migrator" }.Build();
+        await using var conn = await dataSource.OpenConnectionAsync();
         await using var cmd = new NpgsqlCommand("SELECT set_message_retention($1)", conn);
         cmd.Parameters.AddWithValue(retentionDays.Value);
         await cmd.ExecuteScalarAsync();

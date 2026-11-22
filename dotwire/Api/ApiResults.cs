@@ -1,3 +1,6 @@
+using Dotwire.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+
 namespace Dotwire.Api;
 
 /// <summary>
@@ -32,13 +35,22 @@ public static class ApiResults
         Error(StatusCodes.Status503ServiceUnavailable, "presend_unavailable");
 
     public static IResult AuditUnavailable() =>
-        Error(StatusCodes.Status503ServiceUnavailable, "audit_unavailable");
+        new AuditUnavailableResult(Error(StatusCodes.Status503ServiceUnavailable, "audit_unavailable"));
 
     public static IResult StreamUnavailable() =>
         Error(StatusCodes.Status503ServiceUnavailable, "stream_unavailable");
 
     private static IResult Error(int statusCode, string code, string? reason = null) =>
         Results.Json(new ApiErrorResponse(code, reason), DotwireJsonContext.Default.ApiErrorResponse, statusCode: statusCode);
+
+    private sealed class AuditUnavailableResult(IResult inner) : IResult
+    {
+        public async Task ExecuteAsync(HttpContext httpContext)
+        {
+            httpContext.RequestServices.GetService<DotwireMetrics>()?.AuditUnavailable();
+            await inner.ExecuteAsync(httpContext);
+        }
+    }
 
     /// <summary>Wraps an <see cref="IResult"/> to also set the `Retry-After` header (§3.14: "ceiling of the wait for one token").</summary>
     private sealed class RetryAfterResult(IResult inner, int retryAfterSeconds) : IResult

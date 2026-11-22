@@ -1,0 +1,12 @@
+services:
+  lgtm:
+    image: grafana/otel-lgtm:0.39.0
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./observability/grafana/dashboards.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/dotwire.yaml:ro
+      - ./observability/grafana/dotwire.json:/otel-lgtm/dotwire-dashboards/dotwire.json:ro
+      - lgtmdata:/data
+
+volumes:
+  lgtmdata:

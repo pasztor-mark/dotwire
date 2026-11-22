@@ -1,5 +1,7 @@
 using System.Net;
+using System.Diagnostics.Metrics;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using Dotwire.Auth;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -96,6 +98,59 @@ public class RoomAccessFilterLookupTests(WebApplicationFactory<Program> factory)
         Assert.NotEqual(HttpStatusCode.Forbidden, (await Get(client)).StatusCode);
         Assert.NotEqual(HttpStatusCode.Forbidden, (await Get(client)).StatusCode);
         Assert.Equal(1, store.CombinedChecks);
+    }
+
+    [Fact]
+    public async Task CacheResumed_RecordsHitMissAndOneLookup()
+    {
+        var (app, store) = App(false, 30);
+        Seed(store);
+        app.Services.GetRequiredService<AccessCache>().Resume();
+        using var capture = new MetricCapture(app.Services.GetRequiredService<IMeterFactory>());
+        var client = Client(app);
+        await Get(client);
+        await Get(client);
+        Assert.Equal(1, capture.Sum("dotwire.auth.cache.lookups", ("result", "miss")));
+        Assert.Equal(1, capture.Sum("dotwire.auth.cache.lookups", ("result", "hit")));
+        Assert.Equal(1, capture.Count("dotwire.auth.lookup.duration", ("path", "direct")));
+    }
+
+    [Fact]
+    public async Task BatchingOn_NoCache_RecordsBatchedLookupOnly()
+    {
+        var (app, store) = App(true, 0);
+        Seed(store);
+        using var capture = new MetricCapture(app.Services.GetRequiredService<IMeterFactory>());
+        await Get(Client(app));
+        Assert.Equal(0, capture.Count("dotwire.auth.cache.lookups"));
+        Assert.Equal(1, capture.Count("dotwire.auth.lookup.duration", ("path", "batched")));
+        Assert.Equal(1, capture.Sum("dotwire.auth.batch.size"));
+    }
+
+    [Fact]
+    public async Task RestSend_Rejection_RecordsSendDuration()
+    {
+        var (app, store) = App(false, 0);
+        Seed(store);
+        using var capture = new MetricCapture(app.Services.GetRequiredService<IMeterFactory>());
+        var response = await Client(app).PostAsJsonAsync($"/rooms/{Room}/messages", new { content = "" }, Ct);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(1, capture.Count("dotwire.message.send.duration", ("transport", "rest"), ("outcome", "rejected")));
+        Assert.Equal(0, capture.Count("dotwire.jetstream.publish.duration"));
+    }
+
+    [Fact]
+    public async Task RestSend_PresendUnavailable_RecordsUnavailable()
+    {
+        var store = new FakeAccessStore();
+        Seed(store);
+        var app = OfflineApp.Create(factory, store, b =>
+            b.UseSetting("Dotwire:Webhooks:Presend:Url", "http://127.0.0.1:1/presend"));
+        using var capture = new MetricCapture(app.Services.GetRequiredService<IMeterFactory>());
+        var response = await Client(app).PostAsJsonAsync($"/rooms/{Room}/messages", new { content = "hi" }, Ct);
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Equal(1, capture.Count("dotwire.message.send.duration", ("transport", "rest"), ("outcome", "unavailable")));
+        Assert.Equal(0, capture.Count("dotwire.message.send.duration", ("outcome", "rejected")));
     }
 
     [Fact]

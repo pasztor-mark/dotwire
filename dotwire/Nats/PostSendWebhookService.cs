@@ -18,13 +18,15 @@ public sealed class PostSendWebhookService : BackgroundService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IOptions<WebhooksOptions> _options;
     private readonly ILogger<PostSendWebhookService> _logger;
+    private readonly DotwireMetrics _metrics;
     private long _queuedBytes;
 
-    public PostSendWebhookService(IHttpClientFactory httpClientFactory, IOptions<WebhooksOptions> options, ILogger<PostSendWebhookService> logger)
+    public PostSendWebhookService(IHttpClientFactory httpClientFactory, IOptions<WebhooksOptions> options, ILogger<PostSendWebhookService> logger, DotwireMetrics metrics)
     {
         _httpClientFactory = httpClientFactory;
         _options = options;
         _logger = logger;
+        _metrics = metrics;
         _channel = Channel.CreateBounded<PostSendWebhookRequest>(new BoundedChannelOptions(Math.Max(1, options.Value.PostSend.QueueCapacity))
         {
             FullMode = BoundedChannelFullMode.Wait,
@@ -51,6 +53,7 @@ public sealed class PostSendWebhookService : BackgroundService
         if (Interlocked.Add(ref _queuedBytes, size) > postSend.MaxQueueBytes)
         {
             Interlocked.Add(ref _queuedBytes, -size);
+            _metrics.PostsendDropped("queue_bytes");
             _logger.LogWarning("Postsend webhook queue is over {MaxBytes} bytes; dropping event for room {RoomId} seq {Seq}",
                 postSend.MaxQueueBytes, request.RoomId, request.Seq);
             return;
@@ -59,6 +62,7 @@ public sealed class PostSendWebhookService : BackgroundService
         if (!_channel.Writer.TryWrite(request))
         {
             Interlocked.Add(ref _queuedBytes, -size);
+            _metrics.PostsendDropped("queue_full");
             _logger.LogWarning("Postsend webhook queue is full (capacity {Capacity}); dropping event for room {RoomId} seq {Seq}",
                 postSend.QueueCapacity, request.RoomId, request.Seq);
         }
@@ -118,6 +122,7 @@ public sealed class PostSendWebhookService : BackgroundService
             }
         }
 
+        _metrics.PostsendDropped("max_attempts");
         _logger.LogWarning("Postsend webhook dropped after {Max} attempts for room {RoomId} seq {Seq}",
             postSend.MaxAttempts, request.RoomId, request.Seq);
     }

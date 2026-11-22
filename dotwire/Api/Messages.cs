@@ -160,7 +160,7 @@ public static class Messages
 
             var senderId = http.User.FindFirstValue("sub")!;
             var (response, rejection) = await sender.SendAsync(
-                roomGuid, senderId, request.Content, http.Request.Headers["Idempotency-Key"].ToString(), http.RequestAborted);
+                roomGuid, senderId, request.Content, http.Request.Headers["Idempotency-Key"].ToString(), "rest", http.RequestAborted);
 
             return rejection is not null ? ToResult(rejection) : Results.Accepted(value: response);
         });

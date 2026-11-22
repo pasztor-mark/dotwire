@@ -73,6 +73,13 @@ the doc section linked.
   messages — no mass re-encryption. The host's RS256 JWT signing keys rotate independently, via
   a new `kid` published at a JWKS endpoint or added to inline config. See AUTH.md, "The two key
   systems (do not confuse them)" and "Key exchange & rotation."
+- **Operational metrics without identifiers.** dotwire exports OpenTelemetry metrics over OTLP, on by
+  default; `Dotwire__DisableMetrics=true` turns them off. Metrics carry no room, message, user or
+  sender ids, no subjects, no SQL text and no content. Third-party meter tags are dropped or
+  allowlisted by OpenTelemetry views. Traces are off by default (`Dotwire__EnableTracing=true` turns
+  them on). When on, an allowlist processor keeps only method, route template, status, error type,
+  RPC and database-operation tags, and drops spans that carry exception events. See ARCHITECTURE.md,
+  "Observability," and README, "Metrics" and "Tracing."
 
 ## Control mappings
 
@@ -87,7 +94,7 @@ full control environment, of which dotwire's technical controls are one input.
 |---|---|---|
 | CC6.1 / CC6.6 — logical access controls | JWT signature/claims verification + role cross-check pipeline against `user_roles` and `room_members` (AUTH.md) | Manage who holds `admin`/`auditor` roles; issue and scope host-side JWTs correctly |
 | CC6.7 — transmission and at-rest protection | TLS in transit + AES-256-GCM at-rest encryption (ARCHITECTURE.md) | Terminate and manage TLS; supply and custody the encryption key in production |
-| CC7.2 / CC7.3 — system monitoring and incident detection | Hash-chained audit log, including self-logging of audit access (ARCHITECTURE.md) | Monitor the audit log operationally; define and run an incident response process |
+| CC7.2 / CC7.3 — system monitoring and incident detection | Hash-chained audit log, including self-logging of audit access (ARCHITECTURE.md); OpenTelemetry metrics for writer lag against the ROOMS max age, audit backlog against its cap, audit-writer presence and audit `503`s (README, "Metrics") | Monitor the audit log and the OTLP metrics operationally, alert on the README thresholds; define and run an incident response process |
 | CC8.1 — change management | *(no dotwire mechanism — see Host obligation)* | Host owns change management for its deployment: release approval, testing, and rollout process for dotwire and its configuration |
 
 ### ISO 27001 Annex A (2022)

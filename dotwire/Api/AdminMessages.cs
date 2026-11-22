@@ -35,6 +35,7 @@ public static partial class Admin
             IOptions<DotwireOptions> dotwireOptions,
             IOptions<NatsOptions> natsOptions,
             IOptions<WebhooksOptions> webhooksOptions,
+            DotwireMetrics metrics,
             ILoggerFactory loggerFactory) =>
         {
             var logger = AdminLogger(loggerFactory);
@@ -66,7 +67,7 @@ public static partial class Admin
             try
             {
                 published = await MessagePublisher.PublishDurableAsync(
-                    roomId, senderId, plaintext, cipher, js, natsOptions.Value, http.RequestAborted);
+                    roomId, senderId, plaintext, cipher, js, natsOptions.Value, metrics, http.RequestAborted);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {

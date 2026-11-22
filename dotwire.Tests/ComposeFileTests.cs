@@ -98,6 +98,51 @@ public class ComposeFileTests
     }
 
     [Fact]
+    public void MetricsKeys_PassedThroughOnEveryDotwireService()
+    {
+        string[] passthrough =
+        [
+            "Dotwire__DisableMetrics: \"${Dotwire__DisableMetrics:-false}\"",
+            "Dotwire__EnableTracing: \"${Dotwire__EnableTracing:-false}\"",
+            "OTEL_EXPORTER_OTLP_ENDPOINT: \"${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4317}\"",
+        ];
+
+        foreach (var file in new[] { "compose.yaml", "compose.multinode.yaml" })
+        {
+            var lines = File.ReadAllLines(Path.Combine(RepoRoot(), file));
+            var services = lines.Count(l => l.Contains("Dotwire__Encryption__ActiveKeyId:"));
+
+            Assert.True(services >= 1, $"{file} has no dotwire service");
+            foreach (var entry in passthrough)
+                Assert.Equal(services, lines.Count(l => l.Contains(entry)));
+        }
+    }
+
+    [Fact]
+    public void ObservabilityOverlay_PinsImage_KeepsGrafanaLocal_AndShipsValidDashboard()
+    {
+        var root = RepoRoot();
+        var lines = File.ReadAllLines(Path.Combine(root, "compose.observability.yaml"));
+
+        Assert.Contains(lines, l => l.Trim().StartsWith("image: grafana/otel-lgtm:") && !l.Contains(":latest"));
+        Assert.All(lines.Where(l => l.Trim().StartsWith("- \"") && l.Contains(':')), l => Assert.Contains("127.0.0.1:", l));
+
+        using var dashboard = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "observability", "grafana", "dotwire.json")));
+        Assert.Equal("dotwire", dashboard.RootElement.GetProperty("uid").GetString());
+        Assert.NotEmpty(dashboard.RootElement.GetProperty("panels").EnumerateArray());
+    }
+
+    [Fact]
+    public void EnvExample_ListsMetricsKeys()
+    {
+        var lines = File.ReadAllLines(Path.Combine(RepoRoot(), ".env.example"));
+
+        Assert.Contains(lines, l => l.StartsWith("# Dotwire__DisableMetrics=false"));
+        Assert.Contains(lines, l => l.StartsWith("# Dotwire__EnableTracing=false"));
+        Assert.Contains(lines, l => l.StartsWith("# OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317"));
+    }
+
+    [Fact]
     public void EnvExample_ListsAuthLookupKeys()
     {
         var lines = File.ReadAllLines(Path.Combine(RepoRoot(), ".env.example"));

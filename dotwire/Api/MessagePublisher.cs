@@ -1,8 +1,10 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Dotwire.Configuration;
 using Dotwire.Crypto;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
+using NATS.Client.JetStream.Models;
 
 namespace Dotwire.Api;
 
@@ -24,10 +26,11 @@ public static class MessagePublisher
         INatsConnection nats,
         NatsOptions natsOptions,
         ILogger logger,
+        DotwireMetrics metrics,
         CancellationToken ct,
         string? msgId = null)
     {
-        var (live, duplicate) = await PublishDurableCoreAsync(roomId, senderId, plaintext, cipher, js, natsOptions, msgId, ct);
+        var (live, duplicate) = await PublishDurableCoreAsync(roomId, senderId, plaintext, cipher, js, natsOptions, metrics, msgId, ct);
         if (!duplicate)
             await PublishLiveAsync(live, nats, natsOptions, logger, ct);
         return new PublishResult(live.Seq, live.Time, duplicate);
@@ -40,8 +43,9 @@ public static class MessagePublisher
         MessageCipher cipher,
         INatsJSContext js,
         NatsOptions natsOptions,
+        DotwireMetrics metrics,
         CancellationToken ct) =>
-        (await PublishDurableCoreAsync(roomId, senderId, plaintext, cipher, js, natsOptions, null, ct)).Live;
+        (await PublishDurableCoreAsync(roomId, senderId, plaintext, cipher, js, natsOptions, metrics, null, ct)).Live;
 
     private static async Task<(RoomLiveMessage Live, bool Duplicate)> PublishDurableCoreAsync(
         Guid roomId,
@@ -50,6 +54,7 @@ public static class MessagePublisher
         MessageCipher cipher,
         INatsJSContext js,
         NatsOptions natsOptions,
+        DotwireMetrics metrics,
         string? msgId,
         CancellationToken ct)
     {
@@ -59,11 +64,22 @@ public static class MessagePublisher
         var message = new RoomMessage(roomId, senderId, time, keyId, encrypted);
         var payload = JsonSerializer.SerializeToUtf8Bytes(message, DotwireJsonContext.Default.RoomMessage);
 
-        var ack = await js.PublishAsync<byte[]>(
-            $"{natsOptions.RoomSubjectPrefix}{roomId}",
-            payload,
-            opts: msgId is null ? null : new NatsJSPubOpts { MsgId = msgId },
-            cancellationToken: ct);
+        var started = Stopwatch.GetTimestamp();
+        PubAckResponse ack;
+        try
+        {
+            ack = await js.PublishAsync<byte[]>(
+                $"{natsOptions.RoomSubjectPrefix}{roomId}",
+                payload,
+                opts: msgId is null ? null : new NatsJSPubOpts { MsgId = msgId },
+                cancellationToken: ct);
+        }
+        catch
+        {
+            metrics.JetStreamPublish("error", Stopwatch.GetElapsedTime(started));
+            throw;
+        }
+        metrics.JetStreamPublish(ack.Error is null ? "ok" : "error", Stopwatch.GetElapsedTime(started));
         if (ack.Error is not null)
             throw new InvalidOperationException($"JetStream publish error {ack.Error.Code}");
 

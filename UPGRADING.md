@@ -1,3 +1,15 @@
+# v0.5.0
+
+No breaking changes and no database migrations.
+
+| Area | Behavior | What to do |
+|---|---|---|
+| Metrics | OpenTelemetry metrics are pushed over OTLP and on by default. The exporter uses `OTEL_EXPORTER_OTLP_ENDPOINT`, which compose files set to `http://localhost:4317` unless overridden. `Dotwire__DisableMetrics=true` turns metrics off. No ids or content are exported. See README, "Metrics." | Set `OTEL_EXPORTER_OTLP_ENDPOINT` to your collector in compose, or set `Dotwire__DisableMetrics=true` if you do not run one. |
+| Diagnostic metrics | New instruments for the send path (`dotwire.message.send.duration`, `dotwire.jetstream.publish.duration`), fanout (`dotwire.fanout.lag`, `dotwire.fanout.dropped`) and auth lookups (`dotwire.auth.*`). Npgsql pool metrics now carry `db.client.connection.pool.name` = `read` or `write`. See README, "Metrics." | Nothing. Dashboards that summed `db.client.connection.*` across pools still work. |
+| Tracing | Opt-in OpenTelemetry traces over OTLP, off by default. `Dotwire__EnableTracing=true` turns them on. Spans are scrubbed to an allowlist of tags, with no paths, SQL text, ids or content. See README, "Tracing." | Nothing, unless you want traces. |
+| Local dashboard | New optional `compose.observability.yaml` overlay runs Grafana with Prometheus and Tempo and a provisioned dotwire dashboard (`observability/grafana/dotwire.json`). See README, "Local dashboard (Grafana)." | Nothing. |
+| Audit writer | An idle active audit writer runs `SELECT 1` on its locked Postgres session every 30 s, so a dead session is noticed and the advisory lock re-contested sooner. | Nothing. |
+
 # v0.4.3
 
 No breaking changes and no database migrations.

@@ -1,3 +1,4 @@
+using System.Net;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
@@ -120,7 +121,7 @@ public class ServerUnitSecurityTests
         var options = new WebhooksOptions();
         options.PostSend.Url = "https://hooks.example/postsend";
         options.PostSend.MaxQueueBytes = 1000;
-        var service = new PostSendWebhookService(new NoHttp(), Options.Create(options), NullLogger<PostSendWebhookService>.Instance);
+        var service = new PostSendWebhookService(new NoHttp(), Options.Create(options), NullLogger<PostSendWebhookService>.Instance, TestMetrics.Create().Metrics);
         var request = new PostSendWebhookRequest(Guid.NewGuid(), 1, "u1", new string('x', 300), DateTimeOffset.UtcNow, "member");
 
         service.Enqueue(request);
@@ -129,9 +130,109 @@ public class ServerUnitSecurityTests
         Assert.Equal(PostSendWebhookService.EstimateBytes(request), service.QueuedBytes);
     }
 
+    [Theory]
+    [InlineData("{\"allow\":false}", 200, PresendFailPolicy.Closed, "rejected")]
+    [InlineData("{\"allow\":true,\"content\":\"other\"}", 200, PresendFailPolicy.Closed, "allowed_with_rewrite")]
+    [InlineData("{\"allow\":true}", 200, PresendFailPolicy.Closed, "allowed")]
+    [InlineData("", 500, PresendFailPolicy.Closed, "unavailable")]
+    [InlineData("", 500, PresendFailPolicy.Open, "failed_open")]
+    public async Task Presend_RecordsOutcome(string json, int status, PresendFailPolicy policy, string outcome)
+    {
+        var options = new WebhooksOptions();
+        options.Presend.Url = "https://hooks.example/presend";
+        options.Presend.FailPolicy = policy;
+        var (metrics, scope) = TestMetrics.Create();
+        using var capture = new MetricCapture(scope);
+        var factory = new ScriptedHttp(() => new HttpResponseMessage((HttpStatusCode)status) { Content = new StringContent(json) });
+        var client = new PresendWebhookClient(factory, Options.Create(options), NullLogger<PresendWebhookClient>.Instance, metrics);
+
+        await client.EvaluateAsync(Guid.NewGuid(), "u1", "original", DateTimeOffset.UtcNow, "member", CancellationToken.None);
+
+        Assert.Equal(1, capture.Sum("dotwire.webhook.presend.results", ("outcome", outcome)));
+        Assert.Equal(1, capture.Sum("dotwire.webhook.presend.results"));
+    }
+
+    [Fact]
+    public async Task Presend_NotConfigured_RecordsNothing()
+    {
+        var (metrics, scope) = TestMetrics.Create();
+        using var capture = new MetricCapture(scope);
+        var client = new PresendWebhookClient(new NoHttp(), Options.Create(new WebhooksOptions()), NullLogger<PresendWebhookClient>.Instance, metrics);
+
+        await client.EvaluateAsync(Guid.NewGuid(), "u1", "original", DateTimeOffset.UtcNow, "member", CancellationToken.None);
+
+        Assert.Equal(0, capture.Sum("dotwire.webhook.presend.results"));
+    }
+
+    [Fact]
+    public void Postsend_QueueFull_RecordsDrop()
+    {
+        var options = new WebhooksOptions();
+        options.PostSend.Url = "https://hooks.example/postsend";
+        options.PostSend.QueueCapacity = 1;
+        var (metrics, scope) = TestMetrics.Create();
+        using var capture = new MetricCapture(scope);
+        var service = new PostSendWebhookService(new NoHttp(), Options.Create(options), NullLogger<PostSendWebhookService>.Instance, metrics);
+        var request = new PostSendWebhookRequest(Guid.NewGuid(), 1, "u1", "content", DateTimeOffset.UtcNow, "member");
+
+        service.Enqueue(request);
+        service.Enqueue(request);
+
+        Assert.Equal(1, capture.Sum("dotwire.webhook.postsend.dropped", ("reason", "queue_full")));
+    }
+
+    [Fact]
+    public void Postsend_ByteCap_RecordsDrop()
+    {
+        var options = new WebhooksOptions();
+        options.PostSend.Url = "https://hooks.example/postsend";
+        options.PostSend.MaxQueueBytes = 1;
+        var (metrics, scope) = TestMetrics.Create();
+        using var capture = new MetricCapture(scope);
+        var service = new PostSendWebhookService(new NoHttp(), Options.Create(options), NullLogger<PostSendWebhookService>.Instance, metrics);
+        var request = new PostSendWebhookRequest(Guid.NewGuid(), 1, "u1", "content", DateTimeOffset.UtcNow, "member");
+
+        service.Enqueue(request);
+
+        Assert.Equal(1, capture.Sum("dotwire.webhook.postsend.dropped", ("reason", "queue_bytes")));
+    }
+
+    [Fact]
+    public async Task Postsend_MaxAttempts_RecordsDrop()
+    {
+        var options = new WebhooksOptions();
+        options.PostSend.Url = "https://hooks.example/postsend";
+        options.PostSend.MaxAttempts = 1;
+        var (metrics, scope) = TestMetrics.Create();
+        using var capture = new MetricCapture(scope);
+        var factory = new ScriptedHttp(() => new HttpResponseMessage(HttpStatusCode.InternalServerError));
+        var service = new PostSendWebhookService(factory, Options.Create(options), NullLogger<PostSendWebhookService>.Instance, metrics);
+        var request = new PostSendWebhookRequest(Guid.NewGuid(), 1, "u1", "content", DateTimeOffset.UtcNow, "member");
+
+        await service.StartAsync(CancellationToken.None);
+        service.Enqueue(request);
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (capture.Sum("dotwire.webhook.postsend.dropped", ("reason", "max_attempts")) == 0 && DateTime.UtcNow < deadline)
+            await Task.Delay(10);
+        await service.StopAsync(CancellationToken.None);
+
+        Assert.Equal(1, capture.Sum("dotwire.webhook.postsend.dropped", ("reason", "max_attempts")));
+    }
+
     private sealed class NoHttp : IHttpClientFactory
     {
         public HttpClient CreateClient(string name) => throw new NotSupportedException();
+    }
+
+    private sealed class ScriptedHttp(Func<HttpResponseMessage> respond) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => new(new ScriptedHandler(respond));
+    }
+
+    private sealed class ScriptedHandler(Func<HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(respond());
     }
 
     [Fact]
