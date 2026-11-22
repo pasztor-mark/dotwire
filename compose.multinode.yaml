@@ -271,7 +271,7 @@ services:
       retries: 10
   # Pg primary + replica
   postgres-primary:
-    image: timescale/timescaledb:2.31.0-pg17
+    image: timescale/timescaledb:2.32.0-pg17
     restart: always
     command: >
       bash -c "
@@ -301,7 +301,7 @@ services:
       retries: 10
 
   postgres-replica:
-    image: timescale/timescaledb:2.31.0-pg17
+    image: timescale/timescaledb:2.32.0-pg17
     restart: always
     depends_on:
       postgres-primary:

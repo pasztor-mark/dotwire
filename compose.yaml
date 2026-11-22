@@ -57,7 +57,7 @@ services:
         condition: service_healthy
 
   postgres:
-    image: timescale/timescaledb:2.31.0-pg17
+    image: timescale/timescaledb:2.32.0-pg17
     command: ["postgres", "-c", "shared_buffers=256MB", "-c", "work_mem=16MB", "-c", "max_connections=200"]
     security_opt:
       - no-new-privileges:true
