@@ -45,6 +45,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
     private sealed class HubOutbox
     {
         private readonly HubConnectionContext _connection;
+        private readonly DotwireMetrics _metrics;
         private readonly Channel<SerializedHubMessage> _channel = Channel.CreateBounded<SerializedHubMessage>(
             new BoundedChannelOptions(HubSendQueueCapacity)
             {
@@ -54,20 +55,25 @@ public sealed class RoomInterestManager : IAsyncDisposable
             });
         private volatile bool _closed;
 
-        public HubOutbox(HubConnectionContext connection)
+        public HubOutbox(HubConnectionContext connection, DotwireMetrics metrics)
         {
             _connection = connection;
+            _metrics = metrics;
             _ = Task.Run(PumpAsync);
         }
 
         public void Post(SerializedHubMessage message, bool ephemeral = false)
         {
             if (ephemeral && _channel.Reader.Count > HubSendQueueCapacity / 2)
+            {
+                _metrics.FanoutDropped("hub", "ephemeral_shed");
                 return;
+            }
 
             if (_channel.Writer.TryWrite(message) || _closed)
                 return;
 
+            _metrics.FanoutDropped("hub", "slow_consumer");
             Abort();
         }
 
@@ -104,6 +110,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
     private readonly PresenceCoalescer _presenceCoalescer;
     private readonly NatsOptions _natsOptions;
     private readonly ILogger<RoomInterestManager> _logger;
+    private readonly DotwireMetrics _metrics;
     private readonly ConcurrentDictionary<Guid, RoomSubscription> _subscriptions = new();
     private readonly ConcurrentDictionary<string, ConnectionInfo> _connections = new();
     private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, SseConnection>> _sseChannels = new();
@@ -115,7 +122,8 @@ public sealed class RoomInterestManager : IAsyncDisposable
         MessageCipher cipher,
         PresenceCoalescer presenceCoalescer,
         IOptions<NatsOptions> natsOptions,
-        ILogger<RoomInterestManager> logger)
+        ILogger<RoomInterestManager> logger,
+        DotwireMetrics metrics)
     {
         _nats = nats;
         _lifetimeManager = lifetimeManager;
@@ -123,6 +131,8 @@ public sealed class RoomInterestManager : IAsyncDisposable
         _presenceCoalescer = presenceCoalescer;
         _natsOptions = natsOptions.Value;
         _logger = logger;
+        _metrics = metrics;
+        metrics.ObserveSseConnections(() => _sseChannels.Values.Sum(perRoom => (long)perRoom.Count));
     }
 
     /// <summary>Returns false if the connection was already subscribed to this room.</summary>
@@ -258,10 +268,14 @@ public sealed class RoomInterestManager : IAsyncDisposable
         foreach (var (connectionId, connection) in perRoom)
         {
             if (ephemeral && connection.Channel.Reader.Count > connection.Capacity / 2)
+            {
+                _metrics.FanoutDropped("sse", "ephemeral_shed");
                 continue;
+            }
 
             if (!connection.Channel.Writer.TryWrite(evt))
             {
+                _metrics.FanoutDropped("sse", "slow_consumer");
                 connection.Channel.Writer.TryComplete();
                 perRoom.TryRemove(connectionId, out _);
             }
@@ -290,7 +304,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
     }
 
     private HubOutbox? CreateOutbox(string connectionId) =>
-        _natsOptions.Enabled && _lifetimeManager.Find(connectionId) is { } connection ? new HubOutbox(connection) : null;
+        _natsOptions.Enabled && _lifetimeManager.Find(connectionId) is { } connection ? new HubOutbox(connection, _metrics) : null;
 
     public bool IsSubscribed(string connectionId, Guid roomId)
     {
@@ -417,6 +431,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
                     var roomMessage = JsonSerializer.Deserialize(msg.Data, DotwireJsonContext.Default.RoomLiveMessage);
                     if (roomMessage is null)
                         continue;
+                    _metrics.FanoutLag(DateTimeOffset.UtcNow - roomMessage.Time);
 
                     var decrypted = _cipher.Decrypt(roomMessage.KeyId, roomMessage.Content, roomId, roomMessage.SenderId);
                     var plaintext = Encoding.UTF8.GetString(decrypted);

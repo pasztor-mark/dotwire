@@ -40,6 +40,10 @@ public sealed class DotwireOptions
     public bool DisableDebugLogging { get; set; }
 
     public bool DisableAllLogging { get; set; }
+
+    public bool DisableMetrics { get; set; }
+
+    public bool EnableTracing { get; set; }
 }
 
 public sealed class HubSendOptions

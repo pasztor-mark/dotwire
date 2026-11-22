@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using Dotwire.Auth;
+using Dotwire.Configuration;
 using Dotwire.Data;
 using Dotwire.Nats;
 using Microsoft.AspNetCore.RateLimiting;
@@ -57,13 +58,17 @@ public static class Audit
             bool? full,
             [FromKeyedServices(PostgresDataSources.Read)] NpgsqlDataSource readDataSource,
             AuditPublisher auditPublisher,
+            DotwireMetrics metrics,
             HttpContext http) =>
         {
             var ct = http.RequestAborted;
             var runFull = full ?? false;
 
             if (runFull && !FullVerifyGate.Wait(0))
+            {
+                metrics.Rejection("rest", "busy", "audit_verify");
                 return ApiResults.RateLimited(5);
+            }
 
             try
             {

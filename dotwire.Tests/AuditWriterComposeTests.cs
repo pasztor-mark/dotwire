@@ -196,8 +196,8 @@ public class AuditWriterComposeTests : IClassFixture<WebApplicationFactory<Progr
         await using var dataSourceB = NpgsqlDataSource.Create(
             $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
 
-        var writerA = new AuditWriterService(js, natsOptions, dataSourceA, loggerFactory.CreateLogger<AuditWriterService>());
-        var writerB = new AuditWriterService(js, natsOptions, dataSourceB, loggerFactory.CreateLogger<AuditWriterService>());
+        var writerA = new AuditWriterService(js, natsOptions, dataSourceA, TestMetrics.Create().Metrics, loggerFactory.CreateLogger<AuditWriterService>());
+        var writerB = new AuditWriterService(js, natsOptions, dataSourceB, TestMetrics.Create().Metrics, loggerFactory.CreateLogger<AuditWriterService>());
 
         using var cts = new CancellationTokenSource();
         await writerA.StartAsync(cts.Token);
@@ -245,7 +245,7 @@ public class AuditWriterComposeTests : IClassFixture<WebApplicationFactory<Progr
         await using var dataSource = NpgsqlDataSource.Create(
             $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
 
-        var writer1 = new AuditWriterService(js, natsOptions, dataSource, loggerFactory.CreateLogger<AuditWriterService>());
+        var writer1 = new AuditWriterService(js, natsOptions, dataSource, TestMetrics.Create().Metrics, loggerFactory.CreateLogger<AuditWriterService>());
         using (var cts1 = new CancellationTokenSource())
         {
             await writer1.StartAsync(cts1.Token);
@@ -258,7 +258,7 @@ public class AuditWriterComposeTests : IClassFixture<WebApplicationFactory<Progr
         }
 
         // Fresh instance, as if a new process picked up where the old one left off.
-        var writer2 = new AuditWriterService(js, natsOptions, dataSource, loggerFactory.CreateLogger<AuditWriterService>());
+        var writer2 = new AuditWriterService(js, natsOptions, dataSource, TestMetrics.Create().Metrics, loggerFactory.CreateLogger<AuditWriterService>());
         using var cts2 = new CancellationTokenSource();
         await writer2.StartAsync(cts2.Token);
         try

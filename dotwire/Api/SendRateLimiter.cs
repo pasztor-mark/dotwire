@@ -38,7 +38,7 @@ public sealed class SendRateLimiter(IOptions<RateLimitOptions> options) : IDispo
     public void Dispose() => _limiter.Dispose();
 }
 
-public sealed class SendRateLimitFilter(SendRateLimiter limiter) : IEndpointFilter
+public sealed class SendRateLimitFilter(SendRateLimiter limiter, DotwireMetrics metrics) : IEndpointFilter
 {
     public async ValueTask<object?> InvokeAsync(EndpointFilterInvocationContext context, EndpointFilterDelegate next)
     {
@@ -46,7 +46,10 @@ public sealed class SendRateLimitFilter(SendRateLimiter limiter) : IEndpointFilt
         if (HttpMethods.IsPost(http.Request.Method)
             && http.User.FindFirst("sub")?.Value is { } sub
             && !limiter.TryAcquire(sub, out var retryAfterSeconds))
+        {
+            metrics.Rejection("rest", "rate_limited", "send");
             return ApiResults.RateLimited(retryAfterSeconds);
+        }
 
         return await next(context);
     }

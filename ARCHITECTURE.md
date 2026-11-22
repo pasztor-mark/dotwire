@@ -12,7 +12,7 @@ no strongly-typed `Hub<T>` — reflection-based dispatch that AOT can't source-g
 Persistence is PostgreSQL with the Timescale extension, with messages stored as a hypertable.
 Messaging and durability run on NATS with JetStream, which does double duty as both the
 fanout bus and the persistence-ack mechanism (see "Write path" below). One binary, one
-process model, one config flag selects the node's role — see "Realtime and node roles."
+process model, one config flag selects the node's role — see "Realtime and node roles." Metrics are pushed over OTLP (see "Observability").
 
 ## Write path (JetStream-first)
 
@@ -212,7 +212,8 @@ WHY single-writer: this is what makes hash-chaining and batched writes compatibl
 Hash-chaining requires a strict total order to compute each link from the previous one;
 batching requires grouping writes for throughput. A single ordered consumer gives the chain its
 order once, up front, and batching happens downstream of that — with multiple writers, the two
-requirements would fight each other.
+requirements would fight each other. The active writer pings its locked session every 30 s while
+idle, so it notices a dead session (whose lock the server has already released), clears `lock_held` and re-contests.
 
 Append-only is enforced at the database level, not just by convention: the service role has no
 UPDATE or DELETE grants on the audit table, and a guard trigger backs that up. A daily
@@ -282,6 +283,37 @@ acquire the lock (another node already holds it) goes into standby, retrying acq
 `Nats:AuditWriter:StandbyRetrySeconds` (default 5s), so a multi-node deployment always has
 exactly one active writer and a hot standby ready to take over if the active writer's
 connection drops (which also releases the advisory lock, since it is session-scoped).
+
+## Observability
+
+Metrics go to an OTLP collector and nowhere else. Every custom instrument lives in `DotwireMetrics`,
+a DI singleton on `IMeterFactory` under the meter name `Dotwire`, so parallel test hosts keep separate
+measurements. The built-in ASP.NET Core, Kestrel, SignalR, rate-limiting, `System.Net.Http`,
+`System.Runtime`, Npgsql and NATS.Net meters are added to the same provider.
+
+`JetStreamMetricsPoller` runs on `All` and `Api` nodes only. Every 30 s it reads the ROOMS and AUDIT
+stream and consumer state, so each of those nodes reports the same cluster-wide values and dashboards
+take `max()`. A failed poll clears that stream's snapshot, so its gauges go absent rather than freeze.
+Gateway nodes do not run the poller.
+
+No ids are ever tags. Room, message, user and sender ids, subjects and SQL text stay out of every metric.
+Because third-party meters can add tags on upgrade, OpenTelemetry views enforce this rather than
+convention: `messaging.client.*` is dropped, `nats.client.*` carries no tags, and `db.client.*` keeps an
+allowlist of four tags. Its pool-name tag is safe only because both data sources are built with a fixed
+`Name` (`read`, `write`); without one, Npgsql fills it with connection-string fragments. The instrument
+table and alert thresholds are in README, "Metrics."
+
+Traces are opt-in (`Dotwire:EnableTracing`). A raw trace carries the URL path, SQL text and span
+attributes, which would put room, message and user ids in a third-party APM, so `TraceScrubber`
+enforces the same rule as the metric views: it runs before the exporter, keeps an allowlist of tags,
+clears status descriptions and incoming `tracestate`, and drops any span with a tagged event, because
+events cannot be stripped and a recorded exception can quote parameter values. Server spans are named by
+route template. NATS.Net spans are not collected: their names carry subjects, and a listener would make
+NATS.Net inject trace headers into persisted JetStream messages. Logs are not exported over OTLP.
+
+The backend is the operator's choice and outside the topology: dotwire only speaks OTLP and never depends
+on a collector being up. `compose.observability.yaml` is an optional overlay with a single
+`grafana/otel-lgtm` container and a provisioned dashboard, for local runs and demos.
 
 ## Concurrency and fanout disciplines
 

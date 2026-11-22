@@ -37,6 +37,7 @@ public static class Events
             IAccessStore accessStore,
             UserConnectionLimiter connectionLimiter,
             IOptions<SseOptions> sseOptionsAccessor,
+            DotwireMetrics metrics,
             ILoggerFactory loggerFactory) =>
         {
             var sseOptions = sseOptionsAccessor.Value;
@@ -55,6 +56,7 @@ public static class Events
 
             if (!connectionLimiter.TryAcquire(userId))
             {
+                metrics.Rejection("sse", "too_many_connections", "connect");
                 await ApiResults.RateLimited(1).ExecuteAsync(http);
                 return;
             }

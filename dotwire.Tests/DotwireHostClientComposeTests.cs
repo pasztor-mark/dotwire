@@ -14,7 +14,7 @@ namespace dotwire.Tests;
 /// <see cref="DotwireHostClientUnitTests"/> for the no-server coverage).
 /// </summary>
 [Collection("Compose")]
-public class DotwireHostClientComposeTests
+public class DotwireHostClientComposeTests : IDisposable
 {
     private const string PgConnectionString =
         "Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire;Password=";
@@ -52,6 +52,8 @@ public class DotwireHostClientComposeTests
         });
         _ = _factory.Services;
     }
+
+    public void Dispose() => _factory?.Dispose();
 
     private static void SkipUnlessReachable(string host, int port, string name)
     {

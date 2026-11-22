@@ -3,7 +3,7 @@ using Microsoft.Extensions.Options;
 
 namespace Dotwire.Auth;
 
-public sealed class AccessLookupBatcher(IAccessStore store, IOptions<DotwireOptions> options)
+public sealed class AccessLookupBatcher(IAccessStore store, IOptions<DotwireOptions> options, DotwireMetrics metrics)
 {
     private readonly int _maxInFlight = Math.Max(1, options.Value.AuthBatching.MaxInFlight);
     private readonly int _maxBatchSize = Math.Max(1, options.Value.AuthBatching.MaxBatchSize);
@@ -50,6 +50,7 @@ public sealed class AccessLookupBatcher(IAccessStore store, IOptions<DotwireOpti
 
     private async Task RunAsync(Dictionary<(Guid, string), TaskCompletionSource<(string?, bool)>> batch)
     {
+        metrics.AuthBatch(batch.Count);
         try
         {
             if (batch.Count == 1)

@@ -12,9 +12,9 @@ public static class PostgresDataSources
     public const string Read = "postgres-read";
     public const string Write = "postgres-write";
 
-    public static NpgsqlDataSource Create(string connectionString, bool noResetOnClose = false)
+    public static NpgsqlDataSource Create(string connectionString, string poolName, bool noResetOnClose = false)
     {
-        var builder = new NpgsqlDataSourceBuilder(connectionString);
+        var builder = new NpgsqlDataSourceBuilder(connectionString) { Name = poolName };
         if (builder.ConnectionStringBuilder.MaxAutoPrepare == 0)
             builder.ConnectionStringBuilder.MaxAutoPrepare = 64;
         if (noResetOnClose)

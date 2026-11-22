@@ -106,7 +106,8 @@ These are deliberate exclusions. Do not add them "helpfully."
   area small; a second RPC protocol would only add maintenance cost.
 - **Admin dashboard UI** — dotwire ships APIs (admin, DSAR, redaction); a host builds or buys
   whatever UI it wants on top, rather than dotwire maintaining a UI most hosts would replace
-  anyway.
+  anyway. Operational monitoring is not an admin UI: shipping a Grafana dashboard over the
+  OTLP metrics and traces is in scope.
 - **Redis** — not part of the topology; NATS/JetStream already covers fanout, ephemeral
   pub/sub, and persistence-ack, so a second moving piece would be redundant infrastructure.
 

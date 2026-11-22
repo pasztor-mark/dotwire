@@ -21,6 +21,7 @@ public sealed class AuditWriterService(
     INatsJSContext js,
     IOptions<NatsOptions> natsOptions,
     [FromKeyedServices(PostgresDataSources.Write)] NpgsqlDataSource writeDataSource,
+    DotwireMetrics metrics,
     ILogger<AuditWriterService> logger) : BackgroundService
 {
     // Distinct from MigrationRunner's 0x646F_7477_6972_65 ("dotwire") migration lock key:
@@ -29,6 +30,9 @@ public sealed class AuditWriterService(
     private const long AdvisoryLockKey = 0x6175_6469_745F_7772;
 
     private DateOnly? _latestCheckpointDay;
+    private volatile bool _lockHeld;
+
+    internal TimeSpan IdlePingInterval { get; init; } = TimeSpan.FromSeconds(30);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -36,12 +40,15 @@ public sealed class AuditWriterService(
         if (!options.Enabled)
             return;
 
+        metrics.ObserveAuditLockHeld(() => _lockHeld);
+
         while (!stoppingToken.IsCancellationRequested)
         {
             NpgsqlConnection? conn = null;
             try
             {
                 conn = await AcquireLockedConnectionAsync(options, stoppingToken);
+                _lockHeld = true;
                 await RunWhileLockedAsync(conn, options, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -58,6 +65,7 @@ public sealed class AuditWriterService(
             }
             finally
             {
+                _lockHeld = false;
                 if (conn is not null)
                     await conn.DisposeAsync();
             }
@@ -89,6 +97,7 @@ public sealed class AuditWriterService(
     {
         var (tailId, tailHash) = await LoadTailAsync(conn, ct);
         _latestCheckpointDay = await LoadLatestCheckpointDayAsync(conn, ct);
+        var lastUsed = TimeProvider.System.GetTimestamp();
 
         var consumer = await GetConsumerWithRetryAsync(options, ct);
         var fetchOpts = new NatsJSFetchOpts
@@ -104,18 +113,30 @@ public sealed class AuditWriterService(
                 batch.Add(msg);
 
             if (batch.Count == 0)
+            {
+                if (TimeProvider.System.GetElapsedTime(lastUsed) >= IdlePingInterval)
+                {
+                    await using var ping = new NpgsqlCommand("SELECT 1", conn);
+                    await ping.ExecuteScalarAsync(ct);
+                    lastUsed = TimeProvider.System.GetTimestamp();
+                }
+
                 continue;
+            }
 
             var result = await InsertBatchAsync(conn, batch, tailHash, ct);
 
             foreach (var msg in batch)
                 await msg.AckAsync(cancellationToken: ct);
 
+            lastUsed = TimeProvider.System.GetTimestamp();
+
             if (result is null)
                 continue; // every message in the batch was already committed by a prior run.
 
             (tailId, tailHash) = (result.Value.TailId, result.Value.TailHash);
             await MaybeCheckpointAsync(conn, tailId, tailHash, ct);
+            lastUsed = TimeProvider.System.GetTimestamp();
         }
     }
 

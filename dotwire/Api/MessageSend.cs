@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using Dotwire.Auth;
 using Dotwire.Configuration;
@@ -19,11 +20,22 @@ public sealed class MessageSend(
     IOptions<NatsOptions> natsOptions,
     PresendWebhookClient presend,
     PostSendWebhookService postSend,
+    DotwireMetrics metrics,
     ILoggerFactory loggerFactory)
 {
     private readonly ILogger _logger = loggerFactory.CreateLogger("Dotwire.Api.Messages");
 
     public async Task<(SendMessageResponse? Response, SendRejection? Rejection)> SendAsync(
+        Guid roomId, string senderId, string? content, string? idempotencyKey, string transport, CancellationToken ct)
+    {
+        var started = Stopwatch.GetTimestamp();
+        var result = await SendCoreAsync(roomId, senderId, content, idempotencyKey, ct);
+        var outcome = result.Rejection is null ? "accepted" : result.Rejection.Code is "stream_unavailable" or "presend_unavailable" ? "unavailable" : "rejected";
+        metrics.MessageSend(transport, outcome, Stopwatch.GetElapsedTime(started));
+        return result;
+    }
+
+    private async Task<(SendMessageResponse? Response, SendRejection? Rejection)> SendCoreAsync(
         Guid roomId, string senderId, string? content, string? idempotencyKey, CancellationToken ct)
     {
         var maxBytes = dotwireOptions.Value.MaxContentBytes;
@@ -51,7 +63,7 @@ public sealed class MessageSend(
         try
         {
             result = await MessagePublisher.PublishAsync(
-                roomId, senderId, plaintext, cipher, js, nats, natsOptions.Value, _logger, ct,
+                roomId, senderId, plaintext, cipher, js, nats, natsOptions.Value, _logger, metrics, ct,
                 hasKey ? $"{roomId:N}:{senderId}:{idempotencyKey}" : null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)

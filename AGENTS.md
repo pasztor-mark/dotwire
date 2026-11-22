@@ -90,4 +90,6 @@ Do not add anything on [PRODUCT.md's out-of-scope list](PRODUCT.md#out-of-scope-
 that list is a contract, not a backlog; read it before proposing a feature, don't assume this
 summary covers it. Separately, do not introduce new infrastructure components beyond what
 ARCHITECTURE.md already specifies: no Redis, no message brokers beyond NATS, no second
-database.
+database. This rule is about dotwire's runtime topology. Optional, out-of-band tooling that
+dotwire never depends on (compose overlays for observability, dev and demo tooling) is fine,
+as long as the runtime contracts above still hold.

@@ -22,7 +22,8 @@ public sealed class RoomHub(
     IOptions<NatsOptions> natsOptions,
     MessageSend messageSend,
     SendRateLimiter sendRateLimiter,
-    IOptions<DotwireOptions> dotwireOptions) : Hub
+    IOptions<DotwireOptions> dotwireOptions,
+    DotwireMetrics metrics) : Hub
 {
     private const string ConnectionSlotKey = "dotwire_connection_slot";
 
@@ -32,7 +33,10 @@ public sealed class RoomHub(
         if (string.IsNullOrEmpty(sub))
             throw new HubException("Unauthorized");
         if (!connectionLimiter.TryAcquire(sub))
+        {
+            metrics.Rejection("hub", "too_many_connections", "connect");
             throw new HubException("TooManyConnections");
+        }
 
         Context.Items[ConnectionSlotKey] = sub;
         return base.OnConnectedAsync();
@@ -116,12 +120,15 @@ public sealed class RoomHub(
             throw new HubException("Unauthorized");
 
         if (!sendRateLimiter.TryAcquire(sub, out _))
+        {
+            metrics.Rejection("hub", "rate_limited", "send");
             throw new HubException("RateLimited");
+        }
 
         if (!interestManager.IsSubscribed(Context.ConnectionId, roomId))
             throw new HubException("Forbidden");
 
-        var (response, rejection) = await messageSend.SendAsync(roomId, sub, content, idempotencyKey, Context.ConnectionAborted);
+        var (response, rejection) = await messageSend.SendAsync(roomId, sub, content, idempotencyKey, "hub", Context.ConnectionAborted);
         if (rejection is not null)
             throw new HubException(rejection.Reason is null ? rejection.Code : $"{rejection.Code}:{rejection.Reason}");
 

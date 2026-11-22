@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
@@ -100,6 +101,7 @@ public class RealtimeSecurityTests(WebApplicationFactory<Program> factory) : ICl
         var room = Guid.NewGuid();
         store.Members[(room, "u1")] = true;
         var app = OfflineApp.Create(factory, store, b => b.UseSetting("Dotwire:MaxConnectionsPerUser", "1"));
+        using var capture = new MetricCapture(app.Services.GetRequiredService<IMeterFactory>());
 
         await using var first = Connect(app, TestTokens.Mint("u1"));
         await first.StartAsync(Ct);
@@ -113,6 +115,7 @@ public class RealtimeSecurityTests(WebApplicationFactory<Program> factory) : ICl
         });
 
         Assert.Equal(1, app.Services.GetRequiredService<UserConnectionLimiter>().CountFor("u1"));
+        Assert.Equal(1, capture.Sum("dotwire.rejections", ("transport", "hub"), ("reason", "too_many_connections"), ("operation", "connect")));
     }
 
     [Fact]
@@ -323,12 +326,14 @@ public class RealtimeSecurityTests(WebApplicationFactory<Program> factory) : ICl
         var app = OfflineApp.Create(factory, store, b => b.UseSetting("Dotwire:MaxConnectionsPerUser", "1"));
         var limiter = app.Services.GetRequiredService<UserConnectionLimiter>();
         Assert.True(limiter.TryAcquire("u1"));
+        using var capture = new MetricCapture(app.Services.GetRequiredService<IMeterFactory>());
 
         var client = app.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", TestTokens.Mint("u1"));
         var response = await client.GetAsync($"/rooms/{room}/events", HttpCompletionOption.ResponseHeadersRead, Ct);
 
         Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
+        Assert.Equal(1, capture.Sum("dotwire.rejections", ("transport", "sse"), ("reason", "too_many_connections"), ("operation", "connect")));
         limiter.Release("u1");
     }
 }
@@ -337,7 +342,7 @@ public class RealtimeUnitSecurityTests
 {
     private static readonly Guid RoomId = Guid.NewGuid();
 
-    private static RoomInterestManager CreateInterestManager(INatsConnection? nats = null, bool natsEnabled = false, PresenceCoalescer? presence = null)
+    private static RoomInterestManager CreateInterestManager(INatsConnection? nats = null, bool natsEnabled = false, PresenceCoalescer? presence = null, DotwireMetrics? metrics = null)
     {
         nats ??= DispatchProxy.Create<INatsConnection, RealtimeFanoutUnitTests.CountingNats>();
         var encryption = new EncryptionOptions { ActiveKeyId = "k1" };
@@ -349,7 +354,8 @@ public class RealtimeUnitSecurityTests
             new MessageCipher(Options.Create(encryption)),
             presence ?? new PresenceCoalescer(nats, Options.Create(new NatsOptions { Enabled = false }), NullLogger<PresenceCoalescer>.Instance),
             natsOptions,
-            NullLogger<RoomInterestManager>.Instance);
+            NullLogger<RoomInterestManager>.Instance,
+            metrics ?? TestMetrics.Create().Metrics);
     }
 
     [Fact]
@@ -446,10 +452,12 @@ public class RealtimeUnitSecurityTests
     [Fact]
     public async Task HubRateLimit_IsSharedAcrossConnectionsOfOneUser()
     {
+        var (metrics, scope) = TestMetrics.Create();
+        using var capture = new MetricCapture(scope);
         var filter = new HubRateLimitFilter(Options.Create(new RateLimitOptions
         {
             Hub = new RateLimitBucketOptions { PermitLimit = 1, TokensPerPeriod = 1, PeriodSeconds = 3600 },
-        }));
+        }), metrics);
         var method = typeof(DummyHub).GetMethod(nameof(DummyHub.Subscribe))!;
         var services = new ServiceCollection().BuildServiceProvider();
         HubInvocationContext Invocation(string connectionId) =>
@@ -460,6 +468,28 @@ public class RealtimeUnitSecurityTests
             await filter.InvokeMethodAsync(Invocation("c2"), _ => ValueTask.FromResult<object?>(null)));
 
         Assert.Equal("RateLimited", ex.Message);
+        Assert.Equal(1, capture.Sum("dotwire.rejections", ("transport", "hub"), ("reason", "rate_limited"), ("operation", "subscribe")));
+    }
+
+    [Fact]
+    public async Task SseGauge_TracksRegisteredConnections()
+    {
+        var (metrics, scope) = TestMetrics.Create();
+        using var capture = new MetricCapture(scope);
+        var interest = CreateInterestManager(metrics: metrics);
+
+        await interest.RegisterSseConnectionAsync(RoomId, "sse-1", "u1", 8);
+        await interest.RegisterSseConnectionAsync(RoomId, "sse-2", "u1", 8);
+
+        var opened = capture.Observe("dotwire.sse.active_connections");
+        Assert.Single(opened);
+        Assert.Equal(2d, opened[0].Value);
+
+        interest.UnregisterSseConnection(RoomId, "sse-1");
+
+        var closed = capture.Observe("dotwire.sse.active_connections");
+        Assert.Single(closed);
+        Assert.Equal(1d, closed[0].Value);
     }
 
     [Fact]
@@ -507,9 +537,26 @@ public class RealtimeUnitSecurityTests
     }
 
     [Fact]
+    public async Task Sse_SlowConsumer_IsCountedOnce()
+    {
+        var (metrics, scope) = TestMetrics.Create();
+        using var capture = new MetricCapture(scope);
+        var interest = CreateInterestManager(metrics: metrics);
+        await interest.RegisterSseConnectionAsync(RoomId, "sse-1", "u1", bufferSize: 1);
+
+        for (ulong seq = 1; seq <= 3; seq++)
+            interest.PublishToSse(RoomId, new SseOutboundEvent("message", [], seq));
+
+        Assert.Equal(1, capture.Sum("dotwire.fanout.dropped", ("transport", "sse"), ("reason", "slow_consumer")));
+        Assert.Equal(0, capture.Sum("dotwire.fanout.dropped", ("reason", "ephemeral_shed")));
+    }
+
+    [Fact]
     public async Task Sse_EphemeralEventsAreShedBeforeMessages()
     {
-        var interest = CreateInterestManager();
+        var (metrics, scope) = TestMetrics.Create();
+        using var capture = new MetricCapture(scope);
+        var interest = CreateInterestManager(metrics: metrics);
         var (reader, _) = await interest.RegisterSseConnectionAsync(RoomId, "sse-1", "u1", bufferSize: 4);
 
         for (ulong seq = 1; seq <= 3; seq++)
@@ -523,6 +570,8 @@ public class RealtimeUnitSecurityTests
 
         Assert.Equal(["message", "message", "message", "message"], names);
         Assert.False(reader.Completion.IsCompleted);
+        Assert.Equal(1, capture.Sum("dotwire.fanout.dropped", ("transport", "sse"), ("reason", "ephemeral_shed")));
+        Assert.Equal(0, capture.Sum("dotwire.fanout.dropped", ("reason", "slow_consumer")));
     }
 
     public class FakeSub : DispatchProxy

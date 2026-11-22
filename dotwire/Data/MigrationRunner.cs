@@ -33,7 +33,8 @@ public static class MigrationRunner
                 "Postgres:AppRolePassword must be set (POSTGRES_APP_PASSWORD in .env) . " +
                 "migrations maintain the dotwire_app login and the runtime pools connect as it.");
 
-        await using var conn = await OpenWithRetryAsync(migratorConnectionString, logger, ct);
+        await using var dataSource = new NpgsqlDataSourceBuilder(migratorConnectionString) { Name = "migrator" }.Build();
+        await using var conn = await OpenWithRetryAsync(dataSource, logger, ct);
 
         await ExecAsync(conn, $"SELECT pg_advisory_lock({AdvisoryLockKey})", ct);
         try
@@ -117,16 +118,14 @@ public static class MigrationRunner
     }
 
     private static async Task<NpgsqlConnection> OpenWithRetryAsync(
-        string connectionString, ILogger logger, CancellationToken ct)
+        NpgsqlDataSource dataSource, ILogger logger, CancellationToken ct)
     {
         const int maxAttempts = 15;
         for (var attempt = 1; ; attempt++)
         {
             try
             {
-                var conn = new NpgsqlConnection(connectionString);
-                await conn.OpenAsync(ct);
-                return conn;
+                return await dataSource.OpenConnectionAsync(ct);
             }
             catch (NpgsqlException ex) when (attempt < maxAttempts)
             {

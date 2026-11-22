@@ -26,7 +26,7 @@ public sealed record PresendVerdict(PresendOutcome Outcome, string? Content = nu
 /// published. One shared, pooled <see cref="HttpClient"/> (via <see cref="IHttpClientFactory"/>)
 /// for both presend and postsend.
 /// </summary>
-public sealed class PresendWebhookClient(IHttpClientFactory httpClientFactory, IOptions<WebhooksOptions> options, ILogger<PresendWebhookClient> logger)
+public sealed class PresendWebhookClient(IHttpClientFactory httpClientFactory, IOptions<WebhooksOptions> options, ILogger<PresendWebhookClient> logger, DotwireMetrics metrics)
 {
     public const string HttpClientName = "dotwire-webhooks";
     public const long MaxResponseBytes = 1024 * 1024;
@@ -64,11 +64,18 @@ public sealed class PresendWebhookClient(IHttpClientFactory httpClientFactory, I
                 return Unavailable(presend, "unparseable presend webhook response", content);
 
             if (!responseBody.Allow)
+            {
+                metrics.PresendResult("rejected");
                 return new PresendVerdict(PresendOutcome.Rejected, Reason: responseBody.Reason);
+            }
 
             if (responseBody.Content is not null && responseBody.Content != content)
+            {
+                metrics.PresendResult("allowed_with_rewrite");
                 return new PresendVerdict(PresendOutcome.AllowedWithRewrite, Content: responseBody.Content);
+            }
 
+            metrics.PresendResult("allowed");
             return new PresendVerdict(PresendOutcome.Allowed, Content: content);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
@@ -82,10 +89,12 @@ public sealed class PresendWebhookClient(IHttpClientFactory httpClientFactory, I
     {
         if (presend.FailPolicy == PresendFailPolicy.Open)
         {
+            metrics.PresendResult("failed_open");
             logger.LogWarning("Presend webhook unavailable ({Reason}); FailPolicy=Open, publishing original content", reason);
             return new PresendVerdict(PresendOutcome.Allowed, Content: originalContent);
         }
 
+        metrics.PresendResult("unavailable");
         return new PresendVerdict(PresendOutcome.Unavailable, Reason: reason);
     }
 

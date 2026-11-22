@@ -11,11 +11,11 @@ public class AccessLookupBatcherTests
 
     private static (Guid, string) P(string user) => (Room, user);
 
-    private static AccessLookupBatcher NewBatcher(GatedAccessStore store, int maxInFlight = 2, int maxBatchSize = 512) =>
+    private static AccessLookupBatcher NewBatcher(GatedAccessStore store, int maxInFlight = 2, int maxBatchSize = 512, DotwireMetrics? metrics = null) =>
         new(store, Options.Create(new DotwireOptions
         {
             AuthBatching = new AuthBatchingOptions { Enabled = true, MaxInFlight = maxInFlight, MaxBatchSize = maxBatchSize }
-        }));
+        }), metrics ?? TestMetrics.Create().Metrics);
 
     [Fact]
     public async Task LoneRequest_UsesSingleLookup()
@@ -43,7 +43,9 @@ public class AccessLookupBatcherTests
             store.Roles[u] = "r-" + u;
             store.Members[P(u)] = u != "c";
         }
-        var batcher = NewBatcher(store, maxInFlight: 1);
+        var (metrics, scope) = TestMetrics.Create();
+        using var capture = new MetricCapture(scope);
+        var batcher = NewBatcher(store, maxInFlight: 1, metrics: metrics);
 
         var a = batcher.LookupAsync(Room, "a", CancellationToken.None);
         await store.WaitForCallsAsync(1);
@@ -61,6 +63,7 @@ public class AccessLookupBatcherTests
         Assert.Equal(2, store.Calls.Count);
         Assert.True(store.Calls[1].IsBatch);
         Assert.Equal(new[] { P("b"), P("c"), P("d") }.Order(), store.Calls[1].Pairs.Order());
+        Assert.Equal(4, capture.Sum("dotwire.auth.batch.size"));
     }
 
     [Fact]
@@ -204,7 +207,7 @@ public class AccessLookupBatcherTests
         var batcher = new AccessLookupBatcher(store, Options.Create(new DotwireOptions
         {
             AuthBatching = new AuthBatchingOptions { Enabled = true, MaxInFlight = maxInFlight, MaxBatchSize = maxBatchSize }
-        }));
+        }), TestMetrics.Create().Metrics);
 
         var lookups = Enumerable.Range(0, 1000).Select(i =>
         {
