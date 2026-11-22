@@ -11,7 +11,7 @@
 
 dotwire is a free, open-source chat layer you embed in your own application. Your app keeps owning its users and signs the JWTs; dotwire verifies them and handles realtime delivery, message persistence and ordering, and a tamper-evident audit log. It ships APIs and SDKs, not a chat UI, so you build the interface your product needs.
 
-> **Early release (v0.4).** APIs and deployment guidance may still change, and dotwire isn't used in production yet, so evaluate it carefully before relying on it. Feedback and issues are welcome.
+> **Early release (v0.5).** APIs and deployment guidance may still change, and dotwire isn't used in production yet, so evaluate it carefully before relying on it. Feedback and issues are welcome.
 
 ---
 
@@ -28,6 +28,7 @@ dotwire is a free, open-source chat layer you embed in your own application. You
 * **Compliance Surface:** Redaction, DSAR export, and configurable retention (Postgres chunk drops + JetStream `MaxAge`) via the admin API and both host SDKs.
 * **Webhooks & SSE:** Optional presend/postsend webhook call-outs for host-side moderation, and a resumable Server-Sent Events read path alongside SignalR.
 * **Per-Node Rate Limiting:** In-process token-bucket limits on send, read, admin, and hub routes — no external dependency.
+* **OpenTelemetry Observability:** OTLP metrics for the send path, fanout, auth lookups, JetStream lag and database pools, opt-in traces scrubbed to an allowlist of tags (no ids, SQL, or content), and an optional Grafana overlay with a provisioned dashboard. See [Metrics](#metrics) and [Tracing](#tracing).
 
 ---
 
