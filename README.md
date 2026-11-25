@@ -1,4 +1,5 @@
-![dotwire: self-hosted alternative to managed chat services. No per-MAU bill, no second user table, no contacting sales.](docs/banners/hero.png)
+<img width="3200" height="1440" alt="hero" src="https://github.com/user-attachments/assets/c6b7161b-8e0a-48ab-bb2c-a83d6ed2719d" />
+
 
 [![.NET 10](https://img.shields.io/badge/.NET-10.0%20Native%20AOT-512BD4?style=flat&logo=dotnet)](https://dotnet.microsoft.com/)
 [![TimescaleDB](https://img.shields.io/badge/TimescaleDB-PostgreSQL%2017-336791?style=flat&logo=postgresql)](https://www.timescale.com/)
@@ -14,6 +15,16 @@ dotwire is a free, open-source chat layer you embed in your own application. You
 > **Early release (v0.5).** APIs and deployment guidance may still change, and dotwire isn't used in production yet, so evaluate it carefully before relying on it. Feedback and issues are welcome.
 
 ---
+
+<img width="3200" height="480" alt="section-0-demo" src="https://github.com/user-attachments/assets/5521ccd2-2dab-4d60-851e-136f60c9f47b" />
+
+Try [dotwire in your browser](https://demo.dotwire.pasztormark.dev) (Next.js +
+`@dotwire/react`). Pass a Turnstile check, get a random name, create a private room, and share
+the invite code with a friend or a second tab. You get realtime messages, typing indicators,
+presence, and a live panel of dotwire's own OpenTelemetry metrics (msg/s, p50/p99 send latency,
+fanout lag, connections).
+
+The whole stack (dotwire, Postgres + TimescaleDB, NATS JetStream, Next.js, Caddy) runs on one serverless instance that scales to zero. Every boot starts with an empty database and new secrets, so expect a few seconds of "Waking up the demo…" on the first visit, and don't expect anything to persist.
 
 <a id="key-highlights"></a>
 
