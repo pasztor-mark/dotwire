@@ -1,6 +1,6 @@
 services:
   dotwire:
-    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.5.0}
+    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.5.1}
     build:
       context: .
       dockerfile: dotwire/Dockerfile
@@ -44,6 +44,7 @@ services:
       # Dotwire__Sse__Enabled: "true"
       # Dotwire__RateLimits__Enabled: "true"
       # Dotwire__Retention__MessagesDays: "90"
+      # Dotwire__Compression__AfterDays: "7"
     ulimits:
       nofile:
         soft: 65536
@@ -60,7 +61,7 @@ services:
         condition: service_healthy
 
   postgres:
-    image: timescale/timescaledb:2.31.0-pg17
+    image: timescale/timescaledb:2.32.0-pg17
     command: ["postgres", "-c", "shared_buffers=256MB", "-c", "work_mem=16MB", "-c", "max_connections=200"]
     security_opt:
       - no-new-privileges:true
@@ -89,7 +90,7 @@ services:
   # A new named volume is root-owned (the nats image has no /data to inherit from), so hand it
   # to the unprivileged user nats runs as before nats starts.
   nats-init:
-    image: nats:2.15.2-alpine
+    image: nats:2.15.3-alpine
     entrypoint: ["chown", "1000:1000", "/data"]
     user: "0:0"
     read_only: true
@@ -103,7 +104,7 @@ services:
       - natsdata:/data
 
   nats:
-    image: nats:2.15.2-alpine
+    image: nats:2.15.3-alpine
     command: ["-js", "-sd", "/data", "-m", "8222"]
     user: "1000:1000"
     depends_on:

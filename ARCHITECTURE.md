@@ -188,6 +188,21 @@ Sharding itself is out of scope for v1 (see PRODUCT.md's out-of-scope list), but
 query discipline are shard-*ready* by construction — nothing is built that would foreclose
 sharding later.
 
+**Compressed history (opt-in).** `Dotwire:Compression:AfterDays` (unset by default, which runs no
+compression SQL) adds a TimescaleDB compression policy to `messages`, segmented by `room_id` and
+ordered by `seq, time`. Chunks older than `AfterDays` are compressed in the background; measured on
+TimescaleDB 2.31, a 100-byte body goes from 516 B per message uncompressed to about 177 B (2.9x).
+History pages stay index-backed on compressed chunks. The startup step runs only when migrations
+run, on the migrator connection, and is gated on the Timescale License and version 2.11 or later
+(`MessageCompression.Supported`): on an Apache-only build, or an older TimescaleDB, it logs a
+warning and leaves the table uncompressed. `0` removes the policy. Chunks already compressed stay
+compressed; decompressing them (`decompress_chunk`) is a manual operator action. `CompressionRules`
+requires `AfterDays * 24` to exceed `Nats:RoomsMaxAgeHours` (default 48), because the batch writer may
+still insert into chunks younger than that. Migration `0010_drop_time_index.sql` drops the
+`messages_time_idx` index on upgrade for every deployment (`DROP INDEX IF EXISTS`; no rebuild, a brief
+ACCESS EXCLUSIVE lock on `messages` that blocks reads and writes while held). Redaction and the
+redaction tombstone still operate on compressed chunks (see "Redaction mechanics" and COMPLIANCE.md).
+
 **Authoritative tables:**
 - `user_roles` — role per user (`member` | `auditor` | `admin`), preseeded but fully
   configurable; can also be populated via the admin API.
@@ -557,7 +572,8 @@ is O(1) per chunk rather than an O(n) scan-and-delete, and why it produces zero 
 time — either `Dotwire:Retention:MessagesDays` at startup or the admin API/SDK retention
 methods, not both — since the config path only takes effect at startup and an unset config
 value means "leave whatever the API last set" rather than "clear it," so mixing the two is how
-an operator loses track of which one is authoritative.
+an operator loses track of which one is authoritative. Retention works the same on compressed
+chunks (see "Data layout"): `drop_chunks` removes whole compressed chunks once they are past the window.
 
 **DSAR export mechanics.** The DSAR export endpoint (also admin-only) is the GDPR Art. 15
 access mechanism: given a `sub`, it exports that user's messages, room memberships, and role

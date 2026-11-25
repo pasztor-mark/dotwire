@@ -34,6 +34,7 @@ builder.Services.Configure<WebhooksOptions>(builder.Configuration.GetSection(Web
 builder.Services.Configure<SseOptions>(builder.Configuration.GetSection(SseOptions.SectionName));
 builder.Services.Configure<RateLimitOptions>(builder.Configuration.GetSection(RateLimitOptions.SectionName));
 builder.Services.Configure<RetentionOptions>(builder.Configuration.GetSection(RetentionOptions.SectionName));
+builder.Services.Configure<CompressionOptions>(builder.Configuration.GetSection(CompressionOptions.SectionName));
 builder.Services.AddSingleton<MessageCipher>();
 
 var dotwireOptions = builder.Configuration.GetSection(DotwireOptions.SectionName).Get<DotwireOptions>() ?? new DotwireOptions();
@@ -53,6 +54,9 @@ var keyRing = new SigningKeyRing(
 var webhooksOptions = builder.Configuration.GetSection(WebhooksOptions.SectionName).Get<WebhooksOptions>() ?? new WebhooksOptions();
 WebhookUrlRules.Validate(webhooksOptions);
 AuthLookupRules.Validate(dotwireOptions);
+CompressionRules.Validate(
+    builder.Configuration.GetSection(CompressionOptions.SectionName).Get<CompressionOptions>() ?? new CompressionOptions(),
+    builder.Configuration.GetSection(NatsOptions.SectionName).Get<NatsOptions>() ?? new NatsOptions());
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -263,6 +267,18 @@ if (postgres.Migrate)
         await using var cmd = new NpgsqlCommand("SELECT set_message_retention($1)", conn);
         cmd.Parameters.AddWithValue(retentionDays.Value);
         await cmd.ExecuteScalarAsync();
+    }
+
+    var compressionDays = app.Services.GetRequiredService<IOptions<CompressionOptions>>().Value.AfterDays;
+    if (compressionDays.HasValue)
+    {
+        await using var dataSource = new NpgsqlDataSourceBuilder(RequireConnectionString(app.Configuration, "PostgresMigrator")) { Name = "migrator" }.Build();
+        await using var conn = await dataSource.OpenConnectionAsync();
+        await MessageCompression.ApplyAsync(
+            conn,
+            compressionDays.Value,
+            app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(nameof(MessageCompression)),
+            CancellationToken.None);
     }
 }
 
