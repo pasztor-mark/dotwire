@@ -89,6 +89,13 @@ public class ComposeFileTests
     }
 
     [Fact]
+    public void EnvExample_ListsCompressionKey()
+    {
+        var lines = File.ReadAllLines(Path.Combine(RepoRoot(), ".env.example"));
+        Assert.Contains(lines, l => l.StartsWith("# Dotwire__Compression__AfterDays=7"));
+    }
+
+    [Fact]
     public void EnvExample_ListsLoggingKeys()
     {
         var lines = File.ReadAllLines(Path.Combine(RepoRoot(), ".env.example"));

@@ -1,3 +1,19 @@
+# v0.5.1
+
+No breaking changes. Disk usage is now tunable: compression of old messages is available and off
+by default (`Dotwire__Compression__AfterDays`). The only database change on upgrade is migration
+`0010`, which drops the `messages_time_idx` index for every deployment.
+
+| Area | Behavior | What to do |
+|---|---|---|
+| Index drop | Migration `0010_drop_time_index.sql` runs `DROP INDEX IF EXISTS messages_time_idx`, once, at upgrade. It rebuilds nothing, but takes a brief ACCESS EXCLUSIVE lock on `messages` that blocks reads and writes while held. | Plan a brief pause in reads and writes for the upgrade startup. No other action needed. |
+| Compression (opt-in) | `Dotwire__Compression__AfterDays` (unset by default) adds a TimescaleDB compression policy to `messages`, compressing chunks older than N days. `0` removes the policy. Unset runs no compression SQL. Values must be `0` to `36500`, and `AfterDays * 24` must exceed `Nats:RoomsMaxAgeHours` (48 by default). See README, "Recommended settings by scenario." | Nothing, unless you want smaller history on disk. Measured 2.9x smaller at a 100-byte body on TimescaleDB 2.31. |
+| First run | The first policy run compresses the whole eligible backlog in one go, which causes heavy I/O. | Enable it in a quiet window, or on a database with spare I/O headroom. |
+| Build and version | Compression needs the Timescale License (TSL) and TimescaleDB 2.11 or later, for example the `timescale/timescaledb` image. Apache-only builds (Azure Database for PostgreSQL, `timescaledb-2-oss`) and older versions log a warning naming the reason and stay uncompressed. Our reading of the TSL is that it allows free self-hosting but not offering TimescaleDB itself as a hosted service. Confirm against TimescaleDB's license terms before any hosted offering. | Use the `timescale/timescaledb` image or a self-hosted TSL build, or leave the setting unset. |
+| Decompressing | Setting `0` stops new chunks from compressing. Chunks already compressed stay compressed until you run `decompress_chunk` by hand. | Run `decompress_chunk` per chunk if you need the uncompressed layout back. |
+| Redaction, DSAR, history | Redaction still removes rows on compressed chunks, and the redaction tombstone still blocks re-inserts. History pages stay index-backed. The DSAR export is slower over compressed history, because its sender-based scan reads every compressed batch. | Expect slower DSAR exports on compressed databases. See COMPLIANCE.md. |
+| Dependencies | The compose files now pin NATS 2.15.3 and TimescaleDB 2.32.0 (`timescale/timescaledb:2.32.0-pg17`). The server uses `NATS.Net` 3.4.1, the host SDK uses `jose` 6.2.18, and CI uses `actions/setup-dotnet` 6.1.0. | Nothing if you use the compose files. If you run your own NATS or TimescaleDB, upgrading them is optional. The compression measurements above are from 2.31. |
+
 # v0.5.0
 
 No breaking changes and no database migrations.

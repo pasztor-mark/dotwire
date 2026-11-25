@@ -120,4 +120,12 @@ public class MigrationScriptTests
         Assert.Matches(new Regex(@"BEFORE\s+UPDATE\s+OR\s+DELETE\s+ON\s+message_redactions", RegexOptions.IgnoreCase), script);
         Assert.Matches(new Regex(@"BEFORE\s+TRUNCATE\s+ON\s+message_redactions", RegexOptions.IgnoreCase), script);
     }
+
+    [Fact]
+    public void TimeIndexDropIsTheOnlyStatementInMigration0010()
+    {
+        var script = MigrationRunner.LoadScripts().Single(s => s.Name == "0010_drop_time_index.sql");
+        var statements = script.Sql.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.Equal(["DROP INDEX IF EXISTS messages_time_idx"], statements);
+    }
 }

@@ -66,8 +66,9 @@ the doc section linked.
   hours, since it only needs to cover batch-writer lag and reconnect gap-fill, not serve as
   long-term storage. Retention policy applies to metadata too — who messaged whom and when
   live in plaintext columns, and a retention policy that only touched encrypted content would
-  not actually be a retention policy. See ARCHITECTURE.md, "Encryption at rest & data
-  lifecycle."
+  not actually be a retention policy. Retention and redaction also apply to compressed history
+  (opt-in `Dotwire:Compression:AfterDays`; see "Accepted limitations"). See ARCHITECTURE.md,
+  "Encryption at rest & data lifecycle."
 - **Key rotation (both key systems).** dotwire's AES-256-GCM at-rest encryption keys rotate by
   introducing a new key id for new messages while old keys are retained to decrypt old
   messages — no mass re-encryption. The host's RS256 JWT signing keys rotate independently, via
@@ -171,6 +172,17 @@ policy. Keep the value as low as load allows.
   read pool is a replica. With the default `0`, REST checks the database on every request.
 - **Applied migrations are checksummed.** Startup fails if an already-applied migration file
   changed, so schema drift from edited history is visible rather than silent.
+- **Compressed history is a storage measure, not a control.** With `Dotwire:Compression:AfterDays`
+  set (opt-in, off by default), older `messages` chunks are compressed. Compression changes the
+  storage layout only: it adds no encryption or access control, and it does not change how
+  content is protected (content is already encrypted before it is written). Redaction still
+  physically removes rows from compressed chunks, and the redaction tombstone still blocks
+  re-inserts. Retention (`drop_chunks`) still removes whole compressed chunks. The DSAR export
+  scans by sender and is slower over compressed history, because it reads every compressed batch.
+  Compression is a TimescaleDB Timescale License feature, included in the `timescale/timescaledb`
+  image. Our reading of the TSL is that it allows free self-hosting but not offering TimescaleDB
+  itself as a hosted service. Confirm against TimescaleDB's license terms before any hosted
+  offering. Apache-only builds stay uncompressed.
 - **Third-party processors are the host's choice.** The moderation samples under `samples/`
   send message content to Anthropic's Message Batches API. A host that adopts them adds
   Anthropic as a subprocessor and must cover that in its DPA, records of processing and DPIA.
