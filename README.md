@@ -24,6 +24,8 @@ the invite code with a friend or a second tab. You get realtime messages, typing
 presence, and a live panel of dotwire's own OpenTelemetry metrics (msg/s, p50/p99 send latency,
 fanout lag, connections).
 
+![Demo: two dotwire chat clients exchanging messages next to the Grafana metrics dashboard](docs/banners/demo-2x.gif)
+
 The whole stack (dotwire, Postgres + TimescaleDB, NATS JetStream, Next.js, Caddy) runs on one serverless instance that scales to zero. Every boot starts with an empty database and new secrets, so expect a few seconds of "Waking up the demo…" on the first visit, and don't expect anything to persist.
 
 <a id="key-highlights"></a>
