@@ -1,7 +1,12 @@
+using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
+
 namespace Dotwire.Host;
 
 public sealed partial class DotwireHostClient
 {
+    private static readonly byte[] NewLine = "\n"u8.ToArray();
+
     /// <inheritdoc />
     public Task<SendMessageResult> SendAsUserAsync(Guid roomId, string userId, string content, CancellationToken ct = default) =>
         SendAsUserAsync(roomId, userId, content, null, ct);
@@ -58,9 +63,49 @@ public sealed partial class DotwireHostClient
         }, ct);
     }
 
+    public async Task<long> ExportRoomHistoryAsync(Guid roomId, string asUserId, Stream destination, CancellationToken ct = default)
+    {
+        ulong afterSeq = 0;
+        long count = 0;
+        while (true)
+        {
+            var history = await GetMessagesAsync(roomId, asUserId, new HistoryQuery(AfterSeq: afterSeq, Limit: 100), ct);
+            foreach (var message in history.Messages)
+            {
+                await WriteLineAsync(destination, message, DotwireHostJsonContext.Default.HistoryMessage, ct);
+                count++;
+            }
+            if (!history.HasMore)
+                return count;
+            if (history.Messages.Count == 0)
+                throw new InvalidDataException($"Room history page after seq {afterSeq} returned no readable messages.");
+            afterSeq = history.Messages[^1].Seq;
+        }
+    }
+
+    private static async Task WriteLineAsync<T>(Stream destination, T value, JsonTypeInfo<T> typeInfo, CancellationToken ct)
+    {
+        await JsonSerializer.SerializeAsync(destination, value, typeInfo, ct);
+        await destination.WriteAsync(NewLine, ct);
+    }
+
     /// <inheritdoc />
     public Task<RedactMessageResult> RedactMessageAsync(Guid roomId, ulong seq, CancellationToken ct = default) =>
         SendAsync(HttpMethod.Delete, $"/admin/rooms/{roomId}/messages/{seq}", AdminToken(), DotwireHostJsonContext.Default.RedactMessageResult, ct);
+
+    public Task<RedactMessageResult> EmergencyDeleteMessageAsync(Guid roomId, ulong seq, EmergencyDeletionReason reason, CancellationToken ct = default)
+    {
+        var body = JsonBody(new EmergencyDeleteRequestDto(EmergencyReasonWire(reason)), DotwireHostJsonContext.Default.EmergencyDeleteRequestDto);
+        return SendAsync(HttpMethod.Post, $"/admin/rooms/{roomId}/messages/{seq}/emergency-delete", AdminToken(),
+            DotwireHostJsonContext.Default.RedactMessageResult, ct, body);
+    }
+
+    private static string EmergencyReasonWire(EmergencyDeletionReason reason) => reason switch
+    {
+        EmergencyDeletionReason.IllegalContent => "illegal_content",
+        EmergencyDeletionReason.CourtOrder => "court_order",
+        _ => throw new ArgumentOutOfRangeException(nameof(reason)),
+    };
 
     private static string BuildHistoryQuery(HistoryQuery? query)
     {

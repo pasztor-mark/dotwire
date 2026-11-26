@@ -23,8 +23,7 @@ export interface ModerationVerdict {
 
 /**
  * The expensive judgment call, run off the send path over a whole batch at once. Implementations
- * call an LLM (see `samples/moderation` for a Claude Message Batches API reference implementation),
- * a third-party moderation API, or anything else too slow to sit inside a send. Return one verdict
+ * call an LLM, a third-party moderation API, or anything else too slow to sit inside a send. Return one verdict
  * per input; inputs with no verdict are treated as not flagged.
  */
 export interface ModerationClassifier {

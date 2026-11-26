@@ -183,4 +183,18 @@ public class MessageCipherTests
 
         Assert.Throws<InvalidOperationException>(() => new MessageCipher(Options.Create(options)));
     }
+
+    [Fact]
+    public void Reencrypt_ToErasedSender_RoundTrips()
+    {
+        var cipher = Create(allowLegacy: false);
+        var original = cipher.Encrypt(Encoding.UTF8.GetBytes("history"), RoomA, "alice");
+
+        var plain = cipher.Decrypt(cipher.ActiveKeyId, original, RoomA, "alice");
+        var reencrypted = cipher.Encrypt(plain, RoomA, "dotwire:erased");
+        CryptographicOperations.ZeroMemory(plain);
+
+        Assert.Equal("history", Encoding.UTF8.GetString(cipher.Decrypt(cipher.ActiveKeyId, reencrypted, RoomA, "dotwire:erased")));
+        Assert.ThrowsAny<CryptographicException>(() => cipher.Decrypt(cipher.ActiveKeyId, reencrypted, RoomA, "alice"));
+    }
 }

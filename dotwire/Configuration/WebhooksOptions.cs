@@ -12,6 +12,8 @@ public sealed class WebhooksOptions
     public PresendOptions Presend { get; set; } = new();
 
     public PostSendOptions PostSend { get; set; } = new();
+
+    public ErasureWebhookOptions Erasure { get; set; } = new();
 }
 
 public enum PresendFailPolicy
@@ -51,4 +53,12 @@ public sealed class PostSendOptions
     public long MaxQueueBytes { get; set; } = 64L * 1024 * 1024;
 
     public bool IncludeAdminSends { get; set; } = false;
+}
+
+public sealed class ErasureWebhookOptions
+{
+    /// <summary>Erasure notices are sent only when this is set.</summary>
+    public string? Url { get; set; }
+
+    public int TimeoutMs { get; set; } = 2000;
 }

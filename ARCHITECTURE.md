@@ -40,15 +40,16 @@ SignalR's own stateful reconnect buffering is explicitly disabled, precisely bec
 contract already covers it).
 
 **Ephemeral traffic rule (contract, not a suggestion):** presence, typing indicators, and read
-receipts ride NATS core, never JetStream. They are never persisted and never sit in any ack
-path. Agents must not "helpfully" start persisting them — that would silently turn a
+receipts, and the live `retracted`, `revoked` and `erased` notices, ride NATS core, never
+JetStream. They are never persisted and never sit in any ack path. Agents must not "helpfully" start persisting them — that would silently turn a
 constant-cost broadcast mechanism into a storage and replay liability for data nobody needs to
 recover.
 
 **The live subject, and why the stream filter is `room.*` and not `room.>`.** Alongside the
 durable `room.{room_id}` JetStream subject, each room also has a core (non-JetStream) subject
 `room.{room_id}.live` used for seq-tagged live fanout, plus `room.{room_id}.ephemeral.*` for
-presence/typing/read-receipts. The `ROOMS` stream's subject filter (`Nats:RoomsSubjectFilter`,
+presence/typing/read-receipts, and `room.{room_id}.ephemeral.erased` for the live `MessagesErased`
+notice that follows each committed erasure page (see "Account erasure"). The `ROOMS` stream's subject filter (`Nats:RoomsSubjectFilter`,
 default `room.*`) matches exactly one token after `room.` — it captures `room.{room_id}`
 durable traffic and nothing else. It must not be widened to `room.>` (which would match every
 token, including `.live` and `.ephemeral.*`): that would pull ephemeral, by-design-unpersisted
@@ -239,6 +240,16 @@ own audit event, so "who looked at the audit trail" is always answerable from th
 "Redaction mechanics" under "Encryption at rest & data lifecycle" for how it's enforced) is
 what lets erasure never rewrite an audit entry, so the hash chain survives every redaction
 intact.
+
+**Compliance event types.** Migration `0011` and the compliance endpoints add these `event_type`
+values, on the same seven-field event, so the canonical form is unchanged: `hold.placed` (the room
+or user id as the target, `value` = hold id), `hold.released` (`value` = hold id),
+`message.redacted.emergency` (`value` = reason code: `1` illegal content, `2` court order),
+`user.erasure.requested` and `user.erased` (`subject_id` = user, `value` = mode code: `1` anonymize,
+`2` delete). A redaction writes `message.redacted` only when it succeeds, and a refused one writes
+nothing. The per-message steps of an erasure write no event of their own: the requested and
+completed events bracket them. Erasure revocation also writes `role.deleted` and `member.removed`,
+as role deletion does.
 
 **Canonical form.** Before hashing, each event is reduced to a fixed, order-stable canonical
 form (`AuditCanonicalForm.Compute`) — the same event must always serialize to the same bytes
@@ -560,6 +571,21 @@ the audit log's ids-only invariant (see "Audit log" above), is what makes erasur
 chain compatible: redacting a message never requires rewriting an audit entry, so the hash
 chain survives every redaction intact.
 
+Since 0.6.0 the checked form of `redact_message` (migration `0011`) decides eligibility under the
+hold lock and the per-room advisory lock. It refuses with `-1` for an active legal hold, `-2`
+inside `Dotwire:Compliance:MinimumKeepDays`, and `-3` when `Dotwire:Compliance:AllowChanges` is
+`false`. The endpoint runs the check inside a write transaction and publishes `message.redacted`
+before commit. On a refusal it rolls back and answers `409 legal_hold`, `409 minimum_keep` or
+`409 changes_not_allowed`, with no audit row. The JetStream delete, the `retracted` broadcast and
+the erasure notice run after the commit, as before. Injection cleanup (`EraseUnauditedInjectionAsync`)
+and the emergency path call the unchecked form, so an injection nobody was shown can still be
+removed from a held room. `POST /admin/rooms/{roomId}/messages/{seq}/emergency-delete` takes a
+required `reason` (`illegal_content` or `court_order`), bypasses holds, minimum keep and write-once,
+and writes `message.redacted.emergency` before the delete. There is no free-text reason, because
+free text could carry personal data into the ids-only log. Both paths publish a `message.redacted`
+erasure notice once the stores are clean. If that publish fails the endpoint answers
+`503 notice_unavailable`, and a retry is safe.
+
 **Retention mechanics.** `set_message_retention(p_days)` / `get_message_retention()` are
 narrow `SECURITY DEFINER` Postgres functions (search_path pinned, same hardening pattern as
 `redact_message` — see "Redaction mechanics" — so a `SECURITY DEFINER` function can't be
@@ -575,6 +601,18 @@ value means "leave whatever the API last set" rather than "clear it," so mixing 
 an operator loses track of which one is authoritative. Retention works the same on compressed
 chunks (see "Data layout"): `drop_chunks` removes whole compressed chunks once they are past the window.
 
+While any legal hold is active, the retention job is paused. `set_message_retention` re-creates the
+policy and then calls `sync_retention_schedule()`, which leaves the job unscheduled; a bare
+`alter_job` pause would be undone by the policy re-add (confirmed on TimescaleDB 2.32). `GET
+/admin/retention` reports `paused: true` in that state. `PUT /admin/retention` answers
+`409 minimum_keep` for `0 < days < MinimumKeepDays`, and a hold does not reject the change: the new
+policy is created paused. `alter_job` does not stop a run already in progress, so `POST /admin/holds`
+waits up to `Dotwire:Compliance:HoldRetentionWaitSeconds` (default 30) for the job to stop running,
+then returns `201` either way and logs a warning. Chunks that run has already dropped stay dropped.
+Releasing the last hold resumes retention, and the next run drops every overdue chunk at once.
+Compression is not paused: it is lossless, so held data stays compressed. JetStream `MaxAge` is not
+paused either, because Postgres is the record.
+
 **DSAR export mechanics.** The DSAR export endpoint (also admin-only) is the GDPR Art. 15
 access mechanism: given a `sub`, it exports that user's messages, room memberships, and role
 and audit-reference metadata across every room they touch. Message content is decrypted at
@@ -583,3 +621,105 @@ above) — so the export is human-readable rather than a dump of ciphertext. By 
 is not gated by `room_members`: it is an admin compliance operation over everything the
 subject sent, and it is audited (`dsar.exported`) before the first byte is written. Admin and
 audit responses carry `Cache-Control: no-store`.
+
+**Legal holds.** A hold is a row in `legal_holds` (scope `room` with a `room_id`, or scope `user`
+with a `user_id`, which covers every message that user sent), and a release is a row in
+`legal_hold_releases`. Both tables are granted `SELECT, INSERT` only, with the same row and truncate
+guard triggers as `message_redactions`, so a release is a new row and the original hold stays. A hold
+is active while it has no release row. `matter_ref` is stored in plaintext, so hosts should use an
+opaque reference, never a description. It is validated like an id and never written to the audit
+log. Placing and releasing a hold take an exclusive transaction-scoped advisory lock on a fixed key.
+Every eligibility-checking mutation (redaction, re-attribution, erasure deletion) takes the same key
+shared, inside its `SECURITY DEFINER` function. A hold therefore either commits before a mutation
+checks it, or after the mutation has committed. Live `MessagesErased` events never list a held
+message, so clients do not hide it. Holds pause retention (see "Retention mechanics") and leave
+compression running.
+
+**Account erasure.** `POST /admin/users/{userId}/erase` takes an optional `mode`, `anonymize` (the
+default, from `Dotwire:Compliance:Erasure:Mode`) or `delete`, and returns `202` with an
+`ErasureStatus`. Before any work it refuses an invalid id with `400`, the caller's own `sub` with
+`409 self_erasure`, and the only remaining admin with `409 last_admin`. The last two use the same
+role-mutation lock as role changes. A request for a user who already has an open erasure returns that
+erasure with `202` when the mode matches, and `409 erasure_mode_conflict` when it differs, because the
+mode is final. The request inserts the `erasures` row, then revokes access the way
+`DELETE /admin/users/{id}/role` does: `room_members` and `user_roles` rows are removed, `role.deleted`
+and `member.removed` are audited, and `ephemeral.revoked` is published per room after the commit. It
+then wakes the worker. While an erasure is open, `PUT /admin/users/{id}/role` and room member adds for
+that user answer `409 erasure_open`, so an erasure that is still running cannot sweep up new messages.
+The check runs inside the same locked transaction as the erasure insert. The anonymized sender id is
+the constant `dotwire:erased`, which `IdValidation` rejects as a token `sub`, an admin path id and an
+injection sender.
+
+The worker is `ErasureWorkerService`. It runs on `All` and `Api` nodes, with one active instance under
+a session advisory lock and standby retry. It wakes on an erase request or a hold release (both over
+the core subject `dotwire.erasure.wake`, best effort), and on a timer (`Dotwire:Compliance:Erasure:RecheckMinutes`).
+On each pass it handles every open erasure in four steps:
+
+1. **Revocation window**, first pass only. The window must have passed, measured from the request:
+   the larger of `Dotwire:MembershipSweepSeconds` and `Dotwire:AuthCacheSeconds`, with a 5 s floor. If
+   the sweep is disabled, `Auth:MaxTokenLifetimeMinutes` is used instead, and if that is `0` too, a
+   60-minute window with a startup warning. The read pool must also have replayed past the LSN that was
+   captured when the revocation committed. Access checks read the read pool, so revocation only takes
+   effect there after replay. After this step, no session the user held before the erasure can still
+   send.
+2. **Writer and replica catch-up.** The worker reads the ROOMS `LastSeq`, then waits until the
+   `postgres-writer` consumer's ack floor reaches it (when NATS is enabled). It then takes the primary's
+   WAL position and waits for the read pool to replay past it. Afterwards every message the user sent is
+   either visible on the read pool or tombstoned, so JetStream copies are found by `seq` and the stream is
+   never scanned.
+3. **Process eligible rows in pages.** The scan is `SELECT ... WHERE sender_id = $1 ORDER BY time, seq`
+   on the read pool. Each row is then changed on the write pool, keyed by `(room_id, seq)`. `delete` calls
+   the checked `redact_message`, which leaves a tombstone. `anonymize` decrypts the row with its old
+   sender in the associated data, re-encrypts it with the active key and `dotwire:erased` in the
+   associated data, and calls `reattribute_message`. That `SECURITY DEFINER` function changes only rows
+   whose `sender_id` matches the old id, sets `dotwire:erased` itself, requires an open erasure for that
+   id, and runs the same eligibility check and locks. Rows that cannot be decrypted are deleted instead,
+   and logged by id. Plaintext lives only in a local buffer, which is zeroed after use and never logged.
+   A JetStream copy newer than `Nats:RoomsMaxAgeHours` is deleted by `seq`, with the subject check used
+   for redaction, and not-found is ignored.
+4. **Notify.** After each page commits, the worker publishes `user.erased` notices with `status: partial`
+   for the `(roomId, seq)` pairs it just processed (see "Erasure notices"), and a `MessagesErased` event
+   on each room's `ephemeral.erased` subject.
+
+To finish, the worker takes the primary's WAL position, waits for the read pool to replay past it, and
+recounts the user's rows on the read pool. If none remain, it writes the `user.erased` audit event,
+inserts `erasure_completions`, and publishes a final `completed` notice with no pairs. Otherwise the
+erasure stays open until the next wake. Every step can be re-run after a crash, and no progress state is
+stored. `GET /admin/erasures/{id}` computes its status live: `completed` once a completion row exists,
+otherwise `in_progress`, or `waiting` with `blockedBy` drawn from `legal_hold`, `minimum_keep` and
+`changes_not_allowed`. A held room therefore shows `waiting` until the hold is released.
+
+Read and write split: the scan reads the read pool, and the LSN gates above keep it current. Every
+mutation runs on the write pool through a `SECURITY DEFINER` function. The worker never writes through
+the read pool. On compressed chunks, each row update decompresses one batch (about 169 tuples, 1.3 ms
+in the TimescaleDB 2.32 probe), and the updated rows stay uncompressed until the policy recompresses
+the chunk. The sender scan is bloom-filtered on 2.32, so it skips most batches. Older versions may read
+every batch. Messages still in the postsend queue when an erasure starts can reach the postsend
+webhook after it, and the completion notice covers them. Audit events keep their ids after erasure.
+
+**Erasure notices.** Notices are a durable feed to the host's own receivers, enabled by
+`Dotwire:Webhooks:Erasure:Url`. Unset means nothing is published. The URL follows the usual webhook rule,
+`https` or loopback unless `Dotwire:Webhooks:AllowInsecureUrls=true`. Startup warns when
+`Dotwire:Webhooks:PostSend:Url` is set without it, because the postsend receiver holds copies that it is
+never told to erase. When the URL is set, `JetStreamProvisioner` creates the `ERASURES` stream (subject
+`dotwire.erasures`, file storage, work-queue retention, `Nats:ErasureNoticesMaxAgeHours`) and the durable
+pull consumer `erasure-notifier`. The consumer uses explicit acks, an ack wait of at least 30 s and twice
+`Dotwire:Webhooks:Erasure:TimeoutMs`, unlimited deliveries, and backoff. `ErasureNotifierService` runs on
+`All` and `Api` nodes. It POSTs each notice signed the way postsend is signed (`X-Dotwire-Timestamp`,
+`X-Dotwire-Signature-V2` and the legacy header). It acks on `2xx` and naks with a delay otherwise. Several
+nodes may pull from the one consumer, and each notice goes to one puller at a time.
+
+Delivery is at-least-once, so receivers must be idempotent. A notice older than `MaxAge` expires silently,
+because JetStream drops it without telling any consumer. Each failed attempt is therefore logged and
+counted in `dotwire.webhook.erasure.failed`, and the README tells operators to alert on it. The payload is
+`ErasureNotice { event: "message.redacted" | "user.erased", time, roomId?, seq?, reason?, userId?, mode?,
+erasureId?, status?, messages? }`. It carries ids only, and `messages` lists at most 1,000 `{roomId, seq}`
+pairs per notice. `reason` appears only for emergency deletions. The contract for receivers is:
+
+- On `user.erased` with `status: partial`, apply `mode` to exactly the listed messages: delete them, or set
+  their sender to `dotwire:erased`.
+- On `status: completed`, drop any remaining non-message data for `userId`, because dotwire holds no more
+  messages from that user.
+- Never re-derive hold or keep rules. dotwire has already applied them, and only lists what it changed.
+
+When the URL is unset, nothing is published, and redaction and erasure skip the `notice_unavailable` step.

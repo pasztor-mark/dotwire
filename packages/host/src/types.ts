@@ -28,6 +28,7 @@ export interface DotwireHostConfig {
   presend?: (ctx: PresendContext) => Promise<PresendResult> | PresendResult;
   /** Same idea as {@link presend}, run after a message is accepted; see {@link PostSendContext}. */
   postSend?: (ctx: PostSendContext) => Promise<void> | void;
+  onErasure?: (notice: ErasureNotice) => Promise<void> | void;
 }
 
 export interface MintTokenOptions {
@@ -158,6 +159,12 @@ export interface AuditCheckpointsResponse {
   checkpoints: AuditCheckpointEntry[];
 }
 
+export interface AuditArchiveResult {
+  count: number;
+  lastId: number;
+  lastHash: string | null;
+}
+
 export interface UserExportMessage {
   roomId: string;
   seq: number;
@@ -222,6 +229,7 @@ export interface TokenResponseOptions {
 export type RoomEvent =
   | { type: 'message'; roomId: string; seq: number; senderId: string; time: string; content: string; replayed?: boolean }
   | { type: 'retracted'; roomId: string; seq: number }
+  | { type: 'erased'; roomId: string; mode: 'anonymize' | 'delete'; seqs: number[] }
   | { type: 'typing'; roomId: string; userId: string; isTyping: boolean }
   | { type: 'presence'; roomId: string; joined: string[]; left: string[] }
   | { type: 'revoked'; roomId: string };
@@ -235,5 +243,58 @@ export interface ClientSendResult {
 /** Result of the two webhook handlers' body-based variants. */
 export interface WebhookResult {
   status: number;
-  body: { allow: boolean; content?: string; reason?: string } | Record<string, never>;
+  body: { allow: boolean; content?: string; reason?: string } | { error: string } | Record<string, never>;
+}
+
+export interface ComplianceSettings {
+  allowChanges: boolean;
+  minimumKeepDays: number;
+  erasureMode: string;
+  activeHolds: number;
+  retentionPaused: boolean;
+}
+
+export interface LegalHold {
+  id: number;
+  scope: string;
+  roomId: string | null;
+  userId: string | null;
+  matterRef: string;
+  placedBy: string;
+  placedAt: string;
+  releasedAt: string | null;
+  releasedBy: string | null;
+}
+
+export type EmergencyDeleteReason = 'illegal_content' | 'court_order';
+
+export type ErasureMode = 'anonymize' | 'delete';
+
+export interface ErasureStatus {
+  id: number;
+  userId: string;
+  mode: string;
+  requestedAt: string;
+  status: string;
+  remaining: number;
+  blockedBy: string[];
+  completedAt: string | null;
+}
+
+export interface ErasedMessageRef {
+  roomId: string;
+  seq: number;
+}
+
+export interface ErasureNotice {
+  event: string;
+  time: string;
+  roomId?: string;
+  seq?: number;
+  reason?: string;
+  userId?: string;
+  mode?: string;
+  erasureId?: number;
+  status?: string;
+  messages?: ErasedMessageRef[];
 }

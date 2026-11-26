@@ -31,6 +31,7 @@ public class RealtimeLoadTests : IClassFixture<WebApplicationFactory<Program>>
 
         _factory = factory.WithWebHostBuilder(b =>
         {
+            b.WithoutErasureWorker();
             if (_canRunIntegration)
             {
                 b.UseSetting("ConnectionStrings:PostgresMigrator",

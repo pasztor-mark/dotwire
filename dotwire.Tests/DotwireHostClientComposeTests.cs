@@ -21,6 +21,7 @@ public class DotwireHostClientComposeTests : IDisposable
 
     private readonly WebApplicationFactory<Program> _factory;
     private readonly string _pgPassword;
+    private readonly string _appPassword;
 
     public DotwireHostClientComposeTests()
     {
@@ -30,16 +31,28 @@ public class DotwireHostClientComposeTests : IDisposable
         DotNetEnv.Env.TraversePath().Load();
         _pgPassword = Environment.GetEnvironmentVariable("POSTGRES_PASSWORD")
             ?? throw new InvalidOperationException("POSTGRES_PASSWORD missing from .env");
-        var appPassword = Environment.GetEnvironmentVariable("POSTGRES_APP_PASSWORD")!;
+        _appPassword = Environment.GetEnvironmentVariable("POSTGRES_APP_PASSWORD")!;
 
-        _factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+        _factory = NewFactory(erasureWorker: false);
+        _ = _factory.Services;
+    }
+
+    private WebApplicationFactory<Program> NewFactory(bool erasureWorker) => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
         {
+            if (erasureWorker)
+            {
+                b.UseSetting("Dotwire:MembershipSweepSeconds", "1");
+            }
+            else
+            {
+                b.WithoutErasureWorker();
+            }
             b.UseSetting("ConnectionStrings:PostgresMigrator",
                 $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire;Password={_pgPassword}");
             b.UseSetting("ConnectionStrings:PostgresWrite",
-                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
+                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
             b.UseSetting("ConnectionStrings:PostgresRead",
-                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={appPassword}");
+                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
             b.UseSetting("Postgres:Migrate", "true");
             b.UseSetting("Nats:Url", "nats://127.0.0.1:4222");
             b.UseSetting("Nats:Enabled", "true");
@@ -50,8 +63,6 @@ public class DotwireHostClientComposeTests : IDisposable
             b.UseSetting("Dotwire:Encryption:Keys:it",
                 Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
         });
-        _ = _factory.Services;
-    }
 
     public void Dispose() => _factory?.Dispose();
 
@@ -73,9 +84,9 @@ public class DotwireHostClientComposeTests : IDisposable
     /// A fresh <see cref="DotwireHostClient"/> wired against the in-process factory, minting
     /// tokens under a throwaway key that dotwire is configured to trust (Auth:Keys:test-key-1).
     /// </summary>
-    private DotwireHostClient MakeClient(string? auditorUserId = null)
+    private DotwireHostClient MakeClient(string? auditorUserId = null, WebApplicationFactory<Program>? factory = null)
     {
-        var http = _factory.CreateClient();
+        var http = (factory ?? _factory).CreateClient();
         var options = new DotwireHostOptions
         {
             BaseUrl = http.BaseAddress!,
@@ -336,5 +347,26 @@ public class DotwireHostClientComposeTests : IDisposable
         Assert.NotNull(received);
         Assert.Equal("live via sse", received!.Content);
         await cts.CancelAsync();
+    }
+
+    [Fact]
+    public async Task EraseUserAsync_ReachesCompleted_ThroughErasureWorker()
+    {
+        using var factory = NewFactory(erasureWorker: true);
+        var client = MakeClient(factory: factory);
+        var userId = $"erase-{Guid.NewGuid():N}";
+        await SeedMemberAsync(userId, Guid.NewGuid());
+
+        var started = await client.EraseUserAsync(userId, ErasureMode.Anonymize, TestContext.Current.CancellationToken);
+
+        var status = started;
+        var deadline = DateTime.UtcNow.AddSeconds(60);
+        while (status.Status != "completed" && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(250, TestContext.Current.CancellationToken);
+            status = await client.GetErasureAsync(started.Id, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal("completed", status.Status);
     }
 }

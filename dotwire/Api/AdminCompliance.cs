@@ -2,9 +2,11 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using Dotwire.Auth;
+using Dotwire.Configuration;
 using Dotwire.Crypto;
 using Dotwire.Data;
 using Dotwire.Nats;
+using Microsoft.Extensions.Options;
 using Npgsql;
 
 namespace Dotwire.Api;
@@ -19,20 +21,26 @@ public static partial class Admin
             [FromKeyedServices(PostgresDataSources.Read)] NpgsqlDataSource readDataSource,
             HttpContext http) =>
         {
-            await using var cmd = readDataSource.CreateCommand("SELECT get_message_retention()");
-            var days = (int)(await cmd.ExecuteScalarAsync(http.RequestAborted))!;
-            return Results.Ok(new RetentionResponse(days));
+            await using var cmd = readDataSource.CreateCommand("SELECT get_message_retention(), get_retention_paused()");
+            await using var reader = await cmd.ExecuteReaderAsync(http.RequestAborted);
+            await reader.ReadAsync(http.RequestAborted);
+            return Results.Ok(new RetentionResponse(reader.GetInt32(0), reader.GetBoolean(1)));
         });
 
         group.MapPut("/retention", async (
             SetRetentionRequest request,
             [FromKeyedServices(PostgresDataSources.Write)] NpgsqlDataSource writeDataSource,
             AuditPublisher auditPublisher,
+            IOptions<ComplianceOptions> compliance,
             ILoggerFactory loggerFactory,
             HttpContext http) =>
         {
             if (request.MessagesDays < 0 || request.MessagesDays > 36500)
                 return ApiResults.InvalidRequest("messagesDays must be between 0 and 36500");
+
+            var minimumKeepDays = compliance.Value.MinimumKeepDays;
+            if (request.MessagesDays > 0 && request.MessagesDays < minimumKeepDays)
+                return ApiResults.Conflict("minimum_keep", $"messagesDays must be 0 or at least {minimumKeepDays}");
 
             await using var conn = await writeDataSource.OpenConnectionAsync(http.RequestAborted);
             await using var tx = await conn.BeginTransactionAsync(http.RequestAborted);
@@ -42,6 +50,10 @@ public static partial class Admin
                 await cmd.ExecuteScalarAsync(http.RequestAborted);
             }
 
+            bool paused;
+            await using (var pausedCmd = new NpgsqlCommand("SELECT get_retention_paused()", conn, tx))
+                paused = (bool)(await pausedCmd.ExecuteScalarAsync(http.RequestAborted))!;
+
             var actorId = http.User.FindFirstValue("sub")!;
             var audit = new AuditEvent("retention.set", null, null, actorId, null, request.MessagesDays, DateTimeOffset.UtcNow);
             if (!await TryAuditAsync(auditPublisher, audit, AdminLogger(loggerFactory), http.RequestAborted))
@@ -49,7 +61,25 @@ public static partial class Admin
 
             await tx.CommitAsync(CancellationToken.None);
 
-            return Results.Ok(new RetentionResponse(request.MessagesDays));
+            return Results.Ok(new RetentionResponse(request.MessagesDays, paused));
+        });
+
+        group.MapGet("/compliance", async (
+            [FromKeyedServices(PostgresDataSources.Read)] NpgsqlDataSource readDataSource,
+            IOptions<ComplianceOptions> compliance,
+            HttpContext http) =>
+        {
+            await using var cmd = readDataSource.CreateCommand(
+                "SELECT (SELECT count(*) FROM legal_holds h WHERE NOT EXISTS (SELECT 1 FROM legal_hold_releases r WHERE r.hold_id = h.id)), get_retention_paused()");
+            await using var reader = await cmd.ExecuteReaderAsync(http.RequestAborted);
+            await reader.ReadAsync(http.RequestAborted);
+            var options = compliance.Value;
+            return Results.Ok(new ComplianceResponse(
+                options.AllowChanges,
+                options.MinimumKeepDays,
+                ErasureModes.ToWire(options.Erasure.Mode),
+                (int)reader.GetInt64(0),
+                reader.GetBoolean(1)));
         });
 
         group.MapGet("/users/{userId}/export", async (

@@ -21,6 +21,10 @@
     </ItemGroup>
 
     <ItemGroup>
+      <None Include="Fixtures\audit-chain.json" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+
+    <ItemGroup>
       <ProjectReference Include="..\dotwire\dotwire.csproj" />
       <ProjectReference Include="..\Dotwire.Host\Dotwire.Host.csproj" />
     </ItemGroup>

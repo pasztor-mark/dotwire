@@ -82,6 +82,7 @@ public static class OfflineApp
         Action<IServiceCollection>? services = null) =>
         factory.WithWebHostBuilder(b =>
         {
+            b.WithoutErasureWorker();
             b.UseSetting("Postgres:Migrate", "false");
             b.UseSetting("ConnectionStrings:PostgresRead", "Host=localhost;Database=dotwire");
             b.UseSetting("ConnectionStrings:PostgresWrite", "Host=localhost;Database=dotwire");

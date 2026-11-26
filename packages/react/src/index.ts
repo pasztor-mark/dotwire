@@ -21,6 +21,7 @@ export type {
   HistoryPage,
   MembershipRevoked,
   MessageRetracted,
+  MessagesErased,
   PresenceDelta,
   RoomMessage,
   SendAck,

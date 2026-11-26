@@ -37,6 +37,9 @@ public static partial class Admin
             await using var tx = await conn.BeginTransactionAsync(ct);
             await LockRoleMutationsAsync(conn, tx, ct);
 
+            if (await ErasureStatusQuery.OpenErasureIdAsync(conn, tx, userId, ct) is not null)
+                return ApiResults.Conflict("erasure_open", $"erasure open for {userId}");
+
             var previous = await CurrentRoleForUpdateAsync(conn, tx, userId, ct);
             if (previous == "admin" && request.Role != "admin" && !await HasOtherAdminAsync(conn, tx, userId, ct))
                 return ApiResults.Conflict("last_admin", "cannot demote the last admin");
@@ -109,30 +112,9 @@ public static partial class Admin
             if (previous == "admin" && !await HasOtherAdminAsync(conn, tx, userId, ct))
                 return ApiResults.Conflict("last_admin", "cannot delete the last admin");
 
-            var roomIds = new List<Guid>();
-            await using (var delMembers = new NpgsqlCommand("DELETE FROM room_members WHERE user_id = $1 RETURNING room_id", conn, tx))
-            {
-                delMembers.Parameters.AddWithValue(userId);
-                await using var reader = await delMembers.ExecuteReaderAsync(ct);
-                while (await reader.ReadAsync(ct))
-                    roomIds.Add(reader.GetGuid(0));
-            }
-
-            await using (var delRoles = new NpgsqlCommand("DELETE FROM user_roles WHERE user_id = $1", conn, tx))
-            {
-                delRoles.Parameters.AddWithValue(userId);
-                await delRoles.ExecuteNonQueryAsync(ct);
-            }
-
-            var now = DateTimeOffset.UtcNow;
-            if (!await TryAuditAsync(auditPublisher, new AuditEvent("role.deleted", null, null, actorId, userId, null, now), logger, ct))
+            var roomIds = await RevokeUserAccessAsync(conn, tx, auditPublisher, logger, actorId, userId, true, ct);
+            if (roomIds is null)
                 return ApiResults.AuditUnavailable();
-
-            foreach (var roomId in roomIds)
-            {
-                if (!await TryAuditAsync(auditPublisher, new AuditEvent("member.removed", roomId, null, actorId, userId, null, now), logger, ct))
-                    return ApiResults.AuditUnavailable();
-            }
 
             await tx.CommitAsync(CancellationToken.None);
 

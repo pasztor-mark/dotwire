@@ -9,6 +9,7 @@ export type DotwireApiErrorKind =
   | 'Unauthorized'
   | 'Forbidden'
   | 'NotFound'
+  | 'Conflict'
   | 'PresendRejected'
   | 'RateLimited'
   | 'Unavailable'
@@ -61,6 +62,8 @@ export function mapErrorKind(status: number, code?: string): DotwireApiErrorKind
       return 'Forbidden';
     case 404:
       return 'NotFound';
+    case 409:
+      return 'Conflict';
     case 422:
       return code === 'presend_rejected' ? 'PresendRejected' : 'BadRequest';
     case 429:

@@ -32,6 +32,7 @@ public class AccessCacheComposeTests : IClassFixture<WebApplicationFactory<Progr
 
         _factory = factory.WithWebHostBuilder(b =>
         {
+            b.WithoutErasureWorker();
             b.UseSetting("ConnectionStrings:PostgresMigrator", _ownerConnectionString);
             b.UseSetting("ConnectionStrings:PostgresWrite", appConnectionString);
             b.UseSetting("ConnectionStrings:PostgresRead", appConnectionString);

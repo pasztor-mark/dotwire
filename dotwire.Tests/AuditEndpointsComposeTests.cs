@@ -37,6 +37,7 @@ public class AuditEndpointsComposeTests : IClassFixture<WebApplicationFactory<Pr
 
         _factory = factory.WithWebHostBuilder(b =>
         {
+            b.WithoutErasureWorker();
             b.UseSetting("ConnectionStrings:PostgresMigrator",
                 $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire;Password={_pgPassword}");
             b.UseSetting("ConnectionStrings:PostgresWrite",

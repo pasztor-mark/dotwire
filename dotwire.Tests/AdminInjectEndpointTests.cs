@@ -19,6 +19,7 @@ public class AdminInjectEndpointTests : IClassFixture<WebApplicationFactory<Prog
     {
         _factory = factory.WithWebHostBuilder(b =>
         {
+            b.WithoutErasureWorker();
             b.UseSetting("Postgres:Migrate", "false");
             b.UseSetting("ConnectionStrings:PostgresRead", "Host=localhost;Database=dotwire");
             b.UseSetting("ConnectionStrings:PostgresWrite", "Host=localhost;Database=dotwire");

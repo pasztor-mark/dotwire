@@ -34,4 +34,7 @@ public sealed class DotwireRoom(IDotwireHostClient client, Guid roomId)
 
     public Task<RedactMessageResult> RedactAsync(ulong seq, CancellationToken ct = default) =>
         client.RedactMessageAsync(RoomId, seq, ct);
+
+    public Task<RedactMessageResult> EmergencyDeleteAsync(ulong seq, EmergencyDeletionReason reason, CancellationToken ct = default) =>
+        client.EmergencyDeleteMessageAsync(RoomId, seq, reason, ct);
 }

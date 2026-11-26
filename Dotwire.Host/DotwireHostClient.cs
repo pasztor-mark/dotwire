@@ -37,6 +37,8 @@ public sealed partial class DotwireHostClient : IDotwireHostClient
     /// <inheritdoc />
     public Func<PostSendContext, CancellationToken, Task>? PostSend { get; set; }
 
+    public Func<ErasureNotice, CancellationToken, Task>? Erasure { get; set; }
+
     /// <inheritdoc />
     public string MintToken(string userId, string? role = null, string? displayName = null, TimeSpan? ttl = null) =>
         _signer.MintToken(userId, role ?? "member", displayName, ttl);

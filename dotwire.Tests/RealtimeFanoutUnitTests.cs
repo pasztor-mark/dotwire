@@ -1,6 +1,8 @@
 using System.Reflection;
 using System.Security.Claims;
 using System.Security.Cryptography;
+using System.Text.Json;
+using System.Threading.Channels;
 using Dotwire.Api;
 using Dotwire.Configuration;
 using Dotwire.Crypto;
@@ -143,6 +145,72 @@ public class RealtimeFanoutUnitTests
 
         var cooldowns = (int)(elapsed.Elapsed / TimeSpan.FromMilliseconds(500)) + 1;
         Assert.InRange(nats.Published, 2, 2 * cooldowns);
+    }
+
+    public class SubjectSubscribingNats : DispatchProxy
+    {
+        public readonly Dictionary<string, Channel<NatsMsg<byte[]>>> Subjects = new(StringComparer.Ordinal);
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            switch (targetMethod?.Name)
+            {
+                case "SubscribeCoreAsync":
+                    var subject = (string)args![0]!;
+                    var channel = Channel.CreateUnbounded<NatsMsg<byte[]>>();
+                    lock (Subjects)
+                        Subjects[subject] = channel;
+                    var sub = DispatchProxy.Create<INatsSub<byte[]>, FakeSubject>();
+                    ((FakeSubject)(object)sub).Channel = channel;
+                    return ValueTask.FromResult(sub);
+                case "PingAsync":
+                    return ValueTask.FromResult(TimeSpan.Zero);
+                case "PublishAsync":
+                    return ValueTask.CompletedTask;
+                default:
+                    throw new NotSupportedException(targetMethod?.Name);
+            }
+        }
+    }
+
+    public class FakeSubject : DispatchProxy
+    {
+        public Channel<NatsMsg<byte[]>> Channel = null!;
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) => targetMethod?.Name switch
+        {
+            "get_Msgs" => Channel.Reader,
+            "DisposeAsync" => ValueTask.CompletedTask,
+            "UnsubscribeAsync" => ValueTask.CompletedTask,
+            _ => throw new NotSupportedException(targetMethod?.Name),
+        };
+    }
+
+    [Fact]
+    public async Task ErasedEvent_RelaysToSseAsErasedEvent()
+    {
+        var nats = DispatchProxy.Create<INatsConnection, SubjectSubscribingNats>();
+        var counting = (SubjectSubscribingNats)(object)nats;
+        var interestManager = new RoomInterestManager(
+            nats,
+            new RoomHubLifetimeManager(NullLogger<DefaultHubLifetimeManager<RoomHub>>.Instance),
+            new MessageCipher(Options.Create(new EncryptionOptions { ActiveKeyId = "k1", Keys = { ["k1"] = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)) } })),
+            new PresenceCoalescer(nats, Options.Create(new NatsOptions { Enabled = false }), NullLogger<PresenceCoalescer>.Instance),
+            Options.Create(new NatsOptions { Enabled = true }),
+            NullLogger<RoomInterestManager>.Instance,
+            TestMetrics.Create().Metrics);
+        var (reader, _) = await interestManager.RegisterSseConnectionAsync(RoomId, "sse-1", "user-1", bufferSize: 8);
+
+        var ephemeral = $"room.{RoomId}.ephemeral.>";
+        Channel<NatsMsg<byte[]>> channel;
+        lock (counting.Subjects)
+            channel = counting.Subjects[ephemeral];
+        var data = JsonSerializer.SerializeToUtf8Bytes(new MessagesErased(RoomId, "anonymize", [5UL, 6UL]), DotwireJsonContext.Default.MessagesErased);
+        await channel.Writer.WriteAsync(new NatsMsg<byte[]>($"room.{RoomId}.ephemeral.erased", null, 0, null, data, null, default), TestContext.Current.CancellationToken);
+
+        var evt = await reader.ReadAsync(TestContext.Current.CancellationToken).AsTask().WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Equal("erased", evt.EventName);
+        Assert.Equal(data, evt.Data);
     }
 
     [Fact]

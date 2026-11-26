@@ -231,3 +231,70 @@ test('a full moderation queue rejects aborted and timed-out enqueues instead of 
   await assert.rejects(() => queue.enqueue(item, controller.signal), /caller gave up/);
   await assert.rejects(() => queue.enqueue(item), /stayed full/);
 });
+
+function erasureBody(): string {
+  return JSON.stringify({ event: 'user.erased', time: 't', userId: 'user-1', mode: 'anonymize', erasureId: 3, status: 'completed' });
+}
+
+test('erasure webhook refuses to run without a secret unless unsigned calls are explicitly allowed', async () => {
+  const client = new DotwireHostClient(baseConfig());
+
+  await assert.rejects(() => client.handleErasureWebhook(new Request('https://h.test', { method: 'POST', body: erasureBody() })), /webhookSecret/);
+  await assert.rejects(() => client.handleErasureWebhookBody({}, null), /webhookSecret/);
+});
+
+test('a verified erasure webhook is delivered to onErasure and answers 200', async () => {
+  let seen: unknown;
+  const client = new DotwireHostClient(
+    baseConfig({
+      webhookSecret: SECRET,
+      onErasure: (notice) => {
+        seen = notice;
+      }
+    })
+  );
+  const body = erasureBody();
+
+  const res = await client.handleErasureWebhook(signedRequest(body, Math.floor(Date.now() / 1000)));
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), {});
+  assert.deepEqual(seen, JSON.parse(body));
+});
+
+test('an erasure webhook with a bad signature is rejected with 401 and onErasure is not called', async () => {
+  let called = false;
+  const client = new DotwireHostClient(
+    baseConfig({
+      webhookSecret: SECRET,
+      onErasure: () => {
+        called = true;
+      }
+    })
+  );
+  const body = erasureBody();
+  const ts = String(Math.floor(Date.now() / 1000));
+
+  const result = await client.handleErasureWebhookBody(JSON.parse(body), 'sha256=nope', body, { timestamp: ts, signatureV2: 'sha256=nope' });
+
+  assert.equal(result.status, 401);
+  assert.equal(called, false);
+});
+
+test('a throwing onErasure answers 500 so dotwire retries the notice', async () => {
+  const client = new DotwireHostClient(
+    baseConfig({
+      webhookSecret: SECRET,
+      onErasure: () => {
+        throw new Error('store down');
+      }
+    })
+  );
+  const body = erasureBody();
+  const ts = String(Math.floor(Date.now() / 1000));
+
+  const result = await client.handleErasureWebhookBody(JSON.parse(body), null, body, { timestamp: ts, signatureV2: sign(`${ts}.${body}`) });
+
+  assert.equal(result.status, 500);
+  assert.deepEqual(result.body, { error: 'erasure_handler_failed' });
+});

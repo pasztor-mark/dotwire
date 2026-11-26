@@ -50,4 +50,22 @@ public class IdValidationTests
     {
         Assert.True(IdValidation.IsValid(id));
     }
+
+    [Fact]
+    public void ReservedErasedId_IsInvalid()
+    {
+        Assert.False(IdValidation.IsValid("dotwire:erased"));
+    }
+
+    [Fact]
+    public void ReservedErasedId_WithSuffix_IsValid()
+    {
+        Assert.True(IdValidation.IsValid("dotwire:erasedX"));
+    }
+
+    [Fact]
+    public void ReservedErasedId_IsCaseSensitive()
+    {
+        Assert.True(IdValidation.IsValid("Dotwire:erased"));
+    }
 }

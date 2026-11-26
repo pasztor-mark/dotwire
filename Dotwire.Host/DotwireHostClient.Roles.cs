@@ -34,6 +34,27 @@ public sealed partial class DotwireHostClient
     public Task DeleteUserRoleAsync(string userId, CancellationToken ct = default) =>
         SendAsync(HttpMethod.Delete, $"/admin/users/{Uri.EscapeDataString(userId)}/role", AdminToken(), ct);
 
+    public Task<ErasureStatus> EraseUserAsync(string userId, ErasureMode? mode = null, CancellationToken ct = default)
+    {
+        var body = JsonBody(new EraseUserRequestDto(mode is { } m ? ErasureModeWire(m) : null), DotwireHostJsonContext.Default.EraseUserRequestDto);
+        return SendAsync(HttpMethod.Post, $"/admin/users/{Uri.EscapeDataString(userId)}/erase", AdminToken(),
+            DotwireHostJsonContext.Default.ErasureStatus, ct, body);
+    }
+
+    public Task<ErasureStatus> GetErasureAsync(long erasureId, CancellationToken ct = default) =>
+        SendAsync(HttpMethod.Get, $"/admin/erasures/{erasureId}", AdminToken(), DotwireHostJsonContext.Default.ErasureStatus, ct);
+
+    public async Task<IReadOnlyList<ErasureStatus>> ListUserErasuresAsync(string userId, CancellationToken ct = default) =>
+        await SendAsync(HttpMethod.Get, $"/admin/users/{Uri.EscapeDataString(userId)}/erasures", AdminToken(),
+            DotwireHostJsonContext.Default.ErasureStatusArray, ct);
+
+    private static string ErasureModeWire(ErasureMode mode) => mode switch
+    {
+        ErasureMode.Anonymize => "anonymize",
+        ErasureMode.Delete => "delete",
+        _ => throw new ArgumentOutOfRangeException(nameof(mode)),
+    };
+
     /// <inheritdoc />
     public async Task<IReadOnlyList<Guid>> GetUserRoomsAsync(string userId, CancellationToken ct = default)
     {

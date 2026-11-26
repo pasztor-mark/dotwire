@@ -1,6 +1,7 @@
 import type { DotwireHostClient } from './client.js';
 import type {
   AddRoomMembersOptions,
+  EmergencyDeleteReason,
   GetMessagesOptions,
   RedactMessageResponse,
   RoomEvent,
@@ -55,5 +56,9 @@ export class DotwireHostRoom {
 
   redact(seq: number): Promise<RedactMessageResponse> {
     return this.client.redactMessage(this.roomId, seq);
+  }
+
+  emergencyDelete(seq: number, reason: EmergencyDeleteReason): Promise<RedactMessageResponse> {
+    return this.client.emergencyDeleteMessage(this.roomId, seq, reason);
   }
 }

@@ -12,7 +12,8 @@
 
 dotwire is a free, open-source chat layer you embed in your own application. Your app keeps owning its users and signs the JWTs; dotwire verifies them and handles realtime delivery, message persistence and ordering, and a tamper-evident audit log. It ships APIs and SDKs, not a chat UI, so you build the interface your product needs.
 
-> **Early release (v0.5).** APIs and deployment guidance may still change, and dotwire isn't used in production yet, so evaluate it carefully before relying on it. Feedback and issues are welcome.
+> **Early release (v0.6).** APIs and deployment guidance may still change, and dotwire isn't used in production yet, so evaluate it carefully before relying on it. Feedback and issues are welcome.
+
 
 ---
 
@@ -38,7 +39,7 @@ The whole stack (dotwire, Postgres + TimescaleDB, NATS JetStream, Next.js, Caddy
 * **Shard-Key Discipline:** Hot-path queries include `room_id`; TimescaleDB hypertables support time-based retention through chunk drops.
 * **Envelope Encryption at Rest:** Payloads are encrypted with AES-256-GCM (`nonce(12) ‖ ciphertext ‖ tag(16)`) at the gateway before publishing to JetStream or writing to disk. Key IDs travel alongside envelopes for zero-downtime key rotation.
 * **Tamper-Evident Audit Chain:** Append-only compliance log hash-chained with SHA-256, anchored by periodic checkpoints, verifiable via `GET /audit/verify`, and protected with database-level revoked grants and guard triggers.
-* **Compliance Surface:** Redaction, DSAR export, and configurable retention (Postgres chunk drops + JetStream `MaxAge`) via the admin API and both host SDKs.
+* **Compliance Surface:** Redaction, emergency deletion, legal holds, account erasure with optional erasure notices, DSAR export, and configurable retention (Postgres chunk drops + JetStream `MaxAge`) via the admin API and both host SDKs. Settings are in [Compliance settings](#compliance-settings).
 * **Webhooks & SSE:** Optional presend/postsend webhook call-outs for host-side moderation, and a resumable Server-Sent Events read path alongside SignalR.
 * **Per-Node Rate Limiting:** In-process token-bucket limits on send, read, admin, and hub routes — no external dependency.
 * **OpenTelemetry Observability:** OTLP metrics for the send path, fanout, auth lookups, JetStream lag and database pools, opt-in traces scrubbed to an allowlist of tags (no ids, SQL, or content), and an optional Grafana overlay with a provisioned dashboard. See [Metrics](#metrics) and [Tracing](#tracing).
@@ -140,6 +141,15 @@ Coding agents integrating chat into a host app can start with the [SDK guide](do
 | [`@dotwire/react`](packages/react) | React 18+ | `DotwireProvider`, `useRoom`, `useTyping`, `usePresence`, `useConnectionState` hooks over `@dotwire/client` | [React README](packages/react/README.md) |
 | [`Dotwire.Host`](Dotwire.Host) | .NET 8/9/10 C# Backend | C# RS256 JWT minting, `Presend`/`PostSend` moderation hooks, batched async review, redaction, webhooks, audit, retention, DSAR | [.NET Host README](Dotwire.Host/README.md) |
 
+Compliance methods, present in both host SDKs (the .NET names carry an `Async` suffix and use `ErasureMode` and `EmergencyDeletionReason` enums):
+
+* Settings and holds: `getComplianceSettings`, `placeRoomLegalHold`, `placeUserLegalHold`, `releaseLegalHold`, `listLegalHolds`.
+* Deletion and erasure: `emergencyDeleteMessage`, `eraseUser`, `getErasure`, `listUserErasures`.
+* Erasure notices: `handleErasureWebhook` (or `handleErasureWebhookBody`) with the `onErasure` handler (`Erasure` in .NET).
+* Export and archive: `exportRoomHistory` (room history as NDJSON), `archiveAuditLog` (audit log as NDJSON with hash re-verification).
+
+`@dotwire/client` adds `onMessagesErased` on the client and room handles, and `@dotwire/react` applies erasures in `useRoom`. Signatures are in the [Host README](packages/host/README.md) and the [.NET Host README](Dotwire.Host/README.md).
+
 ---
 
 <a id="docs"></a>
@@ -156,7 +166,7 @@ The architecture is governed by normative contracts:
 4. **[COMPLIANCE.md](COMPLIANCE.md)** — Compliance controls inventory, encryption, redaction, and audit logging.
 5. **[AGENTS.md](AGENTS.md)** — Hard architectural conventions for AI pair programmers and human contributors.
 
-Upgrading? See **[UPGRADING.md](UPGRADING.md)** (0.3 to 0.4 has no breaking changes; 0.2 to 0.3 does).
+Upgrading? See **[UPGRADING.md](UPGRADING.md)** (0.5 to 0.6 has one technically breaking edge, the reserved id `dotwire:erased`; 0.3 to 0.4 has no breaking changes; 0.2 to 0.3 does). Compliance presets and a privacy-notice template are in [docs/compliance-presets.md](docs/compliance-presets.md) and [docs/privacy-notice-template.md](docs/privacy-notice-template.md).
 
 ---
 
@@ -184,9 +194,28 @@ Pick the row that matches your expected traffic; no benchmarking is needed. Defa
 | **Load testing** | Raise `Dotwire__RateLimits__Send__PermitLimit` (and `TokensPerPeriod`) so the per-user limit is not what you measure. `Dotwire__DisableAllLogging=true` for peak numbers only. | Production runs keep rate limits on. |
 | **Beyond one node (sustained above ~7k messages/s, or ~100k+ connections)** | `Dotwire__Role=Gateway` on socket nodes, `Api` on REST/admin nodes. Gateways hold no migrator credentials. Point the read pool at the primary or a synchronous replica if demotions must apply at once. | Batching and cache stay per-node and off unless needed; the cache runs on `All` and `Api` nodes only. |
 | **Compliance-strict** | `Dotwire__Retention__MessagesDays` (manage it here or through the admin API, not both). `Dotwire__Encryption__AllowLegacyEnvelopes=false` on new installs, or once no legacy rows remain. Archive `audit_checkpoints` off the database. | `RateLimits__Enabled=true`, auth cache off, encryption keys per [COMPLIANCE.md](COMPLIANCE.md). |
+| **Compliance: write-once or minimum keep** | `Dotwire__Compliance__AllowChanges=false` (redaction and erasure never change a message) and/or `Dotwire__Compliance__MinimumKeepDays` set to the period your counsel confirms. Placing a hold pauses retention, so set retention with holds in mind. | Erasure mode `anonymize` (the default) and the other keys in "Compliance settings" below. |
 | **Long-lived history, disk-bound** | `Dotwire__Compression__AfterDays=7`. Compresses chunks older than 7 days. It is opt-in and needs TimescaleDB 2.11 or later with the Timescale License (the `timescale/timescaledb` image). Apache-only builds, such as Azure Database for PostgreSQL, log a warning and stay uncompressed. Expect heavy I/O on the first policy run, which compresses the whole eligible backlog. `AfterDays * 24` must exceed `Nats:RoomsMaxAgeHours` (48 by default, so at least 3 days), or startup fails. Set `Dotwire__Retention__MessagesDays` too if history needs a bound. | Compression off (the default). Setting `0` only stops compressing new chunks; decompress old ones by hand. |
 | **Agents / harnesses** | `Dotwire__Sse__Enabled=true` (default). Raise `Dotwire__Sse__BufferSize` if consumers get disconnected as laggards. | `MaxReplayRows` and `ReplayPageSize`. |
 | **Moderation through webhooks** | `Dotwire__Webhooks__Secret`, `https` URLs, `Presend__FailPolicy=Closed` if unmoderated content is unacceptable, `Open` if availability matters more. Size `Presend__TimeoutMs` to your endpoint's p99. | `PostSend__QueueCapacity` and `MaxAttempts`. |
+
+### Compliance settings
+
+Every compliance key, with its default. Out-of-range values fail startup. Effective values are logged once at startup. They set technical behavior only; whether they meet your obligations is for you and your counsel to decide. See [COMPLIANCE.md](COMPLIANCE.md) and [docs/compliance-presets.md](docs/compliance-presets.md).
+
+| Key | Default | Range | What it does |
+|---|---|---|---|
+| `Dotwire__Compliance__AllowChanges` | `true` | bool | `false` makes redaction and erasure write-once: they never alter or remove a message. Retention and emergency deletion still remove data. |
+| `Dotwire__Compliance__MinimumKeepDays` | `0` | `0..36500` | Messages younger than this cannot be redacted, re-attributed or erased. Startup fails if `Dotwire__Retention__MessagesDays` is above `0` and below this value. |
+| `Dotwire__Compliance__Erasure__Mode` | `anonymize` | `anonymize`, `delete` | Mode used when an erase request omits `mode`. `anonymize` re-attributes messages to `dotwire:erased`; `delete` removes them. |
+| `Dotwire__Compliance__Erasure__RecheckMinutes` | `60` | `1..1440` | How often the erasure worker re-checks open erasures, besides its wake-ups on request and hold release. |
+| `Dotwire__Compliance__HoldRetentionWaitSeconds` | `30` | `0..600` | How long placing a hold waits for a running retention job to stop. The hold is placed even when the wait times out. |
+| `Dotwire__Webhooks__Erasure__Url` | unset | `https` or loopback | Enables erasure notices. Unset publishes nothing. `Dotwire__Webhooks__AllowInsecureUrls` applies as for other webhooks. |
+| `Dotwire__Webhooks__Erasure__TimeoutMs` | `2000` | integer | Timeout for one erasure-notice POST. The consumer's ack wait is the larger of 30 s and twice this value. |
+| `Nats__ErasureNoticesStream` | `ERASURES` | name | JetStream stream for erasure notices. Keep the default. |
+| `Nats__ErasureNoticesSubject` | `dotwire.erasures` | subject | Subject for erasure notices. Keep the default. |
+| `Nats__ErasureNoticesConsumer` | `erasure-notifier` | name | Durable pull consumer that delivers notices. Keep the default. |
+| `Nats__ErasureNoticesMaxAgeHours` | `168` | hours | A notice not delivered within this time expires, and JetStream drops it without telling anyone. Alert on `dotwire.webhook.erasure.failed`. |
 
 Keep these at their defaults in every scenario: `Nats__RoomsSubjectFilter`, NATS stream, subject and consumer names, `Dotwire__Encryption__Keys`, the `AllowInsecure*` switches and the `nofile`, GC and socket-backlog settings.
 
@@ -220,6 +249,7 @@ Instruments (meter `Dotwire`):
 | `dotwire.sse.active_connections` | ObservableGauge<long> | `{connection}` | none | `RoomInterestManager`: sum of `_sseChannels` per-room counts |
 | `dotwire.webhook.presend.results` | Counter<long> | `{call}` | `outcome` (`allowed`, `allowed_with_rewrite`, `rejected`, `unavailable`, `failed_open`) | `PresendWebhookClient.EvaluateAsync` / `Unavailable` |
 | `dotwire.webhook.postsend.dropped` | Counter<long> | `{event}` | `reason` (`queue_bytes`, `queue_full`, `max_attempts`) | `PostSendWebhookService` |
+| `dotwire.webhook.erasure.failed` | Counter<long> | `{attempt}` | none | `ErasureNotifierService`: each erasure-notice delivery attempt that fails (non-2xx, timeout or transport error). The notice is retried, but one that expires first is never delivered |
 | `dotwire.message.send.duration` | Histogram<double> | `s` | `transport` (`hub`, `rest`), `outcome` (`accepted`, `rejected`, `unavailable`) | `MessageSend.SendAsync`: validation, presend, encrypt, JetStream ack and live republish. Admin injection is not included |
 | `dotwire.jetstream.publish.duration` | Histogram<double> | `s` | `outcome` (`ok`, `error`) | `MessagePublisher`: the JetStream publish and ack only, for member sends and admin injection |
 | `dotwire.fanout.lag` | Histogram<double> | `s` | none | `RoomInterestManager`: message timestamp (set by the sending node before the publish) to local fanout. Includes clock skew between nodes |
@@ -262,6 +292,7 @@ Each limit is emitted as its own gauge, so these are ratios. The thresholds are 
 | `rate(webhook.presend.results{outcome=unavailable or failed_open})` | > 0 for 5 min | |
 | `rate(webhook.postsend.dropped)` | > 0 | |
 | JetStream gauges absent | | 5 min (poller failing or NATS unreachable) |
+| `rate(webhook.erasure.failed)` | > 0 for 5 min | > 0 for 1 h. An unacknowledged notice expires after `Nats__ErasureNoticesMaxAgeHours` (168 h by default), so sustained failure needs action before then |
 | Rejections (`dotwire.rejections`, `aspnetcore.rate_limiting.requests`) | deployment-specific, no default | |
 
 ## Tracing

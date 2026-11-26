@@ -31,15 +31,28 @@ public interface IDotwireHostClient
     Task<SendMessageResult> SendAsUserAsync(Guid roomId, string userId, string content, string? idempotencyKey, CancellationToken ct = default);
     Task<SendMessageResult> SendSystemMessageAsync(Guid roomId, string content, string senderId = "system", CancellationToken ct = default);
     Task<RoomHistory> GetMessagesAsync(Guid roomId, string asUserId, HistoryQuery? query = null, CancellationToken ct = default);
+    Task<long> ExportRoomHistoryAsync(Guid roomId, string asUserId, Stream destination, CancellationToken ct = default);
     IAsyncEnumerable<RoomEvent> StreamEventsAsync(Guid roomId, string asUserId, StreamOptions? options = null, CancellationToken ct = default);
     Task<RedactMessageResult> RedactMessageAsync(Guid roomId, ulong seq, CancellationToken ct = default);
+    Task<RedactMessageResult> EmergencyDeleteMessageAsync(Guid roomId, ulong seq, EmergencyDeletionReason reason, CancellationToken ct = default);
 
     Task<AuditPage> ReadAuditLogAsync(long afterId = 0, int limit = 100, CancellationToken ct = default);
     Task<AuditVerification> VerifyAuditLogAsync(bool full = false, CancellationToken ct = default);
     Task<IReadOnlyList<AuditCheckpoint>> GetAuditCheckpointsAsync(int limit = 30, CancellationToken ct = default);
+    Task<AuditArchiveResult> ArchiveAuditLogAsync(Stream destination, long afterId = 0, string? previousHash = null, CancellationToken ct = default);
 
     Task<int> GetMessageRetentionDaysAsync(CancellationToken ct = default);
     Task<int> SetMessageRetentionDaysAsync(int days, CancellationToken ct = default);
+
+    Task<ComplianceSettings> GetComplianceSettingsAsync(CancellationToken ct = default);
+    Task<LegalHold> PlaceRoomLegalHoldAsync(Guid roomId, string matterRef, CancellationToken ct = default);
+    Task<LegalHold> PlaceUserLegalHoldAsync(string userId, string matterRef, CancellationToken ct = default);
+    Task ReleaseLegalHoldAsync(long holdId, CancellationToken ct = default);
+    Task<IReadOnlyList<LegalHold>> ListLegalHoldsAsync(bool activeOnly = true, CancellationToken ct = default);
+
+    Task<ErasureStatus> EraseUserAsync(string userId, ErasureMode? mode = null, CancellationToken ct = default);
+    Task<ErasureStatus> GetErasureAsync(long erasureId, CancellationToken ct = default);
+    Task<IReadOnlyList<ErasureStatus>> ListUserErasuresAsync(string userId, CancellationToken ct = default);
 
     /// <summary>
     /// Parses `{roomId, content}` from a client-initiated send request, sends it as
@@ -62,6 +75,7 @@ public interface IDotwireHostClient
     /// </summary>
     Task<WebhookResult> HandlePostSendWebhookAsync(Stream body, string? signatureHeader, CancellationToken ct = default);
     Task<WebhookResult> HandlePostSendWebhookAsync(Stream body, WebhookHeaders headers, CancellationToken ct = default);
+    Task<WebhookResult> HandleErasureWebhookAsync(Stream body, WebhookHeaders headers, CancellationToken ct = default);
 
     /// <summary>
     /// Runs in-process before a user-initiated send (<see cref="SendAsUserAsync"/>,
@@ -77,4 +91,6 @@ public interface IDotwireHostClient
     /// Does NOT run for <see cref="SendSystemMessageAsync"/>.
     /// </summary>
     Func<PostSendContext, CancellationToken, Task>? PostSend { get; set; }
+
+    Func<ErasureNotice, CancellationToken, Task>? Erasure { get; set; }
 }

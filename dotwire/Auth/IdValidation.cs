@@ -8,11 +8,15 @@ namespace Dotwire.Auth;
 public static class IdValidation
 {
     private const int MaxLength = 256;
+    public const string ReservedErasedId = "dotwire:erased";
     private const char Del = '';
 
     public static bool IsValid(string? id)
     {
         if (string.IsNullOrEmpty(id) || id.Length > MaxLength)
+            return false;
+
+        if (string.Equals(id, ReservedErasedId, StringComparison.Ordinal))
             return false;
 
         foreach (var c in id)

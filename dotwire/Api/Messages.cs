@@ -54,13 +54,42 @@ public sealed record AuditEvent(
     long? Value,
     DateTimeOffset Time);
 
+public sealed record EmergencyDeleteRequest(string? Reason);
+
 public sealed record RedactMessageResponse(Guid RoomId, ulong Seq, bool RemovedFromHistory, bool RemovedFromStream);
 
 /// <summary>Retention get/set response (spec §3.11). 0 = indefinite.</summary>
-public sealed record RetentionResponse(int MessagesDays);
+public sealed record RetentionResponse(int MessagesDays, bool Paused = false);
 
 /// <summary>Retention set request (spec §3.11). 0 = indefinite, max 36500.</summary>
 public sealed record SetRetentionRequest(int MessagesDays);
+
+public sealed record PlaceHoldRequest(Guid? RoomId, string? UserId, string? MatterRef);
+
+public sealed record LegalHold(
+    long Id,
+    string Scope,
+    Guid? RoomId,
+    string? UserId,
+    string MatterRef,
+    string PlacedBy,
+    DateTimeOffset PlacedAt,
+    DateTimeOffset? ReleasedAt,
+    string? ReleasedBy);
+
+public sealed record EraseUserRequest(string? Mode);
+
+public sealed record ErasureStatus(
+    long Id,
+    string UserId,
+    string Mode,
+    DateTimeOffset RequestedAt,
+    string Status,
+    long Remaining,
+    string[] BlockedBy,
+    DateTimeOffset? CompletedAt);
+
+public sealed record ComplianceResponse(bool AllowChanges, int MinimumKeepDays, string ErasureMode, int ActiveHolds, bool RetentionPaused);
 
 /// <summary>A durable, hash-chained audit_log row as returned by `/audit*` (spec §3.7). `Hash` is lowercase hex.</summary>
 public sealed record AuditEntry(
@@ -94,6 +123,22 @@ public sealed record PresendWebhookResponse(bool Allow, string? Content, string?
 /// <summary>Postsend webhook request body (spec §3.8). Best-effort, never affects the send response.</summary>
 public sealed record PostSendWebhookRequest(Guid RoomId, ulong Seq, string SenderId, string Content, DateTimeOffset Time, string Source);
 
+public sealed record MessagesErased(Guid RoomId, string Mode, ulong[] Seqs);
+
+public sealed record ErasedMessageRef(Guid RoomId, ulong Seq);
+
+public sealed record ErasureNotice(
+    string Event,
+    DateTimeOffset Time,
+    Guid? RoomId = null,
+    ulong? Seq = null,
+    string? Reason = null,
+    string? UserId = null,
+    string? Mode = null,
+    long? ErasureId = null,
+    string? Status = null,
+    ErasedMessageRef[]? Messages = null);
+
 /// <summary>SSE `message`-event payload (spec §3.9). `Replayed` is omitted (false) for live delivery.</summary>
 public sealed record SseMessagePayload(Guid RoomId, ulong Seq, string SenderId, DateTimeOffset Time, string Content, bool Replayed);
 
@@ -122,6 +167,7 @@ public sealed record SseRevokedPayload(Guid RoomId);
 [JsonSerializable(typeof(InjectMessageRequest))]
 [JsonSerializable(typeof(AuditEvent))]
 [JsonSerializable(typeof(RedactMessageResponse))]
+[JsonSerializable(typeof(EmergencyDeleteRequest))]
 [JsonSerializable(typeof(ApiErrorResponse))]
 [JsonSerializable(typeof(AuditEntry))]
 [JsonSerializable(typeof(AuditEntry[]))]
@@ -133,10 +179,21 @@ public sealed record SseRevokedPayload(Guid RoomId);
 [JsonSerializable(typeof(PresendWebhookRequest))]
 [JsonSerializable(typeof(PresendWebhookResponse))]
 [JsonSerializable(typeof(PostSendWebhookRequest))]
+[JsonSerializable(typeof(MessagesErased))]
+[JsonSerializable(typeof(ErasedMessageRef))]
+[JsonSerializable(typeof(ErasedMessageRef[]))]
+[JsonSerializable(typeof(ErasureNotice))]
 [JsonSerializable(typeof(SseMessagePayload))]
 [JsonSerializable(typeof(SseRevokedPayload))]
 [JsonSerializable(typeof(RetentionResponse))]
 [JsonSerializable(typeof(SetRetentionRequest))]
+[JsonSerializable(typeof(PlaceHoldRequest))]
+[JsonSerializable(typeof(LegalHold))]
+[JsonSerializable(typeof(LegalHold[]))]
+[JsonSerializable(typeof(ComplianceResponse))]
+[JsonSerializable(typeof(EraseUserRequest))]
+[JsonSerializable(typeof(ErasureStatus))]
+[JsonSerializable(typeof(ErasureStatus[]))]
 public partial class DotwireJsonContext : JsonSerializerContext;
 
 public static class Messages

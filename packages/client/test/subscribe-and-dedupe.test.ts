@@ -91,6 +91,21 @@ test('message retraction notifies listeners', async () => {
   assert.equal(retracted[0].seq, 7);
 });
 
+test('erasure notifies listeners for its own room only', async () => {
+  const { client, fake } = createTestClient();
+  await client.connect();
+  const room = client.room(ROOM_ID);
+  await room.subscribe();
+
+  const erased: Array<{ roomId: string; mode: string; seqs: number[] }> = [];
+  room.onMessagesErased((payload) => erased.push(payload));
+
+  fake.emit('MessagesErased', { roomId: ROOM_ID, mode: 'anonymize', seqs: [1, 2] });
+  fake.emit('MessagesErased', { roomId: '22222222-2222-2222-2222-222222222222', mode: 'delete', seqs: [9] });
+
+  assert.deepEqual(erased, [{ roomId: ROOM_ID, mode: 'anonymize', seqs: [1, 2] }]);
+});
+
 test('membership revocation unsubscribes the room and blocks resubscribe on reconnect', async () => {
   const { client, fake } = createTestClient();
   await client.connect();

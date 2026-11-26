@@ -76,6 +76,7 @@ export function useRoom(roomId: string, options: UseRoomOptions = {}): UseRoomRe
     const unsubscribers = [
       room.onMessage((message) => dispatch({ type: 'message', message })),
       room.onMessageRetracted(({ seq }) => dispatch({ type: 'retracted', seq })),
+      room.onMessagesErased(({ mode, seqs }) => dispatch({ type: 'messagesErased', mode, seqs })),
       room.onMembershipRevoked(() => dispatch({ type: 'revoked' }))
     ];
 

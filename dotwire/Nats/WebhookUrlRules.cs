@@ -9,6 +9,7 @@ public static class WebhookUrlRules
     {
         Check(options.Presend.Url, "Dotwire:Webhooks:Presend:Url", options.AllowInsecureUrls);
         Check(options.PostSend.Url, "Dotwire:Webhooks:PostSend:Url", options.AllowInsecureUrls);
+        Check(options.Erasure.Url, "Dotwire:Webhooks:Erasure:Url", options.AllowInsecureUrls);
     }
 
     private static void Check(string? url, string name, bool allowInsecure)

@@ -219,6 +219,68 @@ export async function POST(req: Request) {
 
 ---
 
+## Compliance and erasure
+
+These calls use the admin token and need the `admin` role. Holds and erasure change what dotwire
+keeps; they never return message content.
+
+```ts
+const settings = await host.getComplianceSettings();
+
+const hold = await host.placeRoomLegalHold(roomId, 'matter-2026-114'); // opaque reference only
+await host.releaseLegalHold(hold.id);
+const active = await host.listLegalHolds();
+
+const started = await host.eraseUser('user-42', { mode: 'anonymize' }); // 202
+const current = await host.getErasure(started.id);
+// current.status: 'in_progress' | 'waiting' (current.blockedBy lists the reasons) | 'completed'
+
+await host.emergencyDeleteMessage(roomId, seq, 'court_order');
+```
+
+While any hold is active, retention is paused (`retentionPaused`). Erasure revokes the user's room
+memberships and role at once, as `deleteUserRole` does. `anonymize` re-attributes the user's messages
+to `dotwire:erased`, and `delete` removes them. Holds, minimum keep and write-once settings still apply,
+so a held message keeps the erasure `waiting`. The caller cannot erase its own id, or the last admin.
+While an erasure is open, role changes and member adds for that user answer `409`. Erasure does not
+delete the identity from your own user table.
+
+Erasure notices are delivered at least once, so the handler must be idempotent. Set `onErasure` and
+point dotwire's `Dotwire:Webhooks:Erasure:Url` at a route that calls `handleErasureWebhook(request)`.
+Notices list `{ roomId, seq }` pairs. A `partial` notice applies `mode` to exactly those messages. A
+`completed` notice means dotwire holds no more messages from that user. Do not re-derive hold or keep
+rules in the receiver.
+
+```ts
+const host = new DotwireHostClient({
+  // ...config, including webhookSecret
+  onErasure: async (notice) => {
+    await myStore.applyErasure(notice);
+  },
+});
+```
+
+Exports write NDJSON through a sink. The sink receives each line without a trailing newline, so add one
+yourself:
+
+```ts
+await host.archiveAuditLog((line) => out.write(line + '\n'), { afterId: 0 });
+await host.exportRoomHistory(roomId, 'host-export', (line) => out.write(line + '\n'));
+```
+
+`archiveAuditLog` recomputes each hash from its predecessor and throws at the first break. It also
+writes the checkpoints, and returns `{ count, lastId, lastHash }`, which lets the next run resume. Every
+page emits an `audit.read` event. `exportRoomHistory` reads as `asUserId`, so that user must be a room
+member. Add a dedicated export member first (audited as `member.added`, and visible to participants),
+and remove it afterwards.
+
+A `409` surfaces as `DotwireApiError { kind: 'Conflict' }`, with codes such as `legal_hold`,
+`minimum_keep`, `changes_not_allowed`, `erasure_open` and `self_erasure`.
+
+For room streams, `streamRoomEvents` yields `{ type: 'erased', roomId, mode, seqs }` after each erasure
+page. It carries no user id. `anonymize` means the listed senders are now `dotwire:erased`, and `delete`
+means the listed messages are gone.
+
 ## API Reference
 
 ### `DotwireHostClient`
@@ -241,6 +303,16 @@ export async function POST(req: Request) {
 | `getMessages(roomId, options)` | `Promise<RoomHistoryResponse>` | Queries history as `options.asUserId`. |
 | `handlePresendWebhook(request)` / `handlePostSendWebhook(request)` | `Promise<Response>` | Verifies and handles dotwire's webhook call-outs. Requires `webhookSecret` (or `allowUnsignedWebhooks: true`). |
 | `handlePresendWebhookBody(body, signature, rawBody, { timestamp, signatureV2 })` | `Promise<WebhookResult>` | Express-style variant; pass the raw body and the `X-Dotwire-Timestamp` / `X-Dotwire-Signature-V2` headers. |
+| `getComplianceSettings()` | `Promise<ComplianceSettings>` | Reads `allowChanges`, `minimumKeepDays`, `erasureMode`, `activeHolds` and `retentionPaused`. |
+| `placeRoomLegalHold(roomId, matterRef)` / `placeUserLegalHold(userId, matterRef)` | `Promise<LegalHold>` | Places a hold. `matterRef` is stored in plaintext: pass an opaque reference. |
+| `releaseLegalHold(holdId)` | `Promise<void>` | Releases a hold. Releasing it twice answers `409` (`Conflict`). |
+| `listLegalHolds({ activeOnly? })` | `Promise<LegalHold[]>` | Lists holds. `activeOnly` defaults to `true`. |
+| `emergencyDeleteMessage(roomId, seq, reason)` | `Promise<RedactMessageResponse>` | Deletes a message, bypassing holds, minimum keep and write-once. `reason` is `'illegal_content'` or `'court_order'`. |
+| `eraseUser(userId, { mode? })` | `Promise<ErasureStatus>` | Starts an account erasure: `'anonymize'` (default) or `'delete'`. Answers `202`. |
+| `getErasure(erasureId)` / `listUserErasures(userId)` | `Promise<ErasureStatus>` / `Promise<ErasureStatus[]>` | Live status: `in_progress`, `waiting` (with `blockedBy`) or `completed`. |
+| `handleErasureWebhook(request)` / `handleErasureWebhookBody(body, signature, rawBody, { timestamp, signatureV2 })` | `Promise<Response>` / `Promise<WebhookResult>` | Verifies and handles dotwire's erasure notices, then calls `onErasure`. Requires `webhookSecret` (or `allowUnsignedWebhooks: true`). |
+| `exportRoomHistory(roomId, asUserId, sink)` | `Promise<number>` | Writes the room's history as NDJSON, one message per call to `sink`, and returns the count. |
+| `archiveAuditLog(sink, { afterId?, previousHash? })` | `Promise<{ count, lastId, lastHash }>` | Writes the audit log as NDJSON, recomputes each hash and throws on a break. Also writes checkpoints. Pass `previousHash` when `afterId` is above zero. |
 
 When the server runs with `Dotwire:HubSend:Enabled=true`, `POST /rooms/{roomId}/messages`
 shares one per-user send bucket with the hub `Send` method. The bucket is checked before the
@@ -268,6 +340,7 @@ bodies over `maxWebhookBodyBytes` (default 1 MiB, `413`). The legacy body-only
 | `sendSystemMessage(content, options?)` | `Promise<SendMessageResult>` | Publishes a host announcement into this room. |
 | `sendAsUser(userId, content)` | `Promise<SendMessageResult>` | Sends as a room member. |
 | `getMessages(options)` | `Promise<RoomHistoryResponse>` | Retrieves history as `options.asUserId`. |
+| `emergencyDelete(seq, reason)` | `Promise<RedactMessageResponse>` | Emergency deletion of one message in this room. See "Compliance and erasure". |
 
 ---
 

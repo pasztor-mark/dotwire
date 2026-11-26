@@ -5,6 +5,7 @@ import {
   type HistoryPage,
   type MembershipRevoked,
   type MessageRetracted,
+  type MessagesErased,
   type PresenceDelta,
   type RoomMessage,
   type SendAck,
@@ -140,6 +141,16 @@ export class DotwireRoomHandle {
 
   public onMessageRetracted(handler: (payload: MessageRetracted) => void): () => void {
     const unsub = this.client.onMessageRetracted((payload) => {
+      if (payload.roomId === this.roomId) {
+        handler(payload);
+      }
+    });
+    this.listeners.push(unsub);
+    return unsub;
+  }
+
+  public onMessagesErased(handler: (payload: MessagesErased) => void): () => void {
+    const unsub = this.client.onMessagesErased((payload) => {
       if (payload.roomId === this.roomId) {
         handler(payload);
       }

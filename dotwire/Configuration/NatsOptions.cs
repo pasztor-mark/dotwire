@@ -47,6 +47,14 @@ public sealed class NatsOptions
 
     public long AuditMaxBytes { get; set; } = 1024L * 1024 * 1024;
 
+    public string ErasureNoticesStream { get; set; } = "ERASURES";
+
+    public string ErasureNoticesSubject { get; set; } = "dotwire.erasures";
+
+    public int ErasureNoticesMaxAgeHours { get; set; } = 168;
+
+    public string ErasureNoticesConsumer { get; set; } = "erasure-notifier";
+
     /// <summary>Durable consumer that batch-inserts messages into Postgres.</summary>
     public string PostgresWriterConsumer { get; set; } = "postgres-writer";
 

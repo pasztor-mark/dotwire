@@ -41,6 +41,7 @@ public class SecurityFixesComposeTests : IClassFixture<WebApplicationFactory<Pro
 
         _baseFactory = factory.WithWebHostBuilder(b =>
         {
+            b.WithoutErasureWorker();
             b.UseSetting("ConnectionStrings:PostgresMigrator", _ownerConnectionString);
             b.UseSetting("ConnectionStrings:PostgresWrite", _appConnectionString);
             b.UseSetting("ConnectionStrings:PostgresRead", _appConnectionString);

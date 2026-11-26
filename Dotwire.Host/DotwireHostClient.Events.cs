@@ -179,6 +179,7 @@ public sealed partial class DotwireHostClient
         "typing" => ParseTyping(roomId, json),
         "presence" => ParsePresence(roomId, json),
         "retracted" => ParseRetracted(roomId, json),
+        "erased" => ParseErased(roomId, json),
         "revoked" => new RevokedEvent { RoomId = roomId },
         _ => null,
     };
@@ -213,5 +214,11 @@ public sealed partial class DotwireHostClient
     {
         var payload = JsonSerializer.Deserialize(json, DotwireHostJsonContext.Default.MessageRetractedDto);
         return payload is null ? null : new RetractedEvent { RoomId = roomId, Seq = payload.Seq };
+    }
+
+    private static RoomEvent? ParseErased(Guid roomId, string json)
+    {
+        var payload = JsonSerializer.Deserialize(json, DotwireHostJsonContext.Default.MessagesErasedDto);
+        return payload is null ? null : new ErasedEvent { RoomId = roomId, Mode = payload.Mode, Seqs = payload.Seqs };
     }
 }

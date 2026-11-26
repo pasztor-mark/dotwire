@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
 
@@ -17,6 +18,7 @@ public class AdminRedactEndpointTests : IClassFixture<WebApplicationFactory<Prog
     {
         _factory = factory.WithWebHostBuilder(b =>
         {
+            b.WithoutErasureWorker();
             b.UseSetting("Postgres:Migrate", "false");
             b.UseSetting("ConnectionStrings:PostgresRead", "Host=localhost;Database=dotwire");
             b.UseSetting("ConnectionStrings:PostgresWrite", "Host=localhost;Database=dotwire");
@@ -61,6 +63,25 @@ public class AdminRedactEndpointTests : IClassFixture<WebApplicationFactory<Prog
     {
         var response = await Client(TestTokens.Mint("user-1", role: "auditor"))
             .DeleteAsync(Route, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    private static readonly string EmergencyRoute = $"{Route}/emergency-delete";
+
+    [Fact]
+    public async Task Emergency_NoToken_Is401()
+    {
+        var response = await Client().PostAsJsonAsync(EmergencyRoute, new { reason = "court_order" }, TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("member")]
+    [InlineData("auditor")]
+    public async Task Emergency_NonAdminToken_Is403(string role)
+    {
+        var response = await Client(TestTokens.Mint("user-1", role: role))
+            .PostAsJsonAsync(EmergencyRoute, new { reason = "court_order" }, TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 }

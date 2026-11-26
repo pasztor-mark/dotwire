@@ -21,6 +21,7 @@ public sealed class DotwireMetrics
     private readonly Counter<long> _rejections;
     private readonly Counter<long> _presend;
     private readonly Counter<long> _postsendDropped;
+    private readonly Counter<long> _erasureFailed;
     private readonly Counter<long> _fanoutDropped;
     private readonly Histogram<double> _sendDuration;
     private readonly Histogram<double> _publishDuration;
@@ -41,6 +42,7 @@ public sealed class DotwireMetrics
         _rejections = _meter.CreateCounter<long>("dotwire.rejections", "{rejection}");
         _presend = _meter.CreateCounter<long>("dotwire.webhook.presend.results", "{call}");
         _postsendDropped = _meter.CreateCounter<long>("dotwire.webhook.postsend.dropped", "{event}");
+        _erasureFailed = _meter.CreateCounter<long>("dotwire.webhook.erasure.failed", "{attempt}");
         _fanoutDropped = _meter.CreateCounter<long>("dotwire.fanout.dropped", "{event}");
         _sendDuration = _meter.CreateHistogram("dotwire.message.send.duration", "s", null, null, LatencyBuckets);
         _publishDuration = _meter.CreateHistogram("dotwire.jetstream.publish.duration", "s", null, null, LatencyBuckets);
@@ -91,6 +93,8 @@ public sealed class DotwireMetrics
 
     public void PostsendDropped(string reason) =>
         _postsendDropped.Add(1, new KeyValuePair<string, object?>("reason", reason));
+
+    public void ErasureNoticeFailed() => _erasureFailed.Add(1);
 
     public void ObserveAuditLockHeld(Func<bool> isHeld) =>
         _meter.CreateObservableGauge("dotwire.audit.writer.lock_held", () => isHeld() ? 1 : 0, "1");

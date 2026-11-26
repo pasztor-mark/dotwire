@@ -504,6 +504,15 @@ public sealed class RoomInterestManager : IAsyncDisposable
                             PublishToSse(roomId, new SseOutboundEvent("retracted", msg.Data, null));
                         }
                     }
+                    else if (msg.Subject.EndsWith(".erased", StringComparison.Ordinal))
+                    {
+                        var erased = JsonSerializer.Deserialize(msg.Data, DotwireJsonContext.Default.MessagesErased);
+                        if (erased is not null)
+                        {
+                            PublishToHub(connections, "MessagesErased", erased);
+                            PublishToSse(roomId, new SseOutboundEvent("erased", msg.Data, null));
+                        }
+                    }
                     else if (msg.Subject.EndsWith(".revoked", StringComparison.Ordinal))
                     {
                         var revoked = JsonSerializer.Deserialize(msg.Data, DotwireJsonContext.Default.MembershipRevoked);

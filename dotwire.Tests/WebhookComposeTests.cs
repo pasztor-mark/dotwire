@@ -5,10 +5,13 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using Dotwire.Api;
+using Dotwire.Nats;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using NATS.Client.JetStream;
 using Xunit;
 
 namespace dotwire.Tests;
@@ -51,6 +54,7 @@ public class WebhookComposeTests
 
         var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
         {
+            b.WithoutErasureWorker();
             b.UseSetting("ConnectionStrings:PostgresMigrator",
                 $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire;Password={pgPassword}");
             b.UseSetting("ConnectionStrings:PostgresWrite",
@@ -411,6 +415,157 @@ public class WebhookComposeTests
         // Two attempts with a 1s backoff between: give it up to 5s to settle, then confirm no more come in.
         await Task.Delay(TimeSpan.FromSeconds(4), TestContext.Current.CancellationToken);
         Assert.Equal(2, attempts);
+    }
+
+    private sealed record ErasureIsolation(string Stream, string Subject, string Consumer)
+    {
+        public static ErasureIsolation Create()
+        {
+            var id = Guid.NewGuid().ToString("N");
+            return new($"ERASURES_T{id}", $"dotwire.erasures.t{id}", $"erasure-notifier-t{id}");
+        }
+
+        public void Apply(IWebHostBuilderSettings settings)
+        {
+            settings.UseSetting("Nats:ErasureNoticesStream", Stream);
+            settings.UseSetting("Nats:ErasureNoticesSubject", Subject);
+            settings.UseSetting("Nats:ErasureNoticesConsumer", Consumer);
+        }
+    }
+
+    private static async Task DeleteStreamQuietlyAsync(string stream)
+    {
+        var connection = new NATS.Client.Core.NatsConnection(new NATS.Client.Core.NatsOpts { Url = "nats://127.0.0.1:4222" });
+        try
+        {
+            var js = new NatsJSContext(connection);
+            try
+            {
+                await js.DeleteStreamAsync(stream);
+            }
+            catch (NatsJSApiException)
+            {
+            }
+        }
+        finally
+        {
+            await connection.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task ErasureNotice_Delivered_Signed()
+    {
+        const string secret = "erasure-test-secret";
+        var iso = ErasureIsolation.Create();
+        var received = new TaskCompletionSource<(string? Signature, string? Timestamp, byte[] Body)>();
+        try
+        {
+            await using var stub = new StubWebhookServer(req =>
+            {
+                using var ms = new MemoryStream();
+                req.InputStream.CopyTo(ms);
+                received.TrySetResult((req.Headers["X-Dotwire-Signature-V2"], req.Headers["X-Dotwire-Timestamp"], ms.ToArray()));
+                return (200, "{}");
+            });
+            await using var factory = BuildFactory(s =>
+            {
+                s.UseSetting("Dotwire:Webhooks:Erasure:Url", stub.Url);
+                s.UseSetting("Dotwire:Webhooks:Secret", secret);
+                iso.Apply(s);
+            });
+
+            var roomId = Guid.NewGuid();
+            var publisher = factory.Services.GetRequiredService<ErasureNoticePublisher>();
+            await publisher.PublishAsync(new ErasureNotice("message.redacted", DateTimeOffset.UtcNow, RoomId: roomId, Seq: 5), TestContext.Current.CancellationToken);
+
+            var completed = await Task.WhenAny(received.Task, Task.Delay(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+            Assert.Same(received.Task, completed);
+            var (signature, timestamp, body) = await received.Task;
+
+            Assert.NotNull(timestamp);
+            Assert.NotNull(signature);
+            var signed = Encoding.UTF8.GetBytes(timestamp + ".").Concat(body).ToArray();
+            var expected = $"sha256={Convert.ToHexStringLower(HMACSHA256.HashData(Encoding.UTF8.GetBytes(secret), signed))}";
+            Assert.Equal(expected, signature);
+
+            var notice = System.Text.Json.JsonSerializer.Deserialize(body, DotwireJsonContext.Default.ErasureNotice);
+            Assert.Equal("message.redacted", notice!.Event);
+            Assert.Equal(roomId, notice.RoomId);
+            Assert.Equal(5UL, notice.Seq);
+        }
+        finally
+        {
+            await DeleteStreamQuietlyAsync(iso.Stream);
+        }
+    }
+
+    [Fact]
+    public async Task ErasureNotice_RetriedUntil2xx()
+    {
+        var iso = ErasureIsolation.Create();
+        var bodies = new System.Collections.Concurrent.ConcurrentQueue<byte[]>();
+        var secondDelivery = new TaskCompletionSource();
+        try
+        {
+            await using var stub = new StubWebhookServer(req =>
+            {
+                using var ms = new MemoryStream();
+                req.InputStream.CopyTo(ms);
+                bodies.Enqueue(ms.ToArray());
+                if (bodies.Count == 1)
+                    return (500, "{}");
+                secondDelivery.TrySetResult();
+                return (200, "{}");
+            });
+            await using var factory = BuildFactory(s =>
+            {
+                s.UseSetting("Dotwire:Webhooks:Erasure:Url", stub.Url);
+                iso.Apply(s);
+            });
+
+            var publisher = factory.Services.GetRequiredService<ErasureNoticePublisher>();
+            await publisher.PublishAsync(new ErasureNotice("user.erased", DateTimeOffset.UtcNow, UserId: "retry-user", Mode: "anonymize", ErasureId: 1, Status: "completed"), TestContext.Current.CancellationToken);
+
+            var completed = await Task.WhenAny(secondDelivery.Task, Task.Delay(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken));
+            Assert.Same(secondDelivery.Task, completed);
+            await Task.Delay(300, TestContext.Current.CancellationToken);
+
+            Assert.Equal(2, bodies.Count);
+            var list = bodies.ToArray();
+            Assert.Equal(list[0], list[1]);
+        }
+        finally
+        {
+            await DeleteStreamQuietlyAsync(iso.Stream);
+        }
+    }
+
+    [Fact]
+    public async Task ErasureUrlUnset_NoStreamProvisioned()
+    {
+        var iso = ErasureIsolation.Create();
+        try
+        {
+            await using var factory = BuildFactory(s => iso.Apply(s));
+            _ = factory.Services.GetRequiredService<INatsJSContext>();
+
+            var connection = new NATS.Client.Core.NatsConnection(new NATS.Client.Core.NatsOpts { Url = "nats://127.0.0.1:4222" });
+            try
+            {
+                var js = new NatsJSContext(connection);
+                var ex = await Assert.ThrowsAsync<NatsJSApiException>(async () => await js.GetStreamAsync(iso.Stream, cancellationToken: TestContext.Current.CancellationToken));
+                Assert.Equal(404, ex.Error.Code);
+            }
+            finally
+            {
+                await connection.DisposeAsync();
+            }
+        }
+        finally
+        {
+            await DeleteStreamQuietlyAsync(iso.Stream);
+        }
     }
 
     private sealed class StubWebhookServer : IAsyncDisposable

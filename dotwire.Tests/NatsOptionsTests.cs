@@ -23,4 +23,15 @@ public class NatsOptionsTests
         Assert.Equal(48, options.RoomsMaxAgeHours);
         Assert.Equal("postgres-writer", options.PostgresWriterConsumer);
     }
+
+    [Fact]
+    public void ErasureNoticeDefaultsMatchSpec()
+    {
+        var options = new NatsOptions();
+
+        Assert.Equal("ERASURES", options.ErasureNoticesStream);
+        Assert.Equal("dotwire.erasures", options.ErasureNoticesSubject);
+        Assert.Equal(168, options.ErasureNoticesMaxAgeHours);
+        Assert.Equal("erasure-notifier", options.ErasureNoticesConsumer);
+    }
 }

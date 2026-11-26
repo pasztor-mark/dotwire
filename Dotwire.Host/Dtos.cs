@@ -76,9 +76,60 @@ public sealed record AuditVerification(
 
 public sealed record AuditCheckpoint(DateOnly Day, long LastId, string Hash, DateTimeOffset CreatedAt);
 
+public sealed record AuditArchiveResult(long Count, long LastId, string? LastHash);
+
 // ---- Retention -----------------------------------------------------------------
 
 public sealed record RetentionDto(int MessagesDays);
+
+public sealed record ComplianceSettings(bool AllowChanges, int MinimumKeepDays, string ErasureMode, int ActiveHolds, bool RetentionPaused);
+
+public sealed record LegalHold(
+    long Id,
+    string Scope,
+    Guid? RoomId,
+    string? UserId,
+    string MatterRef,
+    string PlacedBy,
+    DateTimeOffset PlacedAt,
+    DateTimeOffset? ReleasedAt,
+    string? ReleasedBy);
+
+public enum EmergencyDeletionReason
+{
+    IllegalContent,
+    CourtOrder,
+}
+
+public enum ErasureMode
+{
+    Anonymize,
+    Delete,
+}
+
+public sealed record ErasureStatus(
+    long Id,
+    string UserId,
+    string Mode,
+    DateTimeOffset RequestedAt,
+    string Status,
+    long Remaining,
+    IReadOnlyList<string> BlockedBy,
+    DateTimeOffset? CompletedAt);
+
+public sealed record ErasedMessageRef(Guid RoomId, ulong Seq);
+
+public sealed record ErasureNotice(
+    string Event,
+    DateTimeOffset Time,
+    Guid? RoomId = null,
+    ulong? Seq = null,
+    string? Reason = null,
+    string? UserId = null,
+    string? Mode = null,
+    long? ErasureId = null,
+    string? Status = null,
+    IReadOnlyList<ErasedMessageRef>? Messages = null);
 
 // ---- Hooks -----------------------------------------------------------------
 
@@ -133,8 +184,16 @@ internal sealed record PostSendWebhookRequestDto(Guid RoomId, ulong Seq, string 
 
 internal sealed record EmptyResponseDto;
 
+internal sealed record PlaceLegalHoldRequestDto(Guid? RoomId, string? UserId, string MatterRef);
+
+internal sealed record EmergencyDeleteRequestDto(string Reason);
+
+internal sealed record EraseUserRequestDto(string? Mode);
+
 /// <summary>Wire shape of `GET /audit/checkpoints`: `{checkpoints:[...]}`.</summary>
 internal sealed record AuditCheckpointsResponseDto(AuditCheckpoint[] Checkpoints);
+
+internal sealed record AuditCheckpointLineDto(AuditCheckpoint Checkpoint);
 
 /// <summary>SSE `message`-event payload (mirrors the server's SseMessagePayload).</summary>
 internal sealed record SseMessagePayloadDto(Guid RoomId, ulong Seq, string SenderId, DateTimeOffset Time, string Content, bool Replayed);
@@ -150,6 +209,8 @@ internal sealed record PresenceDeltaDto(Guid RoomId, string[] Joined, string[] L
 
 /// <summary>SSE `retracted`-event payload (ephemeral MessageRetracted).</summary>
 internal sealed record MessageRetractedDto(Guid RoomId, ulong Seq);
+
+internal sealed record MessagesErasedDto(Guid RoomId, string Mode, ulong[] Seqs);
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(SendMessageResult))]
@@ -173,6 +234,7 @@ internal sealed record MessageRetractedDto(Guid RoomId, ulong Seq);
 [JsonSerializable(typeof(AuditCheckpoint))]
 [JsonSerializable(typeof(AuditCheckpoint[]))]
 [JsonSerializable(typeof(AuditCheckpointsResponseDto))]
+[JsonSerializable(typeof(AuditCheckpointLineDto))]
 [JsonSerializable(typeof(RetentionDto))]
 [JsonSerializable(typeof(ClientSendRequest))]
 [JsonSerializable(typeof(ApiErrorBody))]
@@ -190,4 +252,15 @@ internal sealed record MessageRetractedDto(Guid RoomId, ulong Seq);
 [JsonSerializable(typeof(TypingNotificationDto))]
 [JsonSerializable(typeof(PresenceDeltaDto))]
 [JsonSerializable(typeof(MessageRetractedDto))]
+[JsonSerializable(typeof(MessagesErasedDto))]
+[JsonSerializable(typeof(ComplianceSettings))]
+[JsonSerializable(typeof(LegalHold))]
+[JsonSerializable(typeof(LegalHold[]))]
+[JsonSerializable(typeof(PlaceLegalHoldRequestDto))]
+[JsonSerializable(typeof(EmergencyDeleteRequestDto))]
+[JsonSerializable(typeof(EraseUserRequestDto))]
+[JsonSerializable(typeof(ErasureStatus))]
+[JsonSerializable(typeof(ErasureStatus[]))]
+[JsonSerializable(typeof(ErasedMessageRef))]
+[JsonSerializable(typeof(ErasureNotice))]
 internal partial class DotwireHostJsonContext : JsonSerializerContext;

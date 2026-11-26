@@ -24,6 +24,7 @@ export type RoomMessagesAction =
   | { type: 'subscribed'; page: HistoryPage }
   | { type: 'message'; message: RoomMessage }
   | { type: 'retracted'; seq: number }
+  | { type: 'messagesErased'; mode: 'anonymize' | 'delete'; seqs: number[] }
   | { type: 'revoked' }
   | { type: 'error'; error: unknown }
   | { type: 'olderLoaded'; page: HistoryPage };
@@ -68,6 +69,16 @@ export function roomMessagesReducer(
       return { ...state, messages: mergeMessages(state.messages, [action.message]) };
     case 'retracted':
       return { ...state, messages: state.messages.filter((m) => m.seq !== action.seq) };
+    case 'messagesErased': {
+      const erased = new Set(action.seqs);
+      if (action.mode === 'delete') {
+        return { ...state, messages: state.messages.filter((m) => !erased.has(m.seq)) };
+      }
+      return {
+        ...state,
+        messages: state.messages.map((m) => (erased.has(m.seq) ? { ...m, senderId: 'dotwire:erased' } : m))
+      };
+    }
     case 'revoked':
       return { ...state, status: 'revoked' };
     case 'error':
