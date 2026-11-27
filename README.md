@@ -313,6 +313,12 @@ Traces are off by default. `Dotwire__EnableTracing=true` turns them on, independ
 * **Exception events:** span events cannot be stripped, and a failed query's exception message can contain parameter values. A span with any tagged event (in practice, a recorded exception) is not exported. The parent request span still carries `error.type` and the status code.
 * **Sampling:** the default is parent-based always-on, so an incoming `traceparent` decides. Set the standard `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` (e.g. `parentbased_traceidratio` and `0.1`) to sample less under load.
 
+## Contributors
+
+Thanks to everyone who has contributed to dotwire. Starter templates are open for contribution; see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+* [@pasztor-mark](https://github.com/pasztor-mark) (maintainer)
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
