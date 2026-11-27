@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Text;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
 
@@ -18,6 +19,7 @@ public class AdminRetentionAndDsarEndpointTests : IClassFixture<WebApplicationFa
     {
         _factory = factory.WithWebHostBuilder(b =>
         {
+            b.WithoutErasureWorker();
             b.UseSetting("Postgres:Migrate", "false");
             b.UseSetting("ConnectionStrings:PostgresRead", "Host=localhost;Database=dotwire");
             b.UseSetting("ConnectionStrings:PostgresWrite", "Host=localhost;Database=dotwire");
@@ -66,6 +68,41 @@ public class AdminRetentionAndDsarEndpointTests : IClassFixture<WebApplicationFa
         // Admin-only per spec §3.12; auditors get /audit* read access, not DSAR.
         var response = await Client(TestTokens.Mint("user-1", role: "auditor"))
             .GetAsync("/admin/users/user-1/export", TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    private static HttpRequestMessage NewRouteRequest(string method, string url) =>
+        new(new HttpMethod(method), url)
+        {
+            Content = new StringContent("{\"matterRef\":\"m\"}", Encoding.UTF8, "application/json"),
+        };
+
+    [Theory]
+    [InlineData("POST", "/admin/holds")]
+    [InlineData("DELETE", "/admin/holds/1")]
+    [InlineData("GET", "/admin/holds")]
+    [InlineData("GET", "/admin/compliance")]
+    [InlineData("POST", "/admin/users/user-1/erase")]
+    [InlineData("GET", "/admin/erasures/1")]
+    [InlineData("GET", "/admin/users/user-1/erasures")]
+    public async Task HoldAndComplianceRoutes_NoToken_Is401(string method, string url)
+    {
+        var response = await Client().SendAsync(NewRouteRequest(method, url), TestContext.Current.CancellationToken);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("POST", "/admin/holds")]
+    [InlineData("DELETE", "/admin/holds/1")]
+    [InlineData("GET", "/admin/holds")]
+    [InlineData("GET", "/admin/compliance")]
+    [InlineData("POST", "/admin/users/user-1/erase")]
+    [InlineData("GET", "/admin/erasures/1")]
+    [InlineData("GET", "/admin/users/user-1/erasures")]
+    public async Task HoldAndComplianceRoutes_MemberToken_Is403(string method, string url)
+    {
+        var response = await Client(TestTokens.Mint("user-1", role: "member"))
+            .SendAsync(NewRouteRequest(method, url), TestContext.Current.CancellationToken);
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 }

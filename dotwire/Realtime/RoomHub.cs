@@ -4,6 +4,7 @@ using System.Text.Json;
 using Dotwire.Api;
 using Dotwire.Auth;
 using Dotwire.Configuration;
+using Dotwire.Nats;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
@@ -23,7 +24,8 @@ public sealed class RoomHub(
     MessageSend messageSend,
     SendRateLimiter sendRateLimiter,
     IOptions<DotwireOptions> dotwireOptions,
-    DotwireMetrics metrics) : Hub
+    DotwireMetrics metrics,
+    AccessLogPublisher accessLog) : Hub
 {
     private const string ConnectionSlotKey = "dotwire_connection_slot";
 
@@ -56,8 +58,30 @@ public sealed class RoomHub(
         if (role != claimedRole || !isMember)
             throw new HubException("Forbidden");
 
-        if (!await interestManager.SubscribeAsync(roomId, Context.ConnectionId, sub, claimedRole))
+        AccessEvent? opened = null;
+        if (accessLog.IsEnabled)
+        {
+            if (interestManager.IsSubscribed(Context.ConnectionId, roomId))
+                return;
+
+            opened = AccessEvents.OpenEvent(user!, roomId, AccessEvents.Hub)
+                ?? throw new HubException("AccessLogUnavailable");
+            try
+            {
+                await accessLog.RecordAsync(opened, ct);
+            }
+            catch (AccessLogUnavailableException)
+            {
+                throw new HubException("AccessLogUnavailable");
+            }
+        }
+
+        if (!await interestManager.SubscribeAsync(roomId, Context.ConnectionId, sub, claimedRole, opened))
+        {
+            if (opened is not null)
+                accessLog.RecordClose(AccessEvents.Close(opened, AccessEvents.Error, DateTimeOffset.UtcNow));
             return;
+        }
 
         bool stillMember;
         try
@@ -66,13 +90,13 @@ public sealed class RoomHub(
         }
         catch
         {
-            interestManager.Unsubscribe(roomId, Context.ConnectionId);
+            interestManager.Unsubscribe(roomId, Context.ConnectionId, AccessEvents.Error);
             throw;
         }
 
         if (!stillMember)
         {
-            interestManager.Unsubscribe(roomId, Context.ConnectionId);
+            interestManager.Unsubscribe(roomId, Context.ConnectionId, AccessEvents.Revoked);
             throw new HubException("Forbidden");
         }
 

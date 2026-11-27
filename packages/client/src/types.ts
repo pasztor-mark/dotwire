@@ -60,6 +60,12 @@ export interface MessageRetracted {
   seq: number;
 }
 
+export interface MessagesErased {
+  roomId: string;
+  mode: 'anonymize' | 'delete';
+  seqs: number[];
+}
+
 export interface MembershipRevoked {
   roomId: string;
   userId: string;

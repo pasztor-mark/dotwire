@@ -48,7 +48,7 @@ public class MigrationScriptTests
         // content survives), so the functions follow the same hardening as redact_message -
         // SECURITY DEFINER, a pinned search_path against hijack via a temp schema, and PUBLIC
         // revoked so only dotwire_app can call them.
-        var compliance = MigrationRunner.LoadScripts().Single(s => s.Name.Contains("compliance"));
+        var compliance = MigrationRunner.LoadScripts().Single(s => s.Name.StartsWith("0007_"));
 
         foreach (var function in new[] { "set_message_retention", "get_message_retention" })
         {

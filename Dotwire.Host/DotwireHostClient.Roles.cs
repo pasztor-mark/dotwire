@@ -34,6 +34,27 @@ public sealed partial class DotwireHostClient
     public Task DeleteUserRoleAsync(string userId, CancellationToken ct = default) =>
         SendAsync(HttpMethod.Delete, $"/admin/users/{Uri.EscapeDataString(userId)}/role", AdminToken(), ct);
 
+    public Task<ErasureStatus> EraseUserAsync(string userId, ErasureMode? mode = null, CancellationToken ct = default)
+    {
+        var body = JsonBody(new EraseUserRequestDto(mode is { } m ? ErasureModeWire(m) : null), DotwireHostJsonContext.Default.EraseUserRequestDto);
+        return SendAsync(HttpMethod.Post, $"/admin/users/{Uri.EscapeDataString(userId)}/erase", AdminToken(),
+            DotwireHostJsonContext.Default.ErasureStatus, ct, body);
+    }
+
+    public Task<ErasureStatus> GetErasureAsync(long erasureId, CancellationToken ct = default) =>
+        SendAsync(HttpMethod.Get, $"/admin/erasures/{erasureId}", AdminToken(), DotwireHostJsonContext.Default.ErasureStatus, ct);
+
+    public async Task<IReadOnlyList<ErasureStatus>> ListUserErasuresAsync(string userId, CancellationToken ct = default) =>
+        await SendAsync(HttpMethod.Get, $"/admin/users/{Uri.EscapeDataString(userId)}/erasures", AdminToken(),
+            DotwireHostJsonContext.Default.ErasureStatusArray, ct);
+
+    private static string ErasureModeWire(ErasureMode mode) => mode switch
+    {
+        ErasureMode.Anonymize => "anonymize",
+        ErasureMode.Delete => "delete",
+        _ => throw new ArgumentOutOfRangeException(nameof(mode)),
+    };
+
     /// <inheritdoc />
     public async Task<IReadOnlyList<Guid>> GetUserRoomsAsync(string userId, CancellationToken ct = default)
     {
@@ -56,6 +77,9 @@ public sealed partial class DotwireHostClient
         using var response = await SendRawAsync(HttpMethod.Get, $"/admin/users/{Uri.EscapeDataString(userId)}/export", AdminToken(), null, ct);
         await response.Content.CopyToAsync(destination, ct);
     }
+
+    private static string? OptString(JsonElement el, string name) =>
+        el.TryGetProperty(name, out var v) && v.ValueKind != JsonValueKind.Null ? v.GetString() : null;
 
     /// <summary>
     /// Parses the DSAR export's hand-rolled JSON (spec §3.12; written field-by-field via
@@ -91,6 +115,23 @@ public sealed partial class DotwireHostClient
             a.TryGetProperty("value", out var v) && v.ValueKind != JsonValueKind.Null ? v.GetInt64() : null,
             a.GetProperty("time").GetDateTimeOffset())).ToArray();
 
-        return new UserExport(userId, exportedAt, role, roomIds, messages, auditEvents);
+        var accessLog = root.TryGetProperty("accessLog", out var accessEl) && accessEl.ValueKind == JsonValueKind.Array
+            ? accessEl.EnumerateArray().Select(a => new UserExportAccessEvent(
+                a.GetProperty("time").GetDateTimeOffset(),
+                a.GetProperty("event").GetString()!,
+                a.GetProperty("roomId").GetGuid(),
+                a.GetProperty("userId").GetString()!,
+                OptString(a, "actorId"),
+                a.GetProperty("role").GetString()!,
+                a.GetProperty("via").GetString()!,
+                a.TryGetProperty("windowId", out var wi) && wi.ValueKind != JsonValueKind.Null ? wi.GetGuid() : null,
+                a.TryGetProperty("expiresAt", out var ex) && ex.ValueKind != JsonValueKind.Null ? ex.GetDateTimeOffset() : null,
+                OptString(a, "reason"),
+                a.TryGetProperty("fromSeq", out var fs) && fs.ValueKind != JsonValueKind.Null ? fs.GetUInt64() : null,
+                a.TryGetProperty("toSeq", out var ts) && ts.ValueKind != JsonValueKind.Null ? ts.GetUInt64() : null,
+                a.TryGetProperty("count", out var cn) && cn.ValueKind != JsonValueKind.Null ? cn.GetInt32() : null)).ToArray()
+            : [];
+
+        return new UserExport(userId, exportedAt, role, roomIds, messages, auditEvents, accessLog);
     }
 }

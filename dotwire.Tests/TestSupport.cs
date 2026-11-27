@@ -82,6 +82,7 @@ public static class OfflineApp
         Action<IServiceCollection>? services = null) =>
         factory.WithWebHostBuilder(b =>
         {
+            b.WithoutErasureWorker();
             b.UseSetting("Postgres:Migrate", "false");
             b.UseSetting("ConnectionStrings:PostgresRead", "Host=localhost;Database=dotwire");
             b.UseSetting("ConnectionStrings:PostgresWrite", "Host=localhost;Database=dotwire");
@@ -99,4 +100,43 @@ public static class OfflineApp
                 services?.Invoke(s);
             });
         });
+}
+
+public sealed class RecordingAccessLogPublisher() : AccessLogPublisher(
+    null!,
+    Microsoft.Extensions.Options.Options.Create(new Dotwire.Configuration.NatsOptions()),
+    Microsoft.Extensions.Options.Options.Create(new Dotwire.Configuration.AccessLogOptions()),
+    TestMetrics.Create().Metrics,
+    Microsoft.Extensions.Logging.Abstractions.NullLogger<AccessLogPublisher>.Instance)
+{
+    public override bool IsEnabled => true;
+
+    public List<AccessEvent> Recorded { get; } = [];
+
+    public List<AccessEvent> Closes { get; } = [];
+
+    public bool FailRecords { get; set; }
+
+    public int FailFromCall { get; set; }
+
+    public override Task RecordAsync(AccessEvent evt, CancellationToken ct)
+    {
+        int calls;
+        lock (Recorded)
+        {
+            Recorded.Add(evt);
+            calls = Recorded.Count;
+        }
+        if (!FailRecords && !(FailFromCall > 0 && calls >= FailFromCall))
+            return Task.CompletedTask;
+        if (evt.Event == AccessEvents.Opened)
+            RecordClose(AccessEvents.Close(evt, AccessEvents.Error, DateTimeOffset.UtcNow));
+        throw new AccessLogUnavailableException();
+    }
+
+    public override void RecordClose(AccessEvent evt)
+    {
+        lock (Closes)
+            Closes.Add(evt);
+    }
 }

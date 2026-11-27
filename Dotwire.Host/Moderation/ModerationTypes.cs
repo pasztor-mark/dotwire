@@ -8,7 +8,7 @@ public sealed record ModerationVerdict(Guid RoomId, ulong Seq, bool Flagged, str
 
 /// <summary>
 /// The expensive judgment call, run off the send path over a whole batch at once. Implementations
-/// call an LLM (see <c>samples/Moderation</c> for a Claude Batch API reference implementation),
+/// call an LLM,
 /// a third-party moderation API, or anything else that is too slow to sit inside a send.
 /// Return one verdict per input; inputs with no verdict are treated as not flagged.
 /// </summary>

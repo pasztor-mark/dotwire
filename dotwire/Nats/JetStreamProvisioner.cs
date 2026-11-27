@@ -16,14 +16,16 @@ public static class JetStreamProvisioner
         INatsJSContext js,
         NatsOptions options,
         ILogger logger,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        WebhooksOptions? webhooks = null,
+        AccessLogOptions? accessLog = null)
     {
         const int maxAttempts = 15;
         for (var attempt = 1; ; attempt++)
         {
             try
             {
-                await ProvisionOnceAsync(js, options, ct);
+                await ProvisionOnceAsync(js, options, webhooks, accessLog, ct);
                 logger.LogInformation(
                     "JetStream provisioned: streams {Rooms}/{Audit}, consumer {Consumer}",
                     options.RoomsStream, options.AuditStream, options.PostgresWriterConsumer);
@@ -39,7 +41,7 @@ public static class JetStreamProvisioner
     }
 
     private static async Task ProvisionOnceAsync(
-        INatsJSContext js, Dotwire.Configuration.NatsOptions options, CancellationToken ct)
+        INatsJSContext js, Dotwire.Configuration.NatsOptions options, WebhooksOptions? webhooks, AccessLogOptions? accessLog, CancellationToken ct)
     {
         await js.CreateOrUpdateStreamAsync(
             new StreamConfig(options.RoomsStream, [options.RoomsSubjectFilter])
@@ -76,6 +78,50 @@ public static class JetStreamProvisioner
                 Name = options.AuditWriterConsumer,
                 DurableName = options.AuditWriterConsumer,
                 AckPolicy = ConsumerConfigAckPolicy.Explicit,
+            }, ct);
+
+        if (accessLog?.Enabled == true)
+        {
+            await js.CreateOrUpdateStreamAsync(
+                new StreamConfig(options.AccessLogStream, [options.AccessLogSubject])
+                {
+                    Storage = StreamConfigStorage.File,
+                    Retention = StreamConfigRetention.Interest,
+                    Discard = StreamConfigDiscard.New,
+                    MaxBytes = options.AccessLogMaxBytes,
+                }, ct);
+
+            await js.CreateOrUpdateConsumerAsync(
+                options.AccessLogStream,
+                new ConsumerConfig
+                {
+                    Name = options.AccessLogWriterConsumer,
+                    DurableName = options.AccessLogWriterConsumer,
+                    AckPolicy = ConsumerConfigAckPolicy.Explicit,
+                }, ct);
+        }
+
+        if (string.IsNullOrEmpty(webhooks?.Erasure.Url))
+            return;
+
+        await js.CreateOrUpdateStreamAsync(
+            new StreamConfig(options.ErasureNoticesStream, [options.ErasureNoticesSubject])
+            {
+                Storage = StreamConfigStorage.File,
+                Retention = StreamConfigRetention.Workqueue,
+                MaxAge = TimeSpan.FromHours(options.ErasureNoticesMaxAgeHours),
+            }, ct);
+
+        await js.CreateOrUpdateConsumerAsync(
+            options.ErasureNoticesStream,
+            new ConsumerConfig
+            {
+                Name = options.ErasureNoticesConsumer,
+                DurableName = options.ErasureNoticesConsumer,
+                AckPolicy = ConsumerConfigAckPolicy.Explicit,
+                AckWait = TimeSpan.FromMilliseconds(Math.Max(30_000, 2L * webhooks.Erasure.TimeoutMs)),
+                MaxDeliver = -1,
+                Backoff = ErasureNotifierService.Backoff,
             }, ct);
     }
 }

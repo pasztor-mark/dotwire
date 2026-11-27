@@ -10,9 +10,11 @@ anything that would let it.
 
 Because dotwire has no users, `sub` is the host's user id, an opaque string dotwire never
 interprets. dotwire doesn't know or care what identity system produced
-it — a UUID, an email, a database primary key — it only needs `sub` to be stable and unique
+it — a UUID, a database primary key — it only needs `sub` to be stable and unique
 per host user, since it's the join key against dotwire's own `user_roles` and `room_members`
-tables. Trust flows in one direction: the host asserts identity and a claimed role via the
+tables. Use an opaque id rather than an email address or other personal data: dotwire stores
+`sub` in plaintext in those tables, in the audit log and in the erasure records, and audit
+entries keep their ids after an erasure. Trust flows in one direction: the host asserts identity and a claimed role via the
 JWT; dotwire verifies the signature, then re-derives authorization from its own tables rather
 than taking the token's word for anything beyond "this request is from `sub`."
 
@@ -30,6 +32,12 @@ except where marked.
 | `exp` / `iat` | yes | Standard expiry/issued-at claims, both enforced: a token without `iat`, with `iat` in the future, or with `exp - iat` above `Auth:MaxTokenLifetimeMinutes` (default 60, `0` disables the cap) is rejected. Clock skew tolerance is `Auth:ClockSkewSeconds` (default 30). Short TTLs are recommended (guidance: 5–60 minutes) — see "Threat notes" for why. |
 | `dw:role` | yes | Namespaced custom claim; one of `member` \| `auditor` \| `admin`. Cross-checked against the service-side `user_roles` table (see "Authorization pipeline") — the JWT's claim is treated as a hint, not a grant. |
 | `dw:name` | no | Optional display name. |
+| `dw:actor` | no | Optional id of the host service acting for `sub`, such as the host's admin identity. Validated like `sub` (`IdValidation`); a token whose `dw:actor` is invalid is rejected. It grants nothing: dotwire copies it into the access log as `actorId` and makes no other decision from it. Host SDKs set it on their own member calls; tokens you hand to end users should not carry it. |
+
+**Reserved id.** `dotwire:erased` is reserved. Account erasure writes it as the sender of anonymized
+messages, so dotwire rejects it as a token `sub`, in admin path ids and as an injection `senderId`. This
+is technically breaking for a host whose user id is literally `dotwire:erased`: such an id must be
+renamed before upgrading to 0.6.0 (see UPGRADING.md).
 
 **Header:** `kid` (key id) is required in every token's header — it is how dotwire selects
 which public key to verify against, whether the key came from a JWKS endpoint or inline
@@ -109,7 +117,7 @@ service (roles, room membership, redaction, DSAR exports) but participates in ro
 also listed in `room_members` like anyone else. The three roles are independent axes, not a
 hierarchy where a higher role silently subsumes a lower one's room access.
 
-**Audit is auditor-only.** The `GET /audit`/`GET /audit/verify` surface checks for the
+**Audit is auditor-only.** The `GET /audit`, `GET /audit/verify` and `GET /audit/access` surface checks for the
 `auditor` role specifically — `admin` does **not** get audit access by holding the `admin`
 role alone. `user_roles` holds exactly one role per `sub`, so the same `sub` can never be both:
 an operator who also needs to read the audit trail uses a second identity that holds
@@ -125,7 +133,8 @@ with a transaction-scoped advisory lock). Beyond that, any admin can still grant
 `auditor` to any `sub`: dotwire has no second approver for privileged grants. Every grant is
 audited (`role.set.*`, including the `member` rows `ensureMemberRole` creates), so separation of
 duties for privileged grants is enforced by reviewing the audit trail, and by the host keeping
-admin tokens out of reach of the people who hold the auditor identity.
+admin tokens out of reach of the people who hold the auditor identity. A host that wants approvers for
+admin actions builds the approval step in its own backend; see COMPLIANCE.md, "Approving admin actions."
 
 **Message injection is audited, and does not grant room read access.** The admin API lets an
 admin inject a message into any room as an asserted sender (`SendSystemMessageAsync` /
@@ -140,6 +149,27 @@ injection into a room nobody belongs to is accepted and simply has no audience; 
 audited and rate-limited under the `admin` bucket. Injecting into a room still does not let the admin *read* that room's history or live
 traffic; write-by-injection and read access remain separate grants, consistent with "Audit
 access is not room access" above.
+
+**Compliance powers are admin powers, and they do not read content.** Legal holds, emergency
+deletion and account erasure are admin-only, and like message injection they act on data without room
+membership. None of them returns message content to the caller: a hold changes what may be deleted,
+emergency deletion removes a message and audits the reason code, and erasure rewrites or removes the
+user's messages in the background. Admins can place and release holds, delete any message through the
+emergency path (`reason` is `illegal_content` or `court_order`), and erase any account other than their
+own and not the last admin. Each action is audited (`hold.placed`, `hold.released`,
+`message.redacted.emergency`, `user.erasure.requested`, `user.erased`). There is no second approver, so
+separation of duties for these powers depends on reviewing the audit trail and on keeping admin tokens
+scoped to the people who should hold them. COMPLIANCE.md, "Approving admin actions," describes how a host
+adds approvers in front of every admin action.
+
+**Account erasure revokes access like role deletion.** `POST /admin/users/{id}/erase` removes the user's
+room memberships and role at once, the same way `DELETE /admin/users/{id}/role` does, so live connections
+close and REST access ends within the same window as a role deletion. The self and last-admin rules apply
+as they do to role changes: `409 self_erasure` for the caller's own `sub`, and `409 last_admin` for the only
+admin. While an erasure is open, role changes, room member adds and admin injections as that user answer `409 erasure_open`.
+Once it completes, grants work again, and any new data falls under a new erasure. Hosts must not reuse a
+`sub` for a different person: a completed erasure does not cover a new person, and a later erasure of that
+`sub` would also remove the new person's messages.
 
 **History reads follow room membership, not role.** Fetching a room's message history is
 gated the same way live delivery is — by `room_members`, checked at the point of the
@@ -165,16 +195,16 @@ point the read pool at the primary or a synchronous replica where that matters.
 governed entirely by `room_members` — being a `member` grants no rooms by itself, it only
 establishes that this `sub` is a normal (non-privileged) participant wherever it is added.
 
-**`auditor`** grants read access to the audit log (see ARCHITECTURE.md's "Audit log" section)
-and nothing else — the role itself grants zero room access. If that same `sub` is also listed
+**`auditor`** grants read access to the audit log and the access log (`GET /audit/access`; see
+ARCHITECTURE.md's "Audit log" and "Access log" sections) and nothing else — the role itself grants zero room access. If that same `sub` is also listed
 in `room_members`, room access follows membership like anyone else, the same as it would for
 any other role; audit access is not room access, and the two paths are unrelated. Reading the
 audit log is itself an audited action, so auditor access is self-documenting in the trail it
 reads.
 
 **`admin`** manages the service: populating and editing `user_roles`, managing `room_members`
-via the admin API, and operating the compliance surface (redact/delete messages, DSAR
-exports — see COMPLIANCE.md). Admin is a service-management role, not an automatic room
+via the admin API, and operating the compliance surface (redact and emergency-delete messages,
+place and release legal holds, erase accounts, DSAR exports — see COMPLIANCE.md). Admin is a service-management role, not an automatic room
 membership or audit-read grant. An admin who needs to read a room's messages must be added to
 `room_members`, same as any other role; reading the audit log takes a separate identity with
 the `auditor` role, since one `sub` holds one role.

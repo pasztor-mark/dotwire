@@ -27,7 +27,7 @@ public sealed partial class DotwireHostClient
     public Task<IReadOnlyList<string>> GetRoomParticipantsAsync(Guid roomId, string asUserId, CancellationToken ct = default) =>
         WithResolvedRoleAsync(asUserId, async (role, innerCt) =>
         {
-            var token = MintToken(asUserId, role, ttl: _options.DefaultTokenTtl);
+            var token = MintMemberCallToken(asUserId, role);
             var userIds = await SendAsync(HttpMethod.Get, $"/rooms/{roomId}/participants", token,
                 DotwireHostJsonContext.Default.StringArray, innerCt);
             return (IReadOnlyList<string>)userIds;

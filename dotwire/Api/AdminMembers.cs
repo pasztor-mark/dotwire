@@ -39,6 +39,13 @@ public static partial class Admin
             await using (var conn = await writeDataSource.OpenConnectionAsync(ct))
             await using (var tx = await conn.BeginTransactionAsync(ct))
             {
+                await LockRoleMutationsAsync(conn, tx, ct);
+                foreach (var userId in request.UserIds)
+                {
+                    if (await ErasureStatusQuery.OpenErasureIdAsync(conn, tx, userId, ct) is not null)
+                        return ApiResults.Conflict("erasure_open", $"erasure open for {userId}");
+                }
+
                 var grantedMemberRole = new List<string>();
                 foreach (var userId in request.UserIds)
                 {

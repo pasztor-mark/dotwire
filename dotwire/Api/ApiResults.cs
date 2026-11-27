@@ -37,6 +37,12 @@ public static class ApiResults
     public static IResult AuditUnavailable() =>
         new AuditUnavailableResult(Error(StatusCodes.Status503ServiceUnavailable, "audit_unavailable"));
 
+    public static IResult AccessLogUnavailable() =>
+        Error(StatusCodes.Status503ServiceUnavailable, "access_log_unavailable");
+
+    public static IResult NoticeUnavailable() =>
+        Error(StatusCodes.Status503ServiceUnavailable, "notice_unavailable");
+
     public static IResult StreamUnavailable() =>
         Error(StatusCodes.Status503ServiceUnavailable, "stream_unavailable");
 

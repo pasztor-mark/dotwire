@@ -23,6 +23,12 @@ public sealed record RetractedEvent : RoomEvent
     public required ulong Seq { get; init; }
 }
 
+public sealed record ErasedEvent : RoomEvent
+{
+    public required string Mode { get; init; }
+    public required IReadOnlyList<ulong> Seqs { get; init; }
+}
+
 /// <summary>A user in this room is (or stopped) typing.</summary>
 public sealed record TypingEvent : RoomEvent
 {

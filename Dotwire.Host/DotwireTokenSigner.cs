@@ -28,7 +28,8 @@ public sealed class DotwireTokenSigner : IDisposable
         string userId,
         string role = "member",
         string? displayName = null,
-        TimeSpan? ttl = null
+        TimeSpan? ttl = null,
+        string? actor = null
     )
     {
         if (role is not ("member" or "auditor" or "admin"))
@@ -52,6 +53,11 @@ public sealed class DotwireTokenSigner : IDisposable
         if (!string.IsNullOrWhiteSpace(displayName))
         {
             descriptor.Claims["dw:name"] = displayName;
+        }
+
+        if (!string.IsNullOrWhiteSpace(actor))
+        {
+            descriptor.Claims["dw:actor"] = actor;
         }
 
         return _jwt.CreateToken(descriptor);

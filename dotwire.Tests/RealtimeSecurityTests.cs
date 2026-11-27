@@ -355,7 +355,8 @@ public class RealtimeUnitSecurityTests
             presence ?? new PresenceCoalescer(nats, Options.Create(new NatsOptions { Enabled = false }), NullLogger<PresenceCoalescer>.Instance),
             natsOptions,
             NullLogger<RoomInterestManager>.Instance,
-            metrics ?? TestMetrics.Create().Metrics);
+            metrics ?? TestMetrics.Create().Metrics,
+            AccessWindowTests.Disabled());
     }
 
     [Fact]

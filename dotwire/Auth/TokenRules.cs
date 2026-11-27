@@ -12,6 +12,8 @@ public static partial class TokenRules
             return "Token has no sub claim.";
         if (!IdValidation.IsValid(sub))
             return "Token sub claim is not a valid id.";
+        if (principal.FindFirstValue("dw:actor") is { } actor && !IdValidation.IsValid(actor))
+            return "Token dw:actor claim is not a valid id.";
         if (principal.FindFirstValue("dw:role") is not ("member" or "auditor" or "admin"))
             return "Token has no valid dw:role claim.";
         if (!long.TryParse(principal.FindFirstValue("iat"), out var iat))

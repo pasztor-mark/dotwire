@@ -114,6 +114,12 @@ export function toRoomEvent(raw: RawSseEvent): RoomEvent | null {
       const seq = seqOf(d.seq);
       return seq === null ? null : { type: 'retracted', roomId, seq };
     }
+    case 'erased': {
+      const mode = d.mode;
+      if (!Array.isArray(d.seqs) || (mode !== 'anonymize' && mode !== 'delete')) return null;
+      const seqs = d.seqs.every((s) => seqOf(s) !== null) ? (d.seqs as number[]) : null;
+      return seqs === null ? null : { type: 'erased', roomId, mode, seqs };
+    }
     case 'typing': {
       const userId = str(d.userId);
       return userId === null ? null : { type: 'typing', roomId, userId, isTyping: d.isTyping === true };

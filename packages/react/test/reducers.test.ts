@@ -72,6 +72,28 @@ test('roomMessagesReducer: retracted removes the matching seq only', () => {
   assert.deepEqual(state.messages.map((m) => m.seq), [1, 3]);
 });
 
+test('roomMessagesReducer: messagesErased anonymizes only the listed seqs', () => {
+  let state = roomMessagesReducer(initialRoomMessagesState, {
+    type: 'subscribed',
+    page: page([message(1), message(2), message(3)])
+  });
+  state = roomMessagesReducer(state, { type: 'messagesErased', mode: 'anonymize', seqs: [1, 3] });
+  assert.deepEqual(state.messages.map((m) => [m.seq, m.senderId]), [
+    [1, 'dotwire:erased'],
+    [2, 'user-1'],
+    [3, 'dotwire:erased']
+  ]);
+});
+
+test('roomMessagesReducer: messagesErased delete removes only the listed seqs', () => {
+  let state = roomMessagesReducer(initialRoomMessagesState, {
+    type: 'subscribed',
+    page: page([message(1), message(2), message(3)])
+  });
+  state = roomMessagesReducer(state, { type: 'messagesErased', mode: 'delete', seqs: [2] });
+  assert.deepEqual(state.messages.map((m) => m.seq), [1, 3]);
+});
+
 test('roomMessagesReducer: revoked sets status without touching messages', () => {
   let state = roomMessagesReducer(initialRoomMessagesState, {
     type: 'subscribed',

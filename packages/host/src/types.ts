@@ -28,6 +28,7 @@ export interface DotwireHostConfig {
   presend?: (ctx: PresendContext) => Promise<PresendResult> | PresendResult;
   /** Same idea as {@link presend}, run after a message is accepted; see {@link PostSendContext}. */
   postSend?: (ctx: PostSendContext) => Promise<void> | void;
+  onErasure?: (notice: ErasureNotice) => Promise<void> | void;
 }
 
 export interface MintTokenOptions {
@@ -35,6 +36,7 @@ export interface MintTokenOptions {
   displayName?: string;
   /** jose-style duration string, e.g. "15m". Defaults to `config.defaultTokenTtl`. */
   ttl?: string;
+  actor?: string;
 }
 
 export interface PresendContext {
@@ -158,6 +160,12 @@ export interface AuditCheckpointsResponse {
   checkpoints: AuditCheckpointEntry[];
 }
 
+export interface AuditArchiveResult {
+  count: number;
+  lastId: number;
+  lastHash: string | null;
+}
+
 export interface UserExportMessage {
   roomId: string;
   seq: number;
@@ -177,6 +185,22 @@ export interface UserExportAuditEvent {
   time: string;
 }
 
+export interface UserExportAccessEvent {
+  time: string;
+  event: string;
+  roomId: string;
+  userId: string;
+  actorId: string | null;
+  role: string;
+  via: string;
+  windowId: string | null;
+  expiresAt: string | null;
+  reason: string | null;
+  fromSeq: number | null;
+  toSeq: number | null;
+  count: number | null;
+}
+
 export interface UserExport {
   userId: string;
   exportedAt: string;
@@ -184,6 +208,38 @@ export interface UserExport {
   roomIds: string[];
   messages: UserExportMessage[];
   auditEvents: UserExportAuditEvent[];
+  accessLog: UserExportAccessEvent[];
+}
+
+export interface AccessLogQuery {
+  from: string | Date;
+  to?: string | Date;
+  roomId?: string;
+  userId?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface AccessLogEntry {
+  kind: string;
+  roomId: string;
+  userId: string;
+  actorId: string | null;
+  role: string;
+  via: string;
+  start: string;
+  windowId: string | null;
+  end: string | null;
+  endReason: string | null;
+  expiresAt: string | null;
+  fromSeq: number | null;
+  toSeq: number | null;
+  count: number | null;
+}
+
+export interface AccessLogPage {
+  entries: AccessLogEntry[];
+  next: string | null;
 }
 
 export interface GetMessagesOptions {
@@ -222,6 +278,7 @@ export interface TokenResponseOptions {
 export type RoomEvent =
   | { type: 'message'; roomId: string; seq: number; senderId: string; time: string; content: string; replayed?: boolean }
   | { type: 'retracted'; roomId: string; seq: number }
+  | { type: 'erased'; roomId: string; mode: 'anonymize' | 'delete'; seqs: number[] }
   | { type: 'typing'; roomId: string; userId: string; isTyping: boolean }
   | { type: 'presence'; roomId: string; joined: string[]; left: string[] }
   | { type: 'revoked'; roomId: string };
@@ -235,5 +292,60 @@ export interface ClientSendResult {
 /** Result of the two webhook handlers' body-based variants. */
 export interface WebhookResult {
   status: number;
-  body: { allow: boolean; content?: string; reason?: string } | Record<string, never>;
+  body: { allow: boolean; content?: string; reason?: string } | { error: string } | Record<string, never>;
+}
+
+export interface ComplianceSettings {
+  allowChanges: boolean;
+  minimumKeepDays: number;
+  erasureMode: string;
+  activeHolds: number;
+  retentionPaused: boolean;
+  accessLogEnabled: boolean;
+  accessLogRetentionDays: number;
+}
+
+export interface LegalHold {
+  id: number;
+  scope: string;
+  roomId: string | null;
+  userId: string | null;
+  matterRef: string;
+  placedBy: string;
+  placedAt: string;
+  releasedAt: string | null;
+  releasedBy: string | null;
+}
+
+export type EmergencyDeleteReason = 'illegal_content' | 'court_order';
+
+export type ErasureMode = 'anonymize' | 'delete';
+
+export interface ErasureStatus {
+  id: number;
+  userId: string;
+  mode: string;
+  requestedAt: string;
+  status: string;
+  remaining: number;
+  blockedBy: string[];
+  completedAt: string | null;
+}
+
+export interface ErasedMessageRef {
+  roomId: string;
+  seq: number;
+}
+
+export interface ErasureNotice {
+  event: string;
+  time: string;
+  roomId?: string;
+  seq?: number;
+  reason?: string;
+  userId?: string;
+  mode?: string;
+  erasureId?: number;
+  status?: string;
+  messages?: ErasedMessageRef[];
 }

@@ -130,9 +130,18 @@ built, shipped in `dotwire`, and have matching methods in both host SDKs (`Dotwi
   daily checkpoint anchors and a `GET /audit/verify` endpoint, so integrity verification can
   start from a recent anchor instead of walking the whole chain from genesis. See
   ARCHITECTURE.md, "Audit log."
+- **Opt-in access log.** An append-only record of which member opened a live window and which history
+  pages each member was served, with ids only. Auditors query it at `GET /audit/access`, every query is
+  itself audited, and DSAR exports include the subject's rows. It is off by default, and an open or read
+  it cannot record is refused rather than served. See ARCHITECTURE.md, "Access log."
 - **DSAR export and configurable retention.** Admin-role endpoints for GDPR Art. 15 export and
   for setting/reading a Postgres message-retention window (chunk-level `drop_chunks`, `O(1)`
   per chunk, zero vacuum bloat). See ARCHITECTURE.md, "Encryption at rest & data lifecycle."
+- **Data-subject tooling.** Admin-role endpoints for account erasure (anonymize or delete, with the
+  reserved `dotwire:erased` pseudonym), legal holds that pause retention, emergency message deletion, and
+  an optional durable erasure-notice webhook for the host's own receivers. These are tools for the host's
+  compliance process, not a certification of it. See ARCHITECTURE.md, "Encryption at rest & data
+  lifecycle," and COMPLIANCE.md.
 - **Per-node rate limiting.** In-process token-bucket limits on send, read, admin, and hub
   routes, requiring no new infrastructure component. See ARCHITECTURE.md, "Concurrency and
   fanout disciplines."

@@ -39,6 +39,15 @@ test('parseSseStream + toRoomEvent handle every event type and ignore ping comme
   ]);
 });
 
+test('toRoomEvent parses erased and rejects a missing or non-array seqs', () => {
+  const erased = (data: object) => toRoomEvent({ event: 'erased', data: JSON.stringify(data) });
+
+  assert.deepEqual(erased({ roomId: '22222222-2222-4222-8222-222222222222', mode: 'delete', seqs: [1, 2] }), { type: 'erased', roomId: '22222222-2222-4222-8222-222222222222', mode: 'delete', seqs: [1, 2] });
+  assert.equal(erased({ roomId: '22222222-2222-4222-8222-222222222222', mode: 'delete' }), null);
+  assert.equal(erased({ roomId: '22222222-2222-4222-8222-222222222222', mode: 'delete', seqs: 'x' }), null);
+  assert.equal(erased({ roomId: '22222222-2222-4222-8222-222222222222', mode: 'shred', seqs: [1] }), null);
+});
+
 test('streamRoomEvents yields typed events and stops after revoked', async () => {
   const text = 'id: 1\nevent: message\ndata: {"roomId":"22222222-2222-4222-8222-222222222222","seq":1,"senderId":"a","time":"t","content":"hi"}\n\n' + 'event: revoked\ndata: {"roomId":"22222222-2222-4222-8222-222222222222"}\n\n';
   const { fetchImpl } = createFakeFetch(

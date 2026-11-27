@@ -35,6 +35,10 @@ builder.Services.Configure<SseOptions>(builder.Configuration.GetSection(SseOptio
 builder.Services.Configure<RateLimitOptions>(builder.Configuration.GetSection(RateLimitOptions.SectionName));
 builder.Services.Configure<RetentionOptions>(builder.Configuration.GetSection(RetentionOptions.SectionName));
 builder.Services.Configure<CompressionOptions>(builder.Configuration.GetSection(CompressionOptions.SectionName));
+builder.Services.Configure<ComplianceOptions>(builder.Configuration.GetSection(ComplianceOptions.SectionName));
+builder.Services.Configure<AccessLogOptions>(builder.Configuration.GetSection(AccessLogOptions.SectionName));
+builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
+builder.Services.AddSingleton<ILsnSource, PostgresLsnSource>();
 builder.Services.AddSingleton<MessageCipher>();
 
 var dotwireOptions = builder.Configuration.GetSection(DotwireOptions.SectionName).Get<DotwireOptions>() ?? new DotwireOptions();
@@ -57,6 +61,14 @@ AuthLookupRules.Validate(dotwireOptions);
 CompressionRules.Validate(
     builder.Configuration.GetSection(CompressionOptions.SectionName).Get<CompressionOptions>() ?? new CompressionOptions(),
     builder.Configuration.GetSection(NatsOptions.SectionName).Get<NatsOptions>() ?? new NatsOptions());
+ComplianceRules.Validate(
+    builder.Configuration.GetSection(ComplianceOptions.SectionName).Get<ComplianceOptions>() ?? new ComplianceOptions(),
+    builder.Configuration.GetSection(RetentionOptions.SectionName).Get<RetentionOptions>() ?? new RetentionOptions());
+AccessLogRules.Validate(
+    builder.Configuration.GetSection(AccessLogOptions.SectionName).Get<AccessLogOptions>() ?? new AccessLogOptions(),
+    builder.Configuration.GetSection(NatsOptions.SectionName).Get<NatsOptions>() ?? new NatsOptions(),
+    authOptions,
+    builder.Configuration.GetSection(ComplianceOptions.SectionName).Get<ComplianceOptions>() ?? new ComplianceOptions());
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -177,6 +189,8 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<PresenceCoalescer>
 builder.Services.AddSingleton<TypingThrottle>();
 builder.Services.AddSingleton<UserConnectionLimiter>();
 builder.Services.AddSingleton<AuditPublisher>();
+builder.Services.AddSingleton<AccessLogPublisher>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<AccessLogPublisher>());
 
 builder.Services.AddHttpClient(PresendWebhookClient.HttpClientName, client =>
         client.MaxResponseContentBufferSize = PresendWebhookClient.MaxResponseBytes)
@@ -189,6 +203,7 @@ builder.Services.AddSingleton<SendRateLimiter>();
 builder.Services.AddSingleton<MessageSend>();
 builder.Services.AddSingleton<PostSendWebhookService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<PostSendWebhookService>());
+builder.Services.AddSingleton<ErasureNoticePublisher>();
 
 var nodeRole = dotwireOptions.Role;
 if (dotwireOptions.AuthCacheSeconds > 0 && nodeRole is NodeRole.All or NodeRole.Api)
@@ -201,20 +216,36 @@ if (nodeRole is NodeRole.All or NodeRole.Api)
 {
     builder.Services.AddHostedService<PostgresWriterService>();
     builder.Services.AddHostedService<AuditWriterService>();
+    builder.Services.AddHostedService<AccessLogWriterService>();
+    builder.Services.AddHostedService<ErasureNotifierService>();
+    builder.Services.AddHostedService<ErasureWorkerService>();
 }
 if (nodeRole is NodeRole.All or NodeRole.Gateway)
     builder.Services.AddHostedService<MembershipSweeper>();
 
 var app = builder.Build();
 
-if (!string.IsNullOrEmpty(webhooksOptions.Presend.Url) || !string.IsNullOrEmpty(webhooksOptions.PostSend.Url))
+if (!string.IsNullOrEmpty(webhooksOptions.Presend.Url) || !string.IsNullOrEmpty(webhooksOptions.PostSend.Url) || !string.IsNullOrEmpty(webhooksOptions.Erasure.Url))
 {
     if (string.IsNullOrEmpty(webhooksOptions.Secret))
         app.Logger.LogWarning("Webhook URLs are configured without Dotwire:Webhooks:Secret; hosts cannot verify webhook calls.");
 }
 
+if (!string.IsNullOrEmpty(webhooksOptions.PostSend.Url) && string.IsNullOrEmpty(webhooksOptions.Erasure.Url))
+    app.Logger.LogWarning("Dotwire:Webhooks:PostSend:Url is set without Dotwire:Webhooks:Erasure:Url; the postsend receiver is never told about erasures.");
+
+if (dotwireOptions.MembershipSweepSeconds == 0 && authOptions.MaxTokenLifetimeMinutes == 0)
+    app.Logger.LogWarning("Dotwire:MembershipSweepSeconds and Auth:MaxTokenLifetimeMinutes are both 0; erasure cannot bound late sends from revoked sessions and waits 60 minutes before scanning.");
+
 if (dotwireOptions.AuthCacheSeconds > 0 && !app.Services.GetRequiredService<IOptions<NatsOptions>>().Value.Enabled)
     app.Logger.LogWarning("Dotwire:AuthCacheSeconds is set but NATS is disabled; the auth cache stays off.");
+
+var complianceOptions = app.Services.GetRequiredService<IOptions<ComplianceOptions>>().Value;
+app.Logger.LogInformation(
+    "Compliance: AllowChanges={AllowChanges} MinimumKeepDays={MinimumKeepDays} ErasureMode={ErasureMode}",
+    complianceOptions.AllowChanges,
+    complianceOptions.MinimumKeepDays,
+    ErasureModes.ToWire(complianceOptions.Erasure.Mode));
 
 app.UseCors();
 app.Use((context, next) =>
@@ -269,6 +300,14 @@ if (postgres.Migrate)
         await cmd.ExecuteScalarAsync();
     }
 
+    {
+        await using var dataSource = new NpgsqlDataSourceBuilder(RequireConnectionString(app.Configuration, "PostgresMigrator")) { Name = "migrator" }.Build();
+        await using var conn = await dataSource.OpenConnectionAsync();
+        await using var cmd = new NpgsqlCommand("SELECT set_access_log_retention($1)", conn);
+        cmd.Parameters.AddWithValue(app.Services.GetRequiredService<IOptions<AccessLogOptions>>().Value.RetentionDays);
+        await cmd.ExecuteScalarAsync();
+    }
+
     var compressionDays = app.Services.GetRequiredService<IOptions<CompressionOptions>>().Value.AfterDays;
     if (compressionDays.HasValue)
     {
@@ -283,12 +322,27 @@ if (postgres.Migrate)
 }
 
 var nats = app.Services.GetRequiredService<IOptions<NatsOptions>>().Value;
+var accessLogOptions = app.Services.GetRequiredService<IOptions<AccessLogOptions>>().Value;
 if (nats.Enabled)
 {
     await JetStreamProvisioner.ProvisionAsync(
         app.Services.GetRequiredService<INatsJSContext>(),
         nats,
-        app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(nameof(JetStreamProvisioner)));
+        app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(nameof(JetStreamProvisioner)),
+        webhooks: webhooksOptions,
+        accessLog: accessLogOptions);
+
+    try
+    {
+        await app.Services.GetRequiredService<AuditPublisher>().PublishAsync(
+            new AuditEvent("access_log.config", null, null, null, null, accessLogOptions.Enabled ? 1 : 0, DateTimeOffset.UtcNow),
+            CancellationToken.None);
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogError("Access log config audit event could not be published ({ErrorType}): {Error}", ex.GetType().Name, ex.Message);
+        app.Services.GetRequiredService<DotwireMetrics>().AuditUnavailable();
+    }
 }
 
 await keyRing.RefreshAsync();

@@ -8,6 +8,7 @@ namespace Dotwire.Nats;
 public sealed class JetStreamMetricsPoller(
     INatsJSContext js,
     IOptions<NatsOptions> natsOptions,
+    IOptions<AccessLogOptions> accessLog,
     DotwireMetrics metrics,
     ILogger<JetStreamMetricsPoller> logger) : BackgroundService
 {
@@ -24,6 +25,24 @@ public sealed class JetStreamMetricsPoller(
     }
 
     private Pair[]? _pairs;
+
+    private Pair[] Pairs => _pairs ??= BuildPairs();
+
+    internal IReadOnlyList<string> PairStreams => Pairs.Select(p => p.Stream).ToArray();
+
+    private Pair[] BuildPairs()
+    {
+        var options = natsOptions.Value;
+        var pairs = new List<Pair>
+        {
+            new(options.RoomsStream, options.PostgresWriterConsumer, options.RoomsSubjectFilter),
+            new(options.AuditStream, options.AuditWriterConsumer, options.AuditSubject),
+        };
+        if (accessLog.Value.Enabled)
+            pairs.Add(new Pair(options.AccessLogStream, options.AccessLogWriterConsumer, options.AccessLogSubject));
+        return pairs.ToArray();
+    }
+
     private volatile JetStreamSnapshot[] _snapshots = [];
 
     internal IReadOnlyList<JetStreamSnapshot> Snapshots => _snapshots;
@@ -51,15 +70,9 @@ public sealed class JetStreamMetricsPoller(
 
     internal async Task PollOnceAsync(CancellationToken ct)
     {
-        var options = natsOptions.Value;
-        _pairs ??=
-        [
-            new Pair(options.RoomsStream, options.PostgresWriterConsumer, options.RoomsSubjectFilter),
-            new Pair(options.AuditStream, options.AuditWriterConsumer, options.AuditSubject),
-        ];
-
-        var results = new List<JetStreamSnapshot>(_pairs.Length);
-        foreach (var pair in _pairs)
+        var pairs = Pairs;
+        var results = new List<JetStreamSnapshot>(pairs.Length);
+        foreach (var pair in pairs)
         {
             ct.ThrowIfCancellationRequested();
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);

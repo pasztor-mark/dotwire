@@ -2,9 +2,11 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using Dotwire.Auth;
+using Dotwire.Configuration;
 using Dotwire.Crypto;
 using Dotwire.Data;
 using Dotwire.Nats;
+using Microsoft.Extensions.Options;
 using Npgsql;
 
 namespace Dotwire.Api;
@@ -19,20 +21,26 @@ public static partial class Admin
             [FromKeyedServices(PostgresDataSources.Read)] NpgsqlDataSource readDataSource,
             HttpContext http) =>
         {
-            await using var cmd = readDataSource.CreateCommand("SELECT get_message_retention()");
-            var days = (int)(await cmd.ExecuteScalarAsync(http.RequestAborted))!;
-            return Results.Ok(new RetentionResponse(days));
+            await using var cmd = readDataSource.CreateCommand("SELECT get_message_retention(), get_retention_paused()");
+            await using var reader = await cmd.ExecuteReaderAsync(http.RequestAborted);
+            await reader.ReadAsync(http.RequestAborted);
+            return Results.Ok(new RetentionResponse(reader.GetInt32(0), reader.GetBoolean(1)));
         });
 
         group.MapPut("/retention", async (
             SetRetentionRequest request,
             [FromKeyedServices(PostgresDataSources.Write)] NpgsqlDataSource writeDataSource,
             AuditPublisher auditPublisher,
+            IOptions<ComplianceOptions> compliance,
             ILoggerFactory loggerFactory,
             HttpContext http) =>
         {
             if (request.MessagesDays < 0 || request.MessagesDays > 36500)
                 return ApiResults.InvalidRequest("messagesDays must be between 0 and 36500");
+
+            var minimumKeepDays = compliance.Value.MinimumKeepDays;
+            if (request.MessagesDays > 0 && request.MessagesDays < minimumKeepDays)
+                return ApiResults.Conflict("minimum_keep", $"messagesDays must be 0 or at least {minimumKeepDays}");
 
             await using var conn = await writeDataSource.OpenConnectionAsync(http.RequestAborted);
             await using var tx = await conn.BeginTransactionAsync(http.RequestAborted);
@@ -42,6 +50,10 @@ public static partial class Admin
                 await cmd.ExecuteScalarAsync(http.RequestAborted);
             }
 
+            bool paused;
+            await using (var pausedCmd = new NpgsqlCommand("SELECT get_retention_paused()", conn, tx))
+                paused = (bool)(await pausedCmd.ExecuteScalarAsync(http.RequestAborted))!;
+
             var actorId = http.User.FindFirstValue("sub")!;
             var audit = new AuditEvent("retention.set", null, null, actorId, null, request.MessagesDays, DateTimeOffset.UtcNow);
             if (!await TryAuditAsync(auditPublisher, audit, AdminLogger(loggerFactory), http.RequestAborted))
@@ -49,7 +61,28 @@ public static partial class Admin
 
             await tx.CommitAsync(CancellationToken.None);
 
-            return Results.Ok(new RetentionResponse(request.MessagesDays));
+            return Results.Ok(new RetentionResponse(request.MessagesDays, paused));
+        });
+
+        group.MapGet("/compliance", async (
+            [FromKeyedServices(PostgresDataSources.Read)] NpgsqlDataSource readDataSource,
+            IOptions<ComplianceOptions> compliance,
+            IOptions<AccessLogOptions> accessLog,
+            HttpContext http) =>
+        {
+            await using var cmd = readDataSource.CreateCommand(
+                "SELECT (SELECT count(*) FROM legal_holds h WHERE NOT EXISTS (SELECT 1 FROM legal_hold_releases r WHERE r.hold_id = h.id)), get_retention_paused()");
+            await using var reader = await cmd.ExecuteReaderAsync(http.RequestAborted);
+            await reader.ReadAsync(http.RequestAborted);
+            var options = compliance.Value;
+            return Results.Ok(new ComplianceResponse(
+                options.AllowChanges,
+                options.MinimumKeepDays,
+                ErasureModes.ToWire(options.Erasure.Mode),
+                (int)reader.GetInt64(0),
+                reader.GetBoolean(1),
+                accessLog.Value.Enabled,
+                accessLog.Value.RetentionDays));
         });
 
         group.MapGet("/users/{userId}/export", async (
@@ -153,6 +186,36 @@ public static partial class Admin
                     if (reader.IsDBNull(5)) writer.WriteNull("subjectId"); else writer.WriteString("subjectId", reader.GetString(5));
                     if (reader.IsDBNull(6)) writer.WriteNull("value"); else writer.WriteNumber("value", reader.GetInt64(6));
                     writer.WriteString("time", reader.GetFieldValue<DateTimeOffset>(7));
+                    writer.WriteEndObject();
+                    if (writer.BytesPending > DsarFlushThresholdBytes)
+                        await writer.FlushAsync(ct);
+                }
+            }
+            writer.WriteEndArray();
+
+            writer.WriteStartArray("accessLog");
+            await using (var accessCmd = readDataSource.CreateCommand(
+                "SELECT time, event, room_id, user_id, actor_id, role, via, window_id, expires_at, reason, from_seq, to_seq, count " +
+                "FROM access_log WHERE user_id = $1 OR actor_id = $1 ORDER BY time, stream_seq"))
+            {
+                accessCmd.Parameters.AddWithValue(userId);
+                await using var reader = await accessCmd.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    writer.WriteStartObject();
+                    writer.WriteString("time", reader.GetFieldValue<DateTimeOffset>(0));
+                    writer.WriteString("event", reader.GetString(1));
+                    writer.WriteString("roomId", reader.GetGuid(2));
+                    writer.WriteString("userId", reader.GetString(3));
+                    if (reader.IsDBNull(4)) writer.WriteNull("actorId"); else writer.WriteString("actorId", reader.GetString(4));
+                    writer.WriteString("role", reader.GetString(5));
+                    writer.WriteString("via", reader.GetString(6));
+                    if (reader.IsDBNull(7)) writer.WriteNull("windowId"); else writer.WriteString("windowId", reader.GetGuid(7));
+                    if (reader.IsDBNull(8)) writer.WriteNull("expiresAt"); else writer.WriteString("expiresAt", reader.GetFieldValue<DateTimeOffset>(8));
+                    if (reader.IsDBNull(9)) writer.WriteNull("reason"); else writer.WriteString("reason", reader.GetString(9));
+                    if (reader.IsDBNull(10)) writer.WriteNull("fromSeq"); else writer.WriteNumber("fromSeq", (ulong)reader.GetInt64(10));
+                    if (reader.IsDBNull(11)) writer.WriteNull("toSeq"); else writer.WriteNumber("toSeq", (ulong)reader.GetInt64(11));
+                    if (reader.IsDBNull(12)) writer.WriteNull("count"); else writer.WriteNumber("count", reader.GetInt32(12));
                     writer.WriteEndObject();
                     if (writer.BytesPending > DsarFlushThresholdBytes)
                         await writer.FlushAsync(ct);

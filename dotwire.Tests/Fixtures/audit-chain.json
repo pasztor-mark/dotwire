@@ -1,0 +1,35 @@
+[
+  {
+    "id": 1,
+    "eventType": "member.added",
+    "roomId": "11111111-2222-3333-4444-555555555555",
+    "messageSeq": null,
+    "actorId": "admin-1",
+    "subjectId": "user-2",
+    "value": null,
+    "time": "2026-09-07T12:34:56.123456+00:00",
+    "hash": "76095cfb3d2efc4e3d353df46a58c1d548cc61acfad3373433086d4e03fd444e"
+  },
+  {
+    "id": 2,
+    "eventType": "audit.read",
+    "roomId": null,
+    "messageSeq": null,
+    "actorId": "auditor-1",
+    "subjectId": null,
+    "value": null,
+    "time": "2026-09-07T12:35:00.5+00:00",
+    "hash": "4ff4c3c8fbd4307008aa973078c1113fd559589c3e9bf422bfef205c6d6fc750"
+  },
+  {
+    "id": 3,
+    "eventType": "message.injected",
+    "roomId": "11111111-2222-3333-4444-555555555555",
+    "messageSeq": 42,
+    "actorId": "admin",
+    "subjectId": "system",
+    "value": 30,
+    "time": "2026-09-07T12:36:01+00:00",
+    "hash": "89c689f0d490922f9aab986261438b438fa06548b4ced8c294bcbc600a812ad6"
+  }
+]

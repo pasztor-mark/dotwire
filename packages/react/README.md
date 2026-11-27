@@ -100,7 +100,9 @@ function Room({ roomId }: { roomId: string }) {
 - **`useRoom(roomId, { history = 50 })`** → `{ messages, status, error, hasMore, loadOlder, send }`.
   `messages` grows for as long as the component stays mounted (older pages are merged in by `loadOlder`); remount or key the component per conversation for very long-lived rooms. Render `content` as text, never as HTML.
   Subscribes for the lifetime of the component, loads the initial history page, and applies
-  live messages, retractions, and revocation. `messages` is always sorted by `seq` and deduped.
+  live messages, retractions, erasures, and revocation. `messages` is always sorted by `seq` and deduped.
+  An erasure changes only the listed seqs: `anonymize` sets the sender to `dotwire:erased`, and `delete`
+  removes the message.
   `status` starts `'connecting'`, becomes `'ready'` once the initial subscribe resolves,
   `'revoked'` on membership revocation, or `'error'` if subscribe or `loadOlder` throws. `loadOlder()`
   pages backwards with `beforeSeq` and prepends the results; `hasMore` reflects whether an
@@ -116,7 +118,7 @@ function Room({ roomId }: { roomId: string }) {
 
 ## Architecture
 
-All state transitions (new message, retraction, revocation, typing start/stop/expiry, presence
+All state transitions (new message, retraction, erasure, revocation, typing start/stop/expiry, presence
 deltas) live in pure, framework-free reducer functions in `src/reducers.ts` — each is unit
 tested directly with Node's test runner (`test/reducers.test.ts`), with no React or DOM
 involved. The hooks in `src/hooks.ts` are thin `useReducer` wrappers that wire the underlying

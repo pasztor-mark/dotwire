@@ -111,6 +111,33 @@ public sealed partial class DotwireHostClient
         return new WebhookResult(200, "{}");
     }
 
+    public async Task<WebhookResult> HandleErasureWebhookAsync(Stream body, WebhookHeaders headers, CancellationToken ct = default)
+    {
+        EnsureWebhookSecretConfigured();
+        var bytes = await ReadBoundedAsync(body, _options.MaxWebhookBodyBytes, ct);
+        if (bytes is null)
+            return PayloadTooLarge();
+        if (!VerifySignature(bytes, headers, DateTimeOffset.UtcNow))
+            return Unauthorized();
+
+        var notice = JsonSerializer.Deserialize(bytes, DotwireHostJsonContext.Default.ErasureNotice)
+            ?? throw new JsonException("empty erasure webhook body");
+
+        if (Erasure is not null)
+        {
+            try
+            {
+                await Erasure(notice, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return new WebhookResult(500, Serialize(new ApiErrorBody("erasure_handler_failed")));
+            }
+        }
+
+        return new WebhookResult(200, "{}");
+    }
+
     private void EnsureWebhookSecretConfigured()
     {
         if (string.IsNullOrEmpty(_options.WebhookSecret) && !_options.AllowUnsignedWebhooks)

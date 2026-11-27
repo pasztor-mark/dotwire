@@ -1,6 +1,6 @@
 services:
   dotwire:
-    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.5.1}
+    image: ghcr.io/pasztor-mark/dotwire:${DOTWIRE_VERSION:-0.6.0}
     build:
       context: .
       dockerfile: dotwire/Dockerfile

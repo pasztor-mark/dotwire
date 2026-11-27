@@ -48,6 +48,12 @@ public static partial class Admin
             if (!IdValidation.IsValid(senderId))
                 return ApiResults.InvalidUserId();
 
+            await using (var conn = await writeDataSource.OpenConnectionAsync(http.RequestAborted))
+            {
+                if (await ErasureStatusQuery.OpenErasureIdAsync(conn, null, senderId, http.RequestAborted) is not null)
+                    return ApiResults.Conflict("erasure_open", $"erasure open for {senderId}");
+            }
+
             var actorId = http.User.FindFirstValue("sub")!;
             var content = request.Content!;
             var time = DateTimeOffset.UtcNow;
@@ -95,64 +101,137 @@ public static partial class Admin
             return Results.Accepted(value: new SendMessageResponse(published.Seq, published.Time));
         });
 
-        group.MapDelete("/rooms/{roomId}/messages/{seq}", async (
+        group.MapDelete("/rooms/{roomId}/messages/{seq}", (
             Guid roomId,
             ulong seq,
             [FromKeyedServices(PostgresDataSources.Write)] NpgsqlDataSource writeDataSource,
             INatsJSContext js,
             INatsConnection nats,
             AuditPublisher auditPublisher,
+            ErasureNoticePublisher noticePublisher,
             IOptions<NatsOptions> natsOptions,
+            IOptions<ComplianceOptions> compliance,
             ILoggerFactory loggerFactory,
             HttpContext http) =>
+            RedactAsync(roomId, seq, null, writeDataSource, js, nats, auditPublisher, noticePublisher,
+                natsOptions.Value, compliance.Value, loggerFactory, http));
+
+        group.MapPost("/rooms/{roomId}/messages/{seq}/emergency-delete", (
+            Guid roomId,
+            ulong seq,
+            EmergencyDeleteRequest request,
+            [FromKeyedServices(PostgresDataSources.Write)] NpgsqlDataSource writeDataSource,
+            INatsJSContext js,
+            INatsConnection nats,
+            AuditPublisher auditPublisher,
+            ErasureNoticePublisher noticePublisher,
+            IOptions<NatsOptions> natsOptions,
+            IOptions<ComplianceOptions> compliance,
+            ILoggerFactory loggerFactory,
+            HttpContext http) =>
+            request.Reason is "illegal_content" or "court_order"
+                ? RedactAsync(roomId, seq, request.Reason, writeDataSource, js, nats, auditPublisher, noticePublisher,
+                    natsOptions.Value, compliance.Value, loggerFactory, http)
+                : Task.FromResult(ApiResults.InvalidRequest("reason must be illegal_content or court_order")));
+    }
+
+    private static async Task<IResult> RedactAsync(
+        Guid roomId, ulong seq, string? emergencyReason,
+        NpgsqlDataSource writeDataSource, INatsJSContext js, INatsConnection nats,
+        AuditPublisher auditPublisher, ErasureNoticePublisher noticePublisher,
+        NatsOptions options, ComplianceOptions compliance, ILoggerFactory loggerFactory, HttpContext http)
+    {
+        if (seq == 0 || seq > long.MaxValue)
+            return Results.BadRequest();
+
+        var ct = http.RequestAborted;
+        var actorId = http.User.FindFirstValue("sub")!;
+        var logger = AdminLogger(loggerFactory);
+
+        INatsJSStream? stream = null;
+        string? senderHint = null;
+        DateTimeOffset? timeHint = null;
+        if (options.Enabled)
         {
-            if (seq == 0 || seq > long.MaxValue)
-                return Results.BadRequest();
-
-            var ct = http.RequestAborted;
-            var actorId = http.User.FindFirstValue("sub")!;
-            var logger = AdminLogger(loggerFactory);
-            var options = natsOptions.Value;
-
-            INatsJSStream? stream = null;
-            if (options.Enabled)
+            try
             {
+                stream = await js.GetStreamAsync(options.RoomsStream, cancellationToken: ct);
+                var stored = await stream.GetAsync(new StreamMsgGetRequest { Seq = seq }, ct);
+                if (stored.Message.Subject != $"{options.RoomSubjectPrefix}{roomId}")
+                    return Results.NotFound();
                 try
                 {
-                    stream = await js.GetStreamAsync(options.RoomsStream, cancellationToken: ct);
-                    var stored = await stream.GetAsync(new StreamMsgGetRequest { Seq = seq }, ct);
-                    if (stored.Message.Subject != $"{options.RoomSubjectPrefix}{roomId}")
-                        return Results.NotFound();
+                    var message = JsonSerializer.Deserialize(stored.Message.Data.Span, DotwireJsonContext.Default.RoomMessage);
+                    if (message is not null)
+                    {
+                        senderHint = message.SenderId;
+                        timeHint = message.Time;
+                    }
                 }
-                catch (NatsJSApiException ex) when (ex.Error.ErrCode == JetStreamNoMessageFound)
+                catch (JsonException)
                 {
-                    await stream!.RefreshAsync(ct);
-                    if (seq > stream.Info.State.LastSeq)
-                        return Results.NotFound();
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    logger.LogError("JetStream lookup failed for room {RoomId} seq {Seq}: {Error}", roomId, seq, ex.Message);
-                    return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
                 }
             }
-
-            var audit = new AuditEvent("message.redacted", roomId, seq, actorId, SubjectId: null, Value: null, DateTimeOffset.UtcNow);
-            if (!await TryAuditAsync(auditPublisher, audit, logger, ct))
-                return ApiResults.AuditUnavailable();
-
-            int removedRows;
-            await using (var cmd = writeDataSource.CreateCommand("SELECT redact_message($1, $2)"))
+            catch (NatsJSApiException ex) when (ex.Error.ErrCode == JetStreamNoMessageFound)
             {
+                await stream!.RefreshAsync(ct);
+                if (seq > stream.Info.State.LastSeq)
+                    return Results.NotFound();
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError("JetStream lookup failed for room {RoomId} seq {Seq}: {Error}", roomId, seq, ex.Message);
+                return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+            }
+        }
+
+        int removedRows;
+        await using (var conn = await writeDataSource.OpenConnectionAsync(ct))
+        await using (var tx = await conn.BeginTransactionAsync(ct))
+        {
+            if (emergencyReason is null)
+            {
+                await using var cmd = new NpgsqlCommand("SELECT redact_message_checked($1, $2, $3, $4, $5, $6)", conn, tx);
+                cmd.Parameters.AddWithValue(roomId);
+                cmd.Parameters.AddWithValue((long)seq);
+                cmd.Parameters.AddWithValue(compliance.MinimumKeepDays);
+                cmd.Parameters.AddWithValue(compliance.AllowChanges);
+                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Text, Value = (object?)senderHint ?? DBNull.Value });
+                cmd.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz, Value = timeHint is { } t ? t : DBNull.Value });
+                removedRows = (int)(await cmd.ExecuteScalarAsync(ct))!;
+                if (removedRows < 0)
+                {
+                    await tx.RollbackAsync(CancellationToken.None);
+                    return removedRows switch
+                    {
+                        -1 => ApiResults.Conflict("legal_hold", "the room or sender is under legal hold"),
+                        -3 => ApiResults.Conflict("changes_not_allowed", "message changes are not allowed"),
+                        -2 => ApiResults.Conflict("minimum_keep", "the message is within the minimum keep period"),
+                        _ => Results.StatusCode(StatusCodes.Status500InternalServerError),
+                    };
+                }
+            }
+            else
+            {
+                await using var cmd = new NpgsqlCommand("SELECT redact_message($1, $2)", conn, tx);
                 cmd.Parameters.AddWithValue(roomId);
                 cmd.Parameters.AddWithValue((long)seq);
                 removedRows = (int)(await cmd.ExecuteScalarAsync(ct))!;
             }
 
-            if (stream is null)
-                return Results.Ok(new RedactMessageResponse(roomId, seq, removedRows > 0, false));
+            var audit = emergencyReason is null
+                ? new AuditEvent("message.redacted", roomId, seq, actorId, SubjectId: null, Value: null, DateTimeOffset.UtcNow)
+                : new AuditEvent("message.redacted.emergency", roomId, seq, actorId, SubjectId: null,
+                    Value: emergencyReason == "illegal_content" ? 1 : 2, DateTimeOffset.UtcNow);
+            if (!await TryAuditAsync(auditPublisher, audit, logger, ct))
+                return ApiResults.AuditUnavailable();
 
-            var removedFromStream = false;
+            await tx.CommitAsync(CancellationToken.None);
+        }
+
+        var removedFromStream = false;
+        if (stream is not null)
+        {
             try
             {
                 await stream.DeleteMessageAsync(new StreamMsgDeleteRequest { Seq = seq, NoErase = false }, ct);
@@ -176,9 +255,24 @@ public static partial class Admin
             {
                 logger.LogWarning("Retraction broadcast failed for room {RoomId} seq {Seq}: {Error}", roomId, seq, ex.Message);
             }
+        }
 
-            return Results.Ok(new RedactMessageResponse(roomId, seq, removedRows > 0, removedFromStream));
-        });
+        if (noticePublisher.IsEnabled)
+        {
+            try
+            {
+                await noticePublisher.PublishAsync(
+                    new ErasureNotice("message.redacted", DateTimeOffset.UtcNow,
+                        RoomId: roomId, Seq: seq, Reason: emergencyReason), ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError("Erasure notice publish failed for room {RoomId} seq {Seq}: {Error}", roomId, seq, ex.Message);
+                return ApiResults.NoticeUnavailable();
+            }
+        }
+
+        return Results.Ok(new RedactMessageResponse(roomId, seq, removedRows > 0, removedFromStream));
     }
 
     private static async Task EraseUnauditedInjectionAsync(

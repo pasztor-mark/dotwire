@@ -32,11 +32,14 @@ public static class TestTokens
         RSA? rsa = null,
         string kid = TestKeys.Kid,
         bool includeIat = true,
-        DateTime? issuedAt = null)
+        DateTime? issuedAt = null,
+        string? actor = null)
     {
         var claims = new Dictionary<string, object> { ["sub"] = sub };
         if (role is not null)
             claims["dw:role"] = role;
+        if (actor is not null)
+            claims["dw:actor"] = actor;
 
         var now = DateTime.UtcNow;
         return new JsonWebTokenHandler { SetDefaultTimesOnTokenCreation = false }.CreateToken(new SecurityTokenDescriptor

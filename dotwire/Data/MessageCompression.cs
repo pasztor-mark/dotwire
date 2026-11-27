@@ -33,29 +33,44 @@ public static class MessageCompression
                     license ?? "(none)", version ?? "(none)");
             return;
         }
+        foreach (var (table, orderBy) in Tables)
+            await ApplyTableAsync(connection, table, orderBy, afterDays, logger, cancellationToken);
+    }
 
+    private static readonly (string Table, string OrderBy)[] Tables =
+    [
+        ("messages", "seq, time"),
+        ("access_log", "time DESC, stream_seq"),
+    ];
+
+    private static async Task ApplyTableAsync(
+        NpgsqlConnection connection, string table, string orderBy, int afterDays, ILogger logger, CancellationToken cancellationToken)
+    {
         if (afterDays == 0)
         {
-            await ExecuteAsync(connection, "SELECT remove_compression_policy('messages', if_exists => true)", cancellationToken);
+            await ExecuteAsync(connection, $"SELECT remove_compression_policy('{table}', if_exists => true)", cancellationToken);
             return;
         }
 
         bool enabled;
         await using (var cmd = new NpgsqlCommand(
-            "SELECT compression_enabled FROM timescaledb_information.hypertables WHERE hypertable_name = 'messages'", connection))
+            "SELECT compression_enabled FROM timescaledb_information.hypertables WHERE hypertable_name = $1", connection))
+        {
+            cmd.Parameters.AddWithValue(table);
             enabled = await cmd.ExecuteScalarAsync(cancellationToken) is true;
+        }
         if (!enabled)
             await ExecuteAsync(connection,
-                "ALTER TABLE messages SET (timescaledb.compress, timescaledb.compress_segmentby = 'room_id', timescaledb.compress_orderby = 'seq, time')",
+                $"ALTER TABLE {table} SET (timescaledb.compress, timescaledb.compress_segmentby = 'room_id', timescaledb.compress_orderby = '{orderBy}')",
                 cancellationToken);
 
-        await ExecuteAsync(connection, "SELECT remove_compression_policy('messages', if_exists => true)", cancellationToken);
-        await using (var cmd = new NpgsqlCommand("SELECT add_compression_policy('messages', make_interval(days => $1))", connection))
+        await ExecuteAsync(connection, $"SELECT remove_compression_policy('{table}', if_exists => true)", cancellationToken);
+        await using (var cmd = new NpgsqlCommand($"SELECT add_compression_policy('{table}', make_interval(days => $1))", connection))
         {
             cmd.Parameters.AddWithValue(afterDays);
             await cmd.ExecuteScalarAsync(cancellationToken);
         }
-        logger.LogInformation("Message compression policy set to compress chunks older than {Days} days", afterDays);
+        logger.LogInformation("Compression policy for {Table} set to compress chunks older than {Days} days", table, afterDays);
     }
 
     private static async Task ExecuteAsync(NpgsqlConnection connection, string sql, CancellationToken cancellationToken)

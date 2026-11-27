@@ -18,9 +18,13 @@ public sealed class DotwireMetrics
 
     private readonly Meter _meter;
     private readonly Counter<long> _auditUnavailable;
+    private readonly Counter<long> _accessLogUnavailable;
+    private readonly Counter<long> _accessLogCloseDropped;
+    private readonly Counter<long> _accessLogMalformed;
     private readonly Counter<long> _rejections;
     private readonly Counter<long> _presend;
     private readonly Counter<long> _postsendDropped;
+    private readonly Counter<long> _erasureFailed;
     private readonly Counter<long> _fanoutDropped;
     private readonly Histogram<double> _sendDuration;
     private readonly Histogram<double> _publishDuration;
@@ -38,9 +42,13 @@ public sealed class DotwireMetrics
     {
         _meter = meterFactory.Create(MeterName);
         _auditUnavailable = _meter.CreateCounter<long>("dotwire.audit.unavailable", "{response}");
+        _accessLogUnavailable = _meter.CreateCounter<long>("dotwire.access_log.unavailable", "{event}");
+        _accessLogCloseDropped = _meter.CreateCounter<long>("dotwire.access_log.close_dropped", "{event}");
+        _accessLogMalformed = _meter.CreateCounter<long>("dotwire.access_log.malformed", "{event}");
         _rejections = _meter.CreateCounter<long>("dotwire.rejections", "{rejection}");
         _presend = _meter.CreateCounter<long>("dotwire.webhook.presend.results", "{call}");
         _postsendDropped = _meter.CreateCounter<long>("dotwire.webhook.postsend.dropped", "{event}");
+        _erasureFailed = _meter.CreateCounter<long>("dotwire.webhook.erasure.failed", "{attempt}");
         _fanoutDropped = _meter.CreateCounter<long>("dotwire.fanout.dropped", "{event}");
         _sendDuration = _meter.CreateHistogram("dotwire.message.send.duration", "s", null, null, LatencyBuckets);
         _publishDuration = _meter.CreateHistogram("dotwire.jetstream.publish.duration", "s", null, null, LatencyBuckets);
@@ -50,6 +58,14 @@ public sealed class DotwireMetrics
         _authBatchSize = _meter.CreateHistogram("dotwire.auth.batch.size", "{lookup}", null, null,
             new InstrumentAdvice<int> { HistogramBucketBoundaries = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512] });
     }
+
+    public void AccessLogUnavailable(string evt) =>
+        _accessLogUnavailable.Add(1, new KeyValuePair<string, object?>("event", evt));
+
+    public void AccessLogCloseDropped(string reason) =>
+        _accessLogCloseDropped.Add(1, new KeyValuePair<string, object?>("reason", reason));
+
+    public void AccessLogMalformed() => _accessLogMalformed.Add(1);
 
     public void FanoutDropped(string transport, string reason) =>
         _fanoutDropped.Add(
@@ -91,6 +107,8 @@ public sealed class DotwireMetrics
 
     public void PostsendDropped(string reason) =>
         _postsendDropped.Add(1, new KeyValuePair<string, object?>("reason", reason));
+
+    public void ErasureNoticeFailed() => _erasureFailed.Add(1);
 
     public void ObserveAuditLockHeld(Func<bool> isHeld) =>
         _meter.CreateObservableGauge("dotwire.audit.writer.lock_held", () => isHeld() ? 1 : 0, "1");

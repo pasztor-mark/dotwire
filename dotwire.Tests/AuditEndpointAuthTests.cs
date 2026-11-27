@@ -19,6 +19,7 @@ public class AuditEndpointAuthTests : IClassFixture<WebApplicationFactory<Progra
     {
         _factory = factory.WithWebHostBuilder(b =>
         {
+            b.WithoutErasureWorker();
             b.UseSetting("Postgres:Migrate", "false");
             b.UseSetting("ConnectionStrings:PostgresRead", "Host=localhost;Database=dotwire");
             b.UseSetting("ConnectionStrings:PostgresWrite", "Host=localhost;Database=dotwire");
@@ -44,6 +45,7 @@ public class AuditEndpointAuthTests : IClassFixture<WebApplicationFactory<Progra
         ["/audit"],
         ["/audit/verify"],
         ["/audit/checkpoints"],
+        ["/audit/access?from=2026-01-01T00:00:00Z"],
     ];
 
     [Theory]

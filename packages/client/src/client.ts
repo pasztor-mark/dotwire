@@ -17,6 +17,7 @@ import {
   HistoryPage,
   MembershipRevoked,
   MessageRetracted,
+  MessagesErased,
   PresenceDelta,
   RoomMessage,
   SendAck,
@@ -51,6 +52,7 @@ export class DotwireClient {
   private readonly getToken: () => string | Promise<string>;
   private readonly messageListeners = new Set<(message: RoomMessage) => void>();
   private readonly retractedListeners = new Set<(payload: MessageRetracted) => void>();
+  private readonly erasedListeners = new Set<(payload: MessagesErased) => void>();
   private readonly revokedListeners = new Set<(payload: MembershipRevoked) => void>();
   private readonly typingListeners = new Set<(notification: TypingNotification) => void>();
   private readonly presenceListeners = new Set<(delta: PresenceDelta) => void>();
@@ -129,6 +131,12 @@ export class DotwireClient {
 
     this.connection.on('MessageRetracted', (payload: MessageRetracted) => {
       for (const listener of this.retractedListeners) {
+        listener(payload);
+      }
+    });
+
+    this.connection.on('MessagesErased', (payload: MessagesErased) => {
+      for (const listener of this.erasedListeners) {
         listener(payload);
       }
     });
@@ -467,6 +475,13 @@ export class DotwireClient {
     this.retractedListeners.add(handler);
     return () => {
       this.retractedListeners.delete(handler);
+    };
+  }
+
+  public onMessagesErased(handler: (payload: MessagesErased) => void): () => void {
+    this.erasedListeners.add(handler);
+    return () => {
+      this.erasedListeners.delete(handler);
     };
   }
 

@@ -268,6 +268,7 @@ export function useChatRoom(roomId: string, fetchToken: () => Promise<string>) {
 | `onSystemMessage(handler)` | `() => void` | Global listener for system messages only. |
 | `onUserMessage(handler)` | `() => void` | Global listener for user messages only. |
 | `onMessageRetracted(handler)` | `() => void` | Global listener for redacted/retracted messages. |
+| `onMessagesErased(handler)` | `() => void` | Global listener for erasure pages: `{ roomId, mode, seqs }`. `anonymize` changes the listed senders to `dotwire:erased`; `delete` removes the listed messages. Best effort, like retraction: a client that misses it sees the change on its next history read. |
 | `onMembershipRevoked(handler)` | `() => void` | Global listener fired when the user's membership in a room is revoked; the room is auto-unsubscribed. |
 | `onTyping(handler)` | `() => void` | Global listener for user typing notifications. |
 | `onPresence(handler)` | `() => void` | Global listener for presence changes. |
@@ -293,6 +294,7 @@ reconnect) happen internally; consumers just see `onMessage` fire once per new s
 | `onSystemMessage(handler)` | `() => void` | Room-scoped system message listener. |
 | `onUserMessage(handler)` | `() => void` | Room-scoped user message listener. |
 | `onMessageRetracted(handler)` | `() => void` | Room-scoped retraction listener. |
+| `onMessagesErased(handler)` | `() => void` | Room-scoped erasure listener, with the same payload as the global one. |
 | `onMembershipRevoked(handler)` | `() => void` | Room-scoped revocation listener. |
 | `onTyping(handler)` | `() => void` | Room-scoped typing indicator listener. |
 | `onTypingWithExpiry(handler, ms)` | `() => void` | Room-scoped typing listener that auto-resets after inactivity. |
@@ -316,6 +318,10 @@ Failed requests reject with a `DotwireClientError { status, kind, code?, reason?
 where `kind` is one of `BadRequest`, `Unauthorized`, `Forbidden`, `NotFound`, `PresendRejected`,
 `RateLimited`, `Unavailable`, or `Unknown` — the same kinds used by `Dotwire.Host` and
 `@dotwire/host`.
+
+When the server has the access log enabled and cannot record a subscribe, `subscribe()` rejects with the
+hub error `AccessLogUnavailable`. Nothing is joined, so it is safe to retry. The client passes this text
+through unchanged; it is not mapped to a `kind`.
 
 ---
 

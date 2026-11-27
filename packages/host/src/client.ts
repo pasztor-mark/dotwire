@@ -3,16 +3,26 @@ import { DotwireTokenSigner } from './signer.js';
 import { DotwireHostRoom } from './room.js';
 import { DotwireApiError, mapErrorKind, PresendRejectedError, PostSendError } from './errors.js';
 import { parseSseStream, toRoomEvent } from './sse.js';
+import { auditChainHash, GENESIS_HASH } from './audit-chain.js';
 import { delay, isAbortError } from './util.js';
 import type {
+  AccessLogPage,
+  AccessLogQuery,
   AddRoomMembersOptions,
+  AuditArchiveResult,
   AuditCheckpointsResponse,
   AuditPageResponse,
   AuditVerificationResponse,
   ClientSendResult,
+  ComplianceSettings,
   DotwireHostConfig,
   DotwireRole,
+  EmergencyDeleteReason,
+  ErasureMode,
+  ErasureNotice,
+  ErasureStatus,
   GetMessagesOptions,
+  LegalHold,
   MintTokenOptions,
   PostSendContext,
   PresendContext,
@@ -56,6 +66,10 @@ export class PayloadTooLargeError extends Error {
 export function roomPath(roomId: string): string {
   if (typeof roomId !== 'string' || !UUID_PATTERN.test(roomId)) throw new TypeError('invalid roomId: expected a UUID');
   return roomId;
+}
+
+function isoString(value: string | Date): string {
+  return typeof value === 'string' ? value : value.toISOString();
 }
 
 export function seqPath(seq: number): string {
@@ -265,7 +279,8 @@ export class DotwireHostClient {
     const path = `/admin/users/${userId}/export`;
     const res = await this.adminRequest('GET', `/admin/users/${encodeURIComponent(userId)}/export`);
     await this.throwIfError(res, 'GET', path);
-    return (await res.json()) as UserExport;
+    const body = (await res.json()) as Omit<UserExport, 'accessLog'> & { accessLog?: UserExport['accessLog'] };
+    return { ...body, accessLog: body.accessLog ?? [] };
   }
 
   /** Returns the raw response stream so the caller can pipe an arbitrarily large export without buffering it. */
@@ -378,6 +393,22 @@ export class DotwireHostClient {
     return (await res.json()) as RoomHistoryResponse;
   }
 
+  async exportRoomHistory(roomId: string, asUserId: string, sink: (line: string) => void | Promise<void>): Promise<number> {
+    let afterSeq = 0;
+    let count = 0;
+    while (true) {
+      const page = await this.getMessages(roomId, { asUserId, afterSeq, limit: 100 });
+      for (const message of page.messages) {
+        await sink(JSON.stringify(message));
+        count++;
+      }
+      if (!page.hasMore) return count;
+      const last = page.messages.at(-1);
+      if (!last) throw new Error(`room history page after seq ${afterSeq} returned no readable messages`);
+      afterSeq = last.seq;
+    }
+  }
+
   /** Parses SSE from `GET /rooms/{roomId}/events`, reconnecting on drop when `autoResume` (default true). */
   streamRoomEvents(roomId: string, options: StreamRoomEventsOptions): AsyncIterable<RoomEvent> {
     return this.streamRoomEventsGenerator(roomId, options);
@@ -470,12 +501,57 @@ export class DotwireHostClient {
     return (await res.json()) as AuditVerificationResponse;
   }
 
+  async getAccessLog(query: AccessLogQuery): Promise<AccessLogPage> {
+    const path = '/audit/access';
+    const res = await this.auditorRequest('GET', path, {
+      query: {
+        from: isoString(query.from),
+        to: query.to === undefined ? undefined : isoString(query.to),
+        roomId: query.roomId === undefined ? undefined : roomPath(query.roomId),
+        userId: query.userId,
+        limit: query.limit,
+        cursor: query.cursor
+      }
+    });
+    await this.throwIfError(res, 'GET', path);
+    return (await res.json()) as AccessLogPage;
+  }
+
   async getAuditCheckpoints(limit = 30): Promise<AuditCheckpointsResponse['checkpoints']> {
     const path = '/audit/checkpoints';
     const res = await this.auditorRequest('GET', path, { query: { limit } });
     await this.throwIfError(res, 'GET', path);
     const data = (await res.json()) as AuditCheckpointsResponse;
     return data.checkpoints;
+  }
+
+  async archiveAuditLog(
+    sink: (line: string) => void | Promise<void>,
+    options: { afterId?: number; previousHash?: string } = {}
+  ): Promise<AuditArchiveResult> {
+    const afterId = options.afterId ?? 0;
+    if (afterId > 0 && options.previousHash === undefined) {
+      throw new Error('previousHash is required when afterId is greater than zero');
+    }
+    let prev = options.previousHash ?? GENESIS_HASH;
+    let cursor = afterId;
+    let count = 0;
+    while (true) {
+      const page = await this.readAuditLog(cursor, 500);
+      for (const entry of page.events) {
+        const hash = auditChainHash(prev, entry);
+        if (hash !== entry.hash) throw new Error(`audit chain broken at id ${entry.id}: stored hash does not match SHA256(previous hash || canonical form)`);
+        await sink(JSON.stringify(entry));
+        prev = hash;
+        cursor = entry.id;
+        count++;
+      }
+      if (!page.hasMore || page.events.length === 0) break;
+    }
+    for (const checkpoint of await this.getAuditCheckpoints(365)) {
+      await sink(JSON.stringify({ checkpoint }));
+    }
+    return { count, lastId: cursor, lastHash: count === 0 ? (options.previousHash ?? null) : prev };
   }
 
   // ---------------------------------------------------------------------
@@ -494,6 +570,69 @@ export class DotwireHostClient {
     const res = await this.adminRequest('PUT', path, { body: { messagesDays: days } });
     await this.throwIfError(res, 'PUT', path);
     return ((await res.json()) as RetentionResponse).messagesDays;
+  }
+
+  async getComplianceSettings(): Promise<ComplianceSettings> {
+    const path = '/admin/compliance';
+    const res = await this.adminRequest('GET', path);
+    await this.throwIfError(res, 'GET', path);
+    return (await res.json()) as ComplianceSettings;
+  }
+
+  placeRoomLegalHold(roomId: string, matterRef: string): Promise<LegalHold> {
+    return this.placeLegalHold({ roomId: roomPath(roomId), matterRef });
+  }
+
+  placeUserLegalHold(userId: string, matterRef: string): Promise<LegalHold> {
+    return this.placeLegalHold({ userId, matterRef });
+  }
+
+  private async placeLegalHold(body: { roomId?: string; userId?: string; matterRef: string }): Promise<LegalHold> {
+    const path = '/admin/holds';
+    const res = await this.adminRequest('POST', path, { body });
+    await this.throwIfError(res, 'POST', path);
+    return (await res.json()) as LegalHold;
+  }
+
+  async releaseLegalHold(holdId: number): Promise<void> {
+    const path = `/admin/holds/${holdId}`;
+    const res = await this.adminRequest('DELETE', path);
+    await this.throwIfError(res, 'DELETE', path);
+  }
+
+  async listLegalHolds(options: { activeOnly?: boolean } = {}): Promise<LegalHold[]> {
+    const path = '/admin/holds';
+    const res = await this.adminRequest('GET', path, { query: { active: options.activeOnly ?? true } });
+    await this.throwIfError(res, 'GET', path);
+    return (await res.json()) as LegalHold[];
+  }
+
+  async emergencyDeleteMessage(roomId: string, seq: number, reason: EmergencyDeleteReason): Promise<RedactMessageResponse> {
+    const path = `/admin/rooms/${roomPath(roomId)}/messages/${seqPath(seq)}/emergency-delete`;
+    const res = await this.adminRequest('POST', path, { body: { reason } });
+    await this.throwIfError(res, 'POST', path);
+    return (await res.json()) as RedactMessageResponse;
+  }
+
+  async eraseUser(userId: string, options: { mode?: ErasureMode } = {}): Promise<ErasureStatus> {
+    const path = `/admin/users/${encodeURIComponent(userId)}/erase`;
+    const res = await this.adminRequest('POST', path, { body: { mode: options.mode ?? null } });
+    await this.throwIfError(res, 'POST', path);
+    return (await res.json()) as ErasureStatus;
+  }
+
+  async getErasure(erasureId: number): Promise<ErasureStatus> {
+    const path = `/admin/erasures/${erasureId}`;
+    const res = await this.adminRequest('GET', path);
+    await this.throwIfError(res, 'GET', path);
+    return (await res.json()) as ErasureStatus;
+  }
+
+  async listUserErasures(userId: string): Promise<ErasureStatus[]> {
+    const path = `/admin/users/${encodeURIComponent(userId)}/erasures`;
+    const res = await this.adminRequest('GET', path);
+    await this.throwIfError(res, 'GET', path);
+    return (await res.json()) as ErasureStatus[];
   }
 
   // ---------------------------------------------------------------------
@@ -662,6 +801,59 @@ export class DotwireHostClient {
     return { status: 200, body: {} };
   }
 
+  async handleErasureWebhook(request: Request): Promise<Response> {
+    this.ensureWebhookSecret();
+    let text: string;
+    try {
+      text = await readBoundedText(request, this.maxWebhookBodyBytes);
+    } catch (err) {
+      if (err instanceof PayloadTooLargeError) return jsonResponse(413, { error: 'payload_too_large' });
+      throw err;
+    }
+    const result = await this.handleErasureWebhookCore(text, request.headers.get('x-dotwire-signature'), signatureHeadersOf(request));
+    return jsonResponse(result.status, result.body);
+  }
+
+  async handleErasureWebhookBody(
+    body: unknown,
+    signatureHeader?: string | null,
+    rawBody?: string,
+    headers: WebhookSignatureHeaders = {}
+  ): Promise<WebhookResult> {
+    this.ensureWebhookSecret();
+    const text = rawBody ?? JSON.stringify(body);
+    return this.handleErasureWebhookCore(text, signatureHeader ?? null, headers, body);
+  }
+
+  private async handleErasureWebhookCore(
+    rawText: string,
+    signatureHeader: string | null,
+    headers: WebhookSignatureHeaders,
+    parsedBody?: unknown
+  ): Promise<WebhookResult> {
+    if (!this.verifySignature(rawText, signatureHeader, headers)) {
+      return { status: 401, body: { error: 'invalid_signature' } };
+    }
+    let notice: ErasureNotice | null;
+    try {
+      notice = (parsedBody ?? JSON.parse(rawText)) as ErasureNotice | null;
+    } catch {
+      return { status: 400, body: {} };
+    }
+    if (typeof notice?.event !== 'string' || typeof notice?.time !== 'string') {
+      return { status: 400, body: {} };
+    }
+
+    if (this.config.onErasure) {
+      try {
+        await this.config.onErasure(notice);
+      } catch {
+        return { status: 500, body: { error: 'erasure_handler_failed' } };
+      }
+    }
+    return { status: 200, body: {} };
+  }
+
   private get maxWebhookBodyBytes(): number {
     return this.config.maxWebhookBodyBytes ?? DEFAULT_MAX_WEBHOOK_BODY_BYTES;
   }
@@ -710,7 +902,7 @@ export class DotwireHostClient {
     const firstRole = cachedRole ?? 'member';
 
     const attempt = async (role: DotwireRole): Promise<Response> => {
-      const token = await this.signer.mintToken(userId, { role, ttl: this.defaultTtl });
+      const token = await this.signer.mintToken(userId, { role, actor: this.adminUserId, ttl: this.defaultTtl });
       return this.rawFetch(method, path, { ...opts, token });
     };
 

@@ -34,6 +34,8 @@ public static partial class Admin
         MapMemberEndpoints(group);
         MapMessageEndpoints(group);
         MapComplianceEndpoints(group);
+        MapHoldEndpoints(group);
+        MapErasureEndpoints(group);
     }
 
     private static ILogger AdminLogger(ILoggerFactory loggerFactory) => loggerFactory.CreateLogger("Dotwire.Api.Admin");
@@ -72,6 +74,39 @@ public static partial class Admin
             "SELECT EXISTS (SELECT 1 FROM user_roles WHERE role = 'admin' AND user_id <> $1)", conn, tx);
         cmd.Parameters.AddWithValue(userId);
         return (bool)(await cmd.ExecuteScalarAsync(ct))!;
+    }
+
+    private static async Task<List<Guid>?> RevokeUserAccessAsync(
+        NpgsqlConnection conn, NpgsqlTransaction tx, AuditPublisher auditPublisher, ILogger logger,
+        string actorId, string userId, bool auditRoleDeleted, CancellationToken ct)
+    {
+        var roomIds = new List<Guid>();
+        await using (var delMembers = new NpgsqlCommand("DELETE FROM room_members WHERE user_id = $1 RETURNING room_id", conn, tx))
+        {
+            delMembers.Parameters.AddWithValue(userId);
+            await using var reader = await delMembers.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                roomIds.Add(reader.GetGuid(0));
+        }
+
+        await using (var delRoles = new NpgsqlCommand("DELETE FROM user_roles WHERE user_id = $1", conn, tx))
+        {
+            delRoles.Parameters.AddWithValue(userId);
+            await delRoles.ExecuteNonQueryAsync(ct);
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (auditRoleDeleted
+            && !await TryAuditAsync(auditPublisher, new AuditEvent("role.deleted", null, null, actorId, userId, null, now), logger, ct))
+            return null;
+
+        foreach (var roomId in roomIds)
+        {
+            if (!await TryAuditAsync(auditPublisher, new AuditEvent("member.removed", roomId, null, actorId, userId, null, now), logger, ct))
+                return null;
+        }
+
+        return roomIds;
     }
 
     internal static async Task<bool> PublishWithRetryAsync(

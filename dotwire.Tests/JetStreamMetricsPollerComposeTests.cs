@@ -73,7 +73,7 @@ public class JetStreamMetricsPollerComposeTests
         }
 
         public JetStreamMetricsPoller Poller(DotwireMetrics metrics) =>
-            new(Js, Microsoft.Extensions.Options.Options.Create(Options), metrics, NullLogger<JetStreamMetricsPoller>.Instance);
+            new(Js, Microsoft.Extensions.Options.Options.Create(Options), Microsoft.Extensions.Options.Options.Create(new Dotwire.Configuration.AccessLogOptions()), metrics, NullLogger<JetStreamMetricsPoller>.Instance);
 
         public async ValueTask DisposeAsync()
         {

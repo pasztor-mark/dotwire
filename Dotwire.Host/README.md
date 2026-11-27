@@ -110,6 +110,13 @@ public static class DotwireHostServiceCollectionExtensions
   `403` surfaces as `DotwireApiException` with `Kind == Forbidden`.
 - `MintToken(userId, role, ...)` bypasses resolution entirely - you assert the role.
 
+Member-scoped calls the SDK makes on a user's behalf (history, send, participants, SSE) also carry
+`dw:actor` = `AdminUserId`, so the access log attributes the read to the host rather than to the
+member. `MintToken` sets `dw:actor` only when you pass `actor`: tokens you hand to end-user clients stay unattributed.
+`GetAccessLogAsync` is auditor-scoped and throws `Kind == Unavailable` (503) only when the read
+cannot be recorded in the audit log (`audit_unavailable`). The query works whether or not logging is
+enabled; a disabled log returns whatever earlier enabled periods recorded.
+
 Admin and auditor tokens are cached internally and re-minted one minute before their own
 expiry, so calling admin/auditor-scoped methods in a hot loop doesn't re-mint a token per call.
 
@@ -205,6 +212,31 @@ app.MapPost("/webhooks/postsend", async (HttpRequest req) =>
 });
 ```
 
+### Erasure notices
+
+`HandleErasureWebhookAsync` verifies and parses dotwire's erasure notices, using the same signature
+check, replay window and body cap as the postsend handler. Set `Erasure` to apply them. Delivery is
+at least once, so the handler must be idempotent. If `Erasure` throws, the handler answers `500`, and
+dotwire retries the notice. Notices carry ids only and never content.
+
+```csharp
+client.Erasure = async (notice, ct) =>
+{
+    // message.redacted: RoomId and Seq name the message.
+    // user.erased, Status "partial": apply notice.Mode to notice.Messages (delete, or set the sender to dotwire:erased).
+    // user.erased, Status "completed": drop any remaining non-message data for notice.UserId.
+    await myStore.ApplyErasureAsync(notice, ct);
+};
+
+app.MapPost("/webhooks/erasure", async (HttpRequest req) =>
+{
+    var result = await client.HandleErasureWebhookAsync(req.Body, Headers(req));
+    return Results.Text(result.Json, "application/json", statusCode: result.StatusCode);
+});
+```
+
+Do not re-derive hold or keep rules in the receiver. dotwire applied them before it listed a message.
+
 ### Batched asynchronous review
 
 `BatchModerationWorker` drains the queue in size-or-time bounded batches, asks an
@@ -213,7 +245,7 @@ physical redaction through the admin API, retrying up to three times on a `429` 
 the server's `Retry-After`:
 
 ```csharp
-IModerationClassifier classifier = new ClaudeBatchModerationClassifier(anthropic, policyPrompt);
+IModerationClassifier classifier = yourClassifier; // your IModerationClassifier implementation
 var worker = new BatchModerationWorker(
     queue,
     classifier,
@@ -225,11 +257,10 @@ var worker = new BatchModerationWorker(
 await worker.RunAsync(stoppingToken);
 ```
 
-A Claude Message Batches reference classifier lives in
-[`samples/Moderation`](https://github.com/pasztor-mark/dotwire/tree/main/samples/Moderation) (needs the `Anthropic` NuGet package). It runs
-`claude-haiku-4-5` with a cached policy prompt and structured output - the cheapest way to
-get an LLM verdict per message, at the cost of verdicts arriving in minutes rather than
-seconds. That is the right trade for a second line of defense behind `Presend`.
+The classifier is yours to implement: any `IModerationClassifier` that returns a verdict per
+message works, and the batching, retry and redaction plumbing above stays the same. Batched
+verdicts arrive in minutes rather than seconds, which is the right trade for a second line of
+defense behind `Presend`.
 
 ## Redaction
 
@@ -244,6 +275,50 @@ from the JetStream stream, appends an ids-only audit event, and sends `MessageRe
 to live subscribers of the room. It is idempotent: a retry after success is a `200` with both
 flags `false`. See ARCHITECTURE.md, "Redaction mechanics".
 
+A redaction that a legal hold or a setting refuses throws `DotwireApiException` with
+`Kind == Conflict` (`legal_hold`, `minimum_keep` or `changes_not_allowed`). Nothing is deleted, and no
+audit row is written.
+
+## Compliance, holds and erasure
+
+```csharp
+var settings = await client.GetComplianceSettingsAsync();
+// AllowChanges, MinimumKeepDays, ErasureMode, ActiveHolds, RetentionPaused,
+// AccessLogEnabled, AccessLogRetentionDays
+
+var hold = await client.PlaceRoomLegalHoldAsync(roomId, "matter-2026-114");
+await client.ReleaseLegalHoldAsync(hold.Id);
+var active = await client.ListLegalHoldsAsync(activeOnly: true);
+```
+
+`matterRef` is stored in plaintext, so pass an opaque reference, never a name or a description. A room
+hold covers every message in that room, and a user hold covers every message that user sent. While any
+hold is active, retention is paused (`RetentionPaused`). Releasing a hold twice answers `409`.
+
+```csharp
+var started = await client.EraseUserAsync("user-42", ErasureMode.Anonymize); // 202
+var status = await client.GetErasureAsync(started.Id);
+// status.Status: "in_progress", "waiting" (status.BlockedBy names legal_hold, minimum_keep or
+// changes_not_allowed), or "completed" (status.CompletedAt is set)
+```
+
+Erasure revokes the user's room memberships and role at once, as `DeleteUserRoleAsync` does. The
+messages are handled in the background: `Anonymize` re-attributes them to `dotwire:erased`, and `Delete`
+removes them and leaves tombstones. Holds, minimum keep and write-once settings still apply, so a held
+message keeps the erasure `waiting`. Erasing the caller's own id, or the last admin, is refused with
+`Conflict`. While an erasure is open, role changes and member adds for that user are refused with
+`Conflict` (`erasure_open`). Use `ListUserErasuresAsync(userId)` if you lost the erasure id. Erasure does
+not delete the identity from your own user table; that is your job.
+
+```csharp
+var result = await client.EmergencyDeleteMessageAsync(roomId, seq, EmergencyDeletionReason.CourtOrder);
+// or: await room.EmergencyDeleteAsync(seq, EmergencyDeletionReason.IllegalContent);
+```
+
+The reason is required and is recorded as a code only (`IllegalContent` or `CourtOrder`), because free
+text could carry personal data into the audit log. Emergency deletion bypasses holds, minimum keep and
+write-once. It is audited (`message.redacted.emergency`) before the delete. There is no second approver.
+
 ## Audit, retention, DSAR export
 
 ```csharp
@@ -254,9 +329,35 @@ var checkpoints = await client.GetAuditCheckpointsAsync();
 await client.SetMessageRetentionDaysAsync(365); // 0 = indefinite
 var days = await client.GetMessageRetentionDaysAsync();
 
-var export = await client.ExportUserAsync(userId);          // buffered UserExport
+var access = await client.GetAccessLogAsync(new AccessLogQuery(
+    From: DateTimeOffset.UtcNow.AddDays(-7), RoomId: roomId, Limit: 200));
+// access.Entries (Kind "live" | "history"), access.Next is the cursor for the next page, or null
+
+var export = await client.ExportUserAsync(userId);          // buffered UserExport, includes AccessLog
 await client.ExportUserAsync(userId, someStream);            // streamed straight through
 ```
+
+### Archiving and exporting
+
+```csharp
+await using var archive = File.Create("audit.ndjson");
+var last = await client.ArchiveAuditLogAsync(archive, afterId: 0);
+// later: ArchiveAuditLogAsync(archive, last.LastId, last.LastHash), since previousHash is required when afterId > 0
+```
+
+`ArchiveAuditLogAsync` pages the audit log to NDJSON. It recomputes each hash from its predecessor and
+throws `InvalidDataException` at the first break. It also writes the checkpoints. Every page emits an
+`audit.read` event, as any audit read does.
+
+```csharp
+await using var export = File.Create("room-history.ndjson");
+var count = await client.ExportRoomHistoryAsync(roomId, "host-export", export);
+```
+
+`ExportRoomHistoryAsync` reads history as the named user, so that user must be a room member. Add a
+dedicated export member through `AddRoomMembersAsync` (audited as `member.added` and visible to
+participants), and remove it afterwards. The export pages from the oldest message and writes one
+`HistoryMessage` per line.
 
 ## SSE event streaming
 
@@ -267,6 +368,7 @@ await foreach (var evt in client.StreamEventsAsync(roomId, asUserId: "user-42"))
     {
         case MessageEvent m: Console.WriteLine($"{m.SenderId}: {m.Content}"); break;
         case RetractedEvent r: Console.WriteLine($"redacted {r.Seq}"); break;
+        case ErasedEvent e: Console.WriteLine($"erased {e.Mode}: {string.Join(',', e.Seqs)}"); break;
         case TypingEvent t: break;
         case PresenceEvent p: break;
         case RevokedEvent: return; // membership revoked - server closed the stream, we stop
@@ -282,6 +384,8 @@ yielded, which never triggers a reconnect.
 ## Errors
 
 `DotwireApiException` carries `Kind` (`BadRequest`, `Unauthorized`, `Forbidden`, `NotFound`,
-`PresendRejected`, `RateLimited`, `Unavailable`, `Unknown`), the wire `ErrorCode`/`Reason`
+`Conflict`, `PresendRejected`, `RateLimited`, `Unavailable`, `Unknown`), the wire `ErrorCode`/`Reason`
 (the response body's `error`/`reason` fields, when present), and `RetryAfter` (parsed from
-the `Retry-After` header on a `429`).
+the `Retry-After` header on a `429`). A `409` is `Conflict`, with codes such as `legal_hold`,
+`minimum_keep`, `changes_not_allowed`, `already_released`, `erasure_open`, `self_erasure` and
+`last_admin`.
