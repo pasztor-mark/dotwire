@@ -319,6 +319,10 @@ where `kind` is one of `BadRequest`, `Unauthorized`, `Forbidden`, `NotFound`, `P
 `RateLimited`, `Unavailable`, or `Unknown` — the same kinds used by `Dotwire.Host` and
 `@dotwire/host`.
 
+When the server has the access log enabled and cannot record a subscribe, `subscribe()` rejects with the
+hub error `AccessLogUnavailable`. Nothing is joined, so it is safe to retry. The client passes this text
+through unchanged; it is not mapped to a `kind`.
+
 ---
 
 ## License

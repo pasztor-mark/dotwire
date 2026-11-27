@@ -10,6 +10,19 @@ public sealed partial class DotwireHostClient
     public Task<AuditVerification> VerifyAuditLogAsync(bool full = false, CancellationToken ct = default) =>
         SendAsync(HttpMethod.Get, $"/audit/verify?full={(full ? "true" : "false")}", AuditorToken(), DotwireHostJsonContext.Default.AuditVerification, ct);
 
+    public async Task<AccessLogPage> GetAccessLogAsync(AccessLogQuery query, CancellationToken ct = default)
+    {
+        var parts = new List<string> { $"from={Uri.EscapeDataString(query.From.ToString("O"))}" };
+        if (query.To.HasValue) parts.Add($"to={Uri.EscapeDataString(query.To.Value.ToString("O"))}");
+        if (query.RoomId.HasValue) parts.Add($"roomId={query.RoomId.Value}");
+        if (query.UserId is not null) parts.Add($"userId={Uri.EscapeDataString(query.UserId)}");
+        if (query.Limit.HasValue) parts.Add($"limit={query.Limit.Value}");
+        if (query.Cursor is not null) parts.Add($"cursor={Uri.EscapeDataString(query.Cursor)}");
+        var dto = await SendAsync(HttpMethod.Get, "/audit/access?" + string.Join("&", parts), AuditorToken(),
+            DotwireHostJsonContext.Default.AccessLogPageDto, ct);
+        return new AccessLogPage(dto.Entries, dto.Next);
+    }
+
     /// <inheritdoc />
     public async Task<IReadOnlyList<AuditCheckpoint>> GetAuditCheckpointsAsync(int limit = 30, CancellationToken ct = default)
     {

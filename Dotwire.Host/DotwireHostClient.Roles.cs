@@ -78,6 +78,9 @@ public sealed partial class DotwireHostClient
         await response.Content.CopyToAsync(destination, ct);
     }
 
+    private static string? OptString(JsonElement el, string name) =>
+        el.TryGetProperty(name, out var v) && v.ValueKind != JsonValueKind.Null ? v.GetString() : null;
+
     /// <summary>
     /// Parses the DSAR export's hand-rolled JSON (spec §3.12; written field-by-field via
     /// Utf8JsonWriter on the server, not through a shared DTO) into <see cref="UserExport"/>.
@@ -112,6 +115,23 @@ public sealed partial class DotwireHostClient
             a.TryGetProperty("value", out var v) && v.ValueKind != JsonValueKind.Null ? v.GetInt64() : null,
             a.GetProperty("time").GetDateTimeOffset())).ToArray();
 
-        return new UserExport(userId, exportedAt, role, roomIds, messages, auditEvents);
+        var accessLog = root.TryGetProperty("accessLog", out var accessEl) && accessEl.ValueKind == JsonValueKind.Array
+            ? accessEl.EnumerateArray().Select(a => new UserExportAccessEvent(
+                a.GetProperty("time").GetDateTimeOffset(),
+                a.GetProperty("event").GetString()!,
+                a.GetProperty("roomId").GetGuid(),
+                a.GetProperty("userId").GetString()!,
+                OptString(a, "actorId"),
+                a.GetProperty("role").GetString()!,
+                a.GetProperty("via").GetString()!,
+                a.TryGetProperty("windowId", out var wi) && wi.ValueKind != JsonValueKind.Null ? wi.GetGuid() : null,
+                a.TryGetProperty("expiresAt", out var ex) && ex.ValueKind != JsonValueKind.Null ? ex.GetDateTimeOffset() : null,
+                OptString(a, "reason"),
+                a.TryGetProperty("fromSeq", out var fs) && fs.ValueKind != JsonValueKind.Null ? fs.GetUInt64() : null,
+                a.TryGetProperty("toSeq", out var ts) && ts.ValueKind != JsonValueKind.Null ? ts.GetUInt64() : null,
+                a.TryGetProperty("count", out var cn) && cn.ValueKind != JsonValueKind.Null ? cn.GetInt32() : null)).ToArray()
+            : [];
+
+        return new UserExport(userId, exportedAt, role, roomIds, messages, auditEvents, accessLog);
     }
 }

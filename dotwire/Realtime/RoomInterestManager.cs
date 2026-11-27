@@ -5,6 +5,7 @@ using System.Threading.Channels;
 using Dotwire.Api;
 using Dotwire.Configuration;
 using Dotwire.Crypto;
+using Dotwire.Nats;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Protocol;
 using Microsoft.Extensions.Options;
@@ -37,7 +38,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
         public string UserId { get; } = userId;
         public string? Role { get; } = role;
         public HubOutbox? Outbox { get; } = outbox;
-        public HashSet<Guid> Rooms { get; } = [];
+        public Dictionary<Guid, AccessEvent?> Rooms { get; } = [];
     }
 
     private sealed record SseConnection(Channel<SseOutboundEvent> Channel, CancellationTokenSource Revoked, int Capacity);
@@ -111,6 +112,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
     private readonly NatsOptions _natsOptions;
     private readonly ILogger<RoomInterestManager> _logger;
     private readonly DotwireMetrics _metrics;
+    private readonly AccessLogPublisher _accessLog;
     private readonly ConcurrentDictionary<Guid, RoomSubscription> _subscriptions = new();
     private readonly ConcurrentDictionary<string, ConnectionInfo> _connections = new();
     private readonly ConcurrentDictionary<Guid, ConcurrentDictionary<string, SseConnection>> _sseChannels = new();
@@ -123,7 +125,8 @@ public sealed class RoomInterestManager : IAsyncDisposable
         PresenceCoalescer presenceCoalescer,
         IOptions<NatsOptions> natsOptions,
         ILogger<RoomInterestManager> logger,
-        DotwireMetrics metrics)
+        DotwireMetrics metrics,
+        AccessLogPublisher accessLog)
     {
         _nats = nats;
         _lifetimeManager = lifetimeManager;
@@ -132,17 +135,18 @@ public sealed class RoomInterestManager : IAsyncDisposable
         _natsOptions = natsOptions.Value;
         _logger = logger;
         _metrics = metrics;
+        _accessLog = accessLog;
         metrics.ObserveSseConnections(() => _sseChannels.Values.Sum(perRoom => (long)perRoom.Count));
     }
 
     /// <summary>Returns false if the connection was already subscribed to this room.</summary>
-    public async Task<bool> SubscribeAsync(Guid roomId, string connectionId, string userId, string? role = null)
+    public async Task<bool> SubscribeAsync(Guid roomId, string connectionId, string userId, string? role = null, AccessEvent? opened = null)
     {
         Task ready;
         lock (_gate)
         {
             var info = _connections.GetOrAdd(connectionId, id => new ConnectionInfo(userId, role, CreateOutbox(id)));
-            if (!info.Rooms.Add(roomId))
+            if (!info.Rooms.TryAdd(roomId, opened))
                 return false;
 
             if (!_natsOptions.Enabled)
@@ -159,7 +163,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
         }
         catch
         {
-            Unsubscribe(roomId, connectionId);
+            Unsubscribe(roomId, connectionId, AccessEvents.Error);
             throw;
         }
 
@@ -167,13 +171,14 @@ public sealed class RoomInterestManager : IAsyncDisposable
     }
 
     /// <summary>Returns false if the connection wasn't subscribed to this room.</summary>
-    public bool Unsubscribe(Guid roomId, string connectionId)
+    public bool Unsubscribe(Guid roomId, string connectionId, string reason = AccessEvents.Left)
     {
         RoomSubscription? toDispose = null;
         bool removed;
+        AccessEvent? open = null;
         lock (_gate)
         {
-            removed = _connections.TryGetValue(connectionId, out var info) && info.Rooms.Remove(roomId);
+            removed = _connections.TryGetValue(connectionId, out var info) && info.Rooms.Remove(roomId, out open);
             if (removed && info!.Rooms.Count == 0 && info.Outbox is null)
                 _connections.TryRemove(connectionId, out _);
 
@@ -186,6 +191,8 @@ public sealed class RoomInterestManager : IAsyncDisposable
         }
 
         toDispose?.Cts.Cancel();
+        if (open is not null)
+            _accessLog.RecordClose(AccessEvents.Close(open, reason, DateTimeOffset.UtcNow));
         return removed;
     }
 
@@ -193,13 +200,25 @@ public sealed class RoomInterestManager : IAsyncDisposable
     public IReadOnlyList<Guid> DisconnectAll(string connectionId)
     {
         List<Guid> rooms;
+        List<AccessEvent> opens = [];
         lock (_gate)
         {
             if (!_connections.TryRemove(connectionId, out var info))
                 return [];
             info.Outbox?.Complete();
-            rooms = [.. info.Rooms];
+            rooms = [.. info.Rooms.Keys];
+            foreach (var roomId in rooms)
+            {
+                if (info.Rooms[roomId] is { } open)
+                {
+                    opens.Add(open);
+                    info.Rooms[roomId] = null;
+                }
+            }
         }
+
+        foreach (var open in opens)
+            _accessLog.RecordClose(AccessEvents.Close(open, AccessEvents.Disconnected, DateTimeOffset.UtcNow));
 
         foreach (var roomId in rooms)
         {
@@ -225,7 +244,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
     /// bookkeeping as hub connections, so <see cref="Revoke"/> can find and close it too.
     /// </summary>
     public async Task<(ChannelReader<SseOutboundEvent> Reader, CancellationToken Revoked)> RegisterSseConnectionAsync(
-        Guid roomId, string connectionId, string userId, int bufferSize, string? role = null)
+        Guid roomId, string connectionId, string userId, int bufferSize, string? role = null, AccessEvent? opened = null)
     {
         var connection = new SseConnection(
             Channel.CreateBounded<SseOutboundEvent>(new BoundedChannelOptions(bufferSize)
@@ -238,11 +257,11 @@ public sealed class RoomInterestManager : IAsyncDisposable
             bufferSize);
         var perRoom = _sseChannels.GetOrAdd(roomId, _ => new ConcurrentDictionary<string, SseConnection>());
         perRoom[connectionId] = connection;
-        await SubscribeAsync(roomId, connectionId, userId, role);
+        await SubscribeAsync(roomId, connectionId, userId, role, opened);
         return (connection.Channel.Reader, connection.Revoked.Token);
     }
 
-    public bool UnregisterSseConnection(Guid roomId, string connectionId)
+    public bool UnregisterSseConnection(Guid roomId, string connectionId, string reason = AccessEvents.Disconnected)
     {
         if (_sseChannels.TryGetValue(roomId, out var perRoom))
         {
@@ -252,7 +271,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
                 _sseChannels.TryRemove(roomId, out _);
         }
 
-        return Unsubscribe(roomId, connectionId);
+        return Unsubscribe(roomId, connectionId, reason);
     }
 
     /// <summary>
@@ -296,7 +315,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
             var live = new List<(Guid, string, string?)>();
             foreach (var (_, info) in _connections)
             {
-                foreach (var roomId in info.Rooms)
+                foreach (var roomId in info.Rooms.Keys)
                     live.Add((roomId, info.UserId, info.Role));
             }
             return live;
@@ -310,7 +329,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
     {
         lock (_gate)
         {
-            if (!_connections.TryGetValue(connectionId, out var info) || !info.Rooms.Contains(roomId))
+            if (!_connections.TryGetValue(connectionId, out var info) || !info.Rooms.ContainsKey(roomId))
                 return false;
 
             return !_natsOptions.Enabled
@@ -333,7 +352,7 @@ public sealed class RoomInterestManager : IAsyncDisposable
                 : _connections;
             foreach (var (connectionId, info) in source)
             {
-                if (info.UserId == userId && info.Rooms.Contains(roomId))
+                if (info.UserId == userId && info.Rooms.ContainsKey(roomId))
                     affected.Add((connectionId, info));
             }
         }
@@ -349,17 +368,29 @@ public sealed class RoomInterestManager : IAsyncDisposable
                 sse.Channel.Writer.TryComplete();
             }
 
-            if (Unsubscribe(roomId, connectionId))
+            if (Unsubscribe(roomId, connectionId, AccessEvents.Revoked))
                 _presenceCoalescer.QueueLeave(roomId, userId);
         }
     }
 
     private void FailSubscription(Guid roomId, RoomSubscription subscription)
     {
+        List<AccessEvent> opens = [];
         lock (_gate)
         {
             _subscriptions.TryRemove(new KeyValuePair<Guid, RoomSubscription>(roomId, subscription));
+            foreach (var (_, info) in subscription.Connections)
+            {
+                if (info.Rooms.TryGetValue(roomId, out var open) && open is not null)
+                {
+                    opens.Add(open);
+                    info.Rooms[roomId] = null;
+                }
+            }
         }
+
+        foreach (var open in opens)
+            _accessLog.RecordClose(AccessEvents.Close(open, AccessEvents.Error, DateTimeOffset.UtcNow));
 
         foreach (var (_, info) in subscription.Connections)
             info.Outbox?.Abort();

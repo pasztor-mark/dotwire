@@ -19,6 +19,9 @@ Data protection contact, if one is appointed: [name, contact].
 - **Account details.** [Identifier from our identity provider, display name, role in the service].
   dotwire stores an opaque user identifier (`sub`) and the roles and memberships we grant. We keep
   the names and contact details in [our user system].
+- **Access records** (only if we keep an access log, and delete this line otherwise). Which rooms you
+  opened and when, and which message ranges were served to you, recorded by your user identifier. They
+  hold no message content and are kept for [period].
 - **Operational data.** Service metrics that carry no personal identifiers, and [any other logs we keep,
   with their content and period].
 
@@ -47,7 +50,7 @@ interests / consent / legal obligation, as applicable].
 
 You can ask us for:
 
-- **Access and a copy.** We provide your messages, memberships and roles in a machine-readable form.
+- **Access and a copy.** We provide your messages, memberships, roles and, if section 2 lists access records, those records in a machine-readable form.
   [Describe how to request it and the response time.]
 - **Erasure.** When we erase your account, we either:
   - **anonymize** your messages, so they are attributed to a placeholder sender instead of you, or

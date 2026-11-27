@@ -315,6 +315,63 @@ public class DotwireHostClientComposeTests : IDisposable
         Assert.True(stream.Length > 0);
     }
 
+    [Fact]
+    public async Task ExportRoomHistory_RecordedWithActor()
+    {
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
+        {
+            b.WithoutErasureWorker();
+            b.UseSetting("ConnectionStrings:PostgresMigrator",
+                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire;Password={_pgPassword}");
+            b.UseSetting("ConnectionStrings:PostgresWrite",
+                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
+            b.UseSetting("ConnectionStrings:PostgresRead",
+                $"Host=127.0.0.1;Port=5432;Database=dotwire;Username=dotwire_app;Password={_appPassword}");
+            b.UseSetting("Postgres:Migrate", "true");
+            b.UseSetting("Nats:Url", "nats://127.0.0.1:4222");
+            b.UseSetting("Nats:Enabled", "true");
+            b.UseSetting("Dotwire:AccessLog:Enabled", "true");
+            b.UseSetting("Auth:Issuer", TestTokens.Issuer);
+            b.UseSetting("Auth:Audience", TestTokens.Audience);
+            b.UseSetting($"Auth:Keys:{TestKeys.Kid}", TestKeys.PublicPem);
+            b.UseSetting("Dotwire:Encryption:ActiveKeyId", "it");
+            b.UseSetting("Dotwire:Encryption:Keys:it",
+                Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
+        });
+        _ = factory.Services;
+        var client = MakeClient(factory: factory);
+        var ct = TestContext.Current.CancellationToken;
+        var roomId = Guid.NewGuid();
+        var userId = $"dave-{Guid.NewGuid():N}";
+        await SeedMemberAsync(userId, roomId);
+
+        await using var stream = new MemoryStream();
+        await client.ExportRoomHistoryAsync(roomId, userId, stream, ct);
+
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(15);
+        await using var conn = new NpgsqlConnection(PgConnectionString + _pgPassword);
+        await conn.OpenAsync(ct);
+        string? actor = null;
+        string? user = null;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            await using var cmd = new NpgsqlCommand(
+                "SELECT actor_id, user_id FROM access_log WHERE room_id = $1 AND event = 'history.read' LIMIT 1", conn);
+            cmd.Parameters.AddWithValue(roomId);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct))
+            {
+                actor = reader.IsDBNull(0) ? null : reader.GetString(0);
+                user = reader.GetString(1);
+                break;
+            }
+            await Task.Delay(150, ct);
+        }
+
+        Assert.Equal(DotwireHostOptions.DefaultAdminUserId, actor);
+        Assert.Equal(userId, user);
+    }
+
     // ---- SSE against the real server -------------------------------------------------------
 
     [Fact]

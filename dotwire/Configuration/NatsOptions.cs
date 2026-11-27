@@ -62,6 +62,16 @@ public sealed class NatsOptions
     public string AuditWriterConsumer { get; set; } = "audit-writer";
 
     public AuditWriterSection AuditWriter { get; set; } = new();
+
+    public string AccessLogStream { get; set; } = "ACCESS";
+
+    public string AccessLogSubject { get; set; } = "dotwire.access";
+
+    public string AccessLogWriterConsumer { get; set; } = "access-writer";
+
+    public long AccessLogMaxBytes { get; set; } = 1024L * 1024 * 1024;
+
+    public AccessLogWriterSection AccessLogWriter { get; set; } = new();
 }
 
 /// <summary>Audit-writer batch/standby knobs (spec §3.16: <c>Nats:AuditWriter:*</c>).</summary>
@@ -75,4 +85,11 @@ public sealed class AuditWriterSection
 
     /// <summary>Delay before retrying the advisory lock when another node holds it.</summary>
     public int StandbyRetrySeconds { get; set; } = 5;
+}
+
+public sealed class AccessLogWriterSection
+{
+    public int BatchMaxMessages { get; set; } = 500;
+
+    public int BatchLingerMs { get; set; } = 1000;
 }

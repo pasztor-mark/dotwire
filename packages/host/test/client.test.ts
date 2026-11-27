@@ -363,7 +363,7 @@ test('audit endpoints mint as the auditor and pass through query params', async 
 });
 
 test('exportUser and exportUserStream', async () => {
-  const exportBody = { userId: 'dave', exportedAt: 't', role: 'member', roomIds: [], messages: [], auditEvents: [] };
+  const exportBody = { userId: 'dave', exportedAt: 't', role: 'member', roomIds: [], messages: [], auditEvents: [], accessLog: [] };
   const { fetchImpl } = createRoutedFetch({
     'GET /admin/users/dave/export': () => jsonRes(200, exportBody)
   });
@@ -581,11 +581,27 @@ const ERASURE_BODY = {
 test('getComplianceSettings GETs /admin/compliance as admin and parses the settings', async () => {
   const { fetchImpl, calls } = createRoutedFetch({
     'GET /admin/compliance': () =>
-      jsonRes(200, { allowChanges: true, minimumKeepDays: 30, erasureMode: 'anonymize', activeHolds: 2, retentionPaused: true })
+      jsonRes(200, {
+        allowChanges: true,
+        minimumKeepDays: 30,
+        erasureMode: 'anonymize',
+        activeHolds: 2,
+        retentionPaused: true,
+        accessLogEnabled: true,
+        accessLogRetentionDays: 90
+      })
   });
   const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
   const settings = await client.getComplianceSettings();
-  assert.deepEqual(settings, { allowChanges: true, minimumKeepDays: 30, erasureMode: 'anonymize', activeHolds: 2, retentionPaused: true });
+  assert.deepEqual(settings, {
+    allowChanges: true,
+    minimumKeepDays: 30,
+    erasureMode: 'anonymize',
+    activeHolds: 2,
+    retentionPaused: true,
+    accessLogEnabled: true,
+    accessLogRetentionDays: 90
+  });
   assert.equal((decodeJwt(bearerToken(calls[0])) as Record<string, unknown>)['dw:role'], 'admin');
 });
 
@@ -698,4 +714,107 @@ test('a 409 surfaces as a Conflict DotwireApiError carrying the server code', as
       return true;
     }
   );
+});
+
+test('fetchAsUser token carries dw:actor = adminUserId', async () => {
+  const { fetchImpl, calls } = createRoutedFetch({
+    'GET /rooms/11111111-1111-4111-8111-111111111111/participants': () => jsonRes(200, ['alice'])
+  });
+  const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl, adminUserId: 'ops-host' }));
+  await client.getRoomParticipants('11111111-1111-4111-8111-111111111111', 'alice');
+  assert.equal((decodeJwt(bearerToken(calls[0])) as Record<string, unknown>)['dw:actor'], 'ops-host');
+});
+
+test('public mintToken has no dw:actor', async () => {
+  const client = new DotwireHostClient(baseConfig({ adminUserId: 'ops-host' }));
+  const token = await client.mintToken('alice', { role: 'member' });
+  assert.equal('dw:actor' in decodeJwt(token), false);
+  const response = await client.tokenResponse({ userId: 'alice', role: 'member' });
+  const body = (await response.json()) as { token: string };
+  assert.equal('dw:actor' in decodeJwt(body.token), false);
+});
+
+test('mintToken passes actor through', async () => {
+  const client = new DotwireHostClient(baseConfig());
+  const token = await client.mintToken('alice', { actor: 'svc' });
+  assert.equal((decodeJwt(token) as Record<string, unknown>)['dw:actor'], 'svc');
+});
+
+test('getAccessLog sends auditor token and query string', async () => {
+  const from = '2026-11-01T00:00:00.000Z';
+  const { fetchImpl, calls } = createRoutedFetch({
+    'GET /audit/access': () => jsonRes(200, { entries: [], next: null })
+  });
+  const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
+  const page = await client.getAccessLog({ from: new Date(from), roomId: '11111111-1111-4111-8111-111111111111', limit: 50 });
+  assert.deepEqual(page, { entries: [], next: null });
+  assert.equal(
+    new URL(calls[0].url).search,
+    `?from=${encodeURIComponent(from)}&roomId=11111111-1111-4111-8111-111111111111&limit=50`
+  );
+  assert.equal((decodeJwt(bearerToken(calls[0])) as Record<string, unknown>)['dw:role'], 'auditor');
+});
+
+test('getAccessLog maps 503 to Unavailable', async () => {
+  const { fetchImpl } = createRoutedFetch({
+    'GET /audit/access': () => jsonRes(503, { error: 'audit_unavailable' })
+  });
+  const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
+  await assert.rejects(
+    () => client.getAccessLog({ from: '2026-11-01T00:00:00.000Z' }),
+    (err: unknown) => err instanceof DotwireApiError && err.kind === 'Unavailable' && err.status === 503
+  );
+});
+
+test('getAccessLog rejects non-uuid roomId', async () => {
+  const { fetchImpl, calls } = createFakeFetch(() => jsonRes(200, { entries: [], next: null }));
+  const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
+  await assert.rejects(() => client.getAccessLog({ from: '2026-11-01T00:00:00.000Z', roomId: 'room1' }), TypeError);
+  assert.equal(calls.length, 0);
+});
+
+test('exportUser maps accessLog entries, nulls, and a missing property to []', async () => {
+  const base = { userId: 'dave', exportedAt: 't', role: 'member', roomIds: [], messages: [], auditEvents: [] };
+  const access = {
+    time: 't1',
+    event: 'history_read',
+    roomId: '11111111-1111-4111-8111-111111111111',
+    userId: 'dave',
+    actorId: 'host-admin',
+    role: 'member',
+    via: 'rest',
+    windowId: '22222222-2222-4222-8222-222222222222',
+    expiresAt: 't2',
+    reason: 'support',
+    fromSeq: 1,
+    toSeq: 9,
+    count: 9
+  };
+  const nulls = {
+    time: 't3',
+    event: 'access_window',
+    roomId: '11111111-1111-4111-8111-111111111111',
+    userId: 'dave',
+    actorId: null,
+    role: 'auditor',
+    via: 'sse',
+    windowId: null,
+    expiresAt: null,
+    reason: null,
+    fromSeq: null,
+    toSeq: null,
+    count: null
+  };
+  const { fetchImpl } = createRoutedFetch({
+    'GET /admin/users/dave/export': () => jsonRes(200, { ...base, accessLog: [access, nulls] })
+  });
+  const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
+  const exported = await client.exportUser('dave');
+  assert.deepEqual(exported.accessLog, [access, nulls]);
+
+  const { fetchImpl: legacyFetch } = createRoutedFetch({
+    'GET /admin/users/dave/export': () => jsonRes(200, base)
+  });
+  const legacy = await new DotwireHostClient(baseConfig({ fetch: legacyFetch })).exportUser('dave');
+  assert.deepEqual(legacy.accessLog, []);
 });

@@ -307,6 +307,19 @@ public sealed class ErasureEndpointComposeTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Inject_AsSenderWithOpenErasure_Is409ErasureOpen()
+    {
+        var user = NewUser();
+        await SeedAsync(user, "member");
+        var client = AdminClient();
+        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync($"/admin/users/{user}/erase", null, Ct)).StatusCode);
+
+        var response = await client.PostAsJsonAsync($"/admin/rooms/{Guid.NewGuid()}/messages", new { content = "hi", senderId = user }, Ct);
+
+        await AssertErrorAsync(response, HttpStatusCode.Conflict, "erasure_open");
+    }
+
+    [Fact]
     public async Task Status_HeldRoom_IsWaitingWithLegalHold()
     {
         var user = NewUser();

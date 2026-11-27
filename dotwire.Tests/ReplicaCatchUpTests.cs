@@ -48,6 +48,31 @@ public class ReplicaCatchUpTests
     }
 
     [Fact]
+    public async Task Replica_Behind_ReportsStillWaiting()
+    {
+        var source = new FakeLsnSource(poll => poll >= 5 ? 100UL : 40UL);
+        var reports = new List<ulong>();
+
+        await ReplicaCatchUp.WaitForReplicaAsync(source, 100, TimeSpan.FromMilliseconds(5), Ct,
+            (_, replayed) => reports.Add(replayed), TimeSpan.Zero);
+
+        Assert.NotEmpty(reports);
+        Assert.All(reports, r => Assert.Equal(40UL, r));
+    }
+
+    [Fact]
+    public async Task Replica_CaughtUp_NeverReportsStillWaiting()
+    {
+        var source = new FakeLsnSource(_ => 100UL);
+        var reports = 0;
+
+        await ReplicaCatchUp.WaitForReplicaAsync(source, 100, TimeSpan.FromMilliseconds(5), Ct,
+            (_, _) => reports++, TimeSpan.Zero);
+
+        Assert.Equal(0, reports);
+    }
+
+    [Fact]
     public async Task Cancelled_Throws()
     {
         var source = new FakeLsnSource(_ => 40UL);

@@ -149,6 +149,224 @@ public class DotwireHostClientUnitTests
         Assert.Equal(["user-1", "user-2"], userIds);
     }
 
+    private static JsonElement DecodeClaims(HttpRequestMessage req)
+    {
+        var token = req.Headers.Authorization!.Parameter!;
+        var payload = Microsoft.IdentityModel.Tokens.Base64UrlEncoder.DecodeBytes(token.Split('.')[1]);
+        return JsonDocument.Parse(payload).RootElement.Clone();
+    }
+
+    private static string ExportJson(string? accessLogProperty) => $$"""
+        {"userId":"dave","exportedAt":"2026-11-20T08:00:00+00:00","role":"member","roomIds":[],"messages":[],"auditEvents":[]{{accessLogProperty}}}
+        """;
+
+    [Fact]
+    public async Task ExportUserAsync_ParsesAccessLogEntries()
+    {
+        var (client, handler) = MakeClient();
+        var room = Guid.Parse("22222222-2222-4222-8222-222222222222");
+        var window = Guid.Parse("33333333-3333-4333-8333-333333333333");
+        var full = $$"""
+            {"time":"2026-11-01T10:00:00.123+00:00","event":"live.opened","roomId":"{{room}}","userId":"dave","actorId":"host-admin","role":"member","via":"sse","windowId":"{{window}}","expiresAt":"2026-11-01T10:15:00+00:00","reason":"expired","fromSeq":5000000000,"toSeq":18446744073709551615,"count":7}
+            """;
+        var nulls = $$"""
+            {"time":"2026-11-02T10:00:00+00:00","event":"history.read","roomId":"{{room}}","userId":"dave","actorId":null,"role":"auditor","via":"rest","windowId":null,"expiresAt":null,"reason":null,"fromSeq":null,"toSeq":null,"count":null}
+            """;
+        handler.Respond(_ => MakeResponse(HttpStatusCode.OK, ExportJson($",\"accessLog\":[{full},{nulls}]")));
+
+        var export = await client.ExportUserAsync("dave", TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, export.AccessLog.Count);
+        var a = export.AccessLog[0];
+        Assert.Equal(DateTimeOffset.Parse("2026-11-01T10:00:00.123+00:00"), a.Time);
+        Assert.Equal("live.opened", a.Event);
+        Assert.Equal(room, a.RoomId);
+        Assert.Equal("dave", a.UserId);
+        Assert.Equal("host-admin", a.ActorId);
+        Assert.Equal("member", a.Role);
+        Assert.Equal("sse", a.Via);
+        Assert.Equal(window, a.WindowId);
+        Assert.Equal(DateTimeOffset.Parse("2026-11-01T10:15:00+00:00"), a.ExpiresAt);
+        Assert.Equal("expired", a.Reason);
+        Assert.Equal(5000000000UL, a.FromSeq);
+        Assert.Equal(ulong.MaxValue, a.ToSeq);
+        Assert.Equal(7, a.Count);
+        var b = export.AccessLog[1];
+        Assert.Equal("history.read", b.Event);
+        Assert.Equal("auditor", b.Role);
+        Assert.Null(b.ActorId);
+        Assert.Null(b.WindowId);
+        Assert.Null(b.ExpiresAt);
+        Assert.Null(b.Reason);
+        Assert.Null(b.FromSeq);
+        Assert.Null(b.ToSeq);
+        Assert.Null(b.Count);
+    }
+
+    [Fact]
+    public async Task ExportUserAsync_WithoutAccessLogProperty_YieldsEmptyList()
+    {
+        var (client, handler) = MakeClient();
+        handler.Respond(_ => MakeResponse(HttpStatusCode.OK, ExportJson(null)));
+
+        var export = await client.ExportUserAsync("dave", TestContext.Current.CancellationToken);
+
+        Assert.Empty(export.AccessLog);
+    }
+
+    [Fact]
+    public async Task MemberCallToken_CarriesActor()
+    {
+        var (client, handler) = MakeClient();
+        JsonElement claims = default;
+        handler.Respond(req =>
+        {
+            claims = DecodeClaims(req);
+            return MakeResponse(HttpStatusCode.OK, """{"roomId":"00000000-0000-0000-0000-000000000000","messages":[],"hasMore":false}""");
+        });
+
+        await client.GetMessagesAsync(Guid.NewGuid(), "user-1", ct: TestContext.Current.CancellationToken);
+
+        Assert.Equal("user-1", claims.GetProperty("sub").GetString());
+        Assert.Equal(DotwireHostOptions.DefaultAdminUserId, claims.GetProperty("dw:actor").GetString());
+    }
+
+    [Fact]
+    public async Task ParticipantsToken_CarriesActor()
+    {
+        var (client, handler) = MakeClient();
+        JsonElement claims = default;
+        handler.Respond(req =>
+        {
+            claims = DecodeClaims(req);
+            return MakeResponse(HttpStatusCode.OK, "[]");
+        });
+
+        await client.GetRoomParticipantsAsync(Guid.NewGuid(), "user-1", TestContext.Current.CancellationToken);
+
+        Assert.Equal(DotwireHostOptions.DefaultAdminUserId, claims.GetProperty("dw:actor").GetString());
+    }
+
+    [Fact]
+    public void PublicMintToken_HasNoActor()
+    {
+        var (client, _) = MakeClient();
+        var token = client.MintToken("user-1");
+        var payload = Microsoft.IdentityModel.Tokens.Base64UrlEncoder.DecodeBytes(token.Split('.')[1]);
+        using var json = JsonDocument.Parse(payload);
+        Assert.False(json.RootElement.TryGetProperty("dw:actor", out _));
+    }
+
+    [Fact]
+    public void PublicMintToken_WithActor_SetsClaim()
+    {
+        var (client, _) = MakeClient();
+        var token = client.MintToken("user-1", actor: "svc-1");
+        var payload = Microsoft.IdentityModel.Tokens.Base64UrlEncoder.DecodeBytes(token.Split('.')[1]);
+        using var json = JsonDocument.Parse(payload);
+        Assert.Equal("svc-1", json.RootElement.GetProperty("dw:actor").GetString());
+    }
+
+    [Fact]
+    public async Task SseToken_CarriesActor()
+    {
+        var (client, handler) = MakeClient();
+        JsonElement claims = default;
+        handler.Respond(req =>
+        {
+            if (req.RequestUri!.AbsolutePath.EndsWith("/events"))
+                claims = DecodeClaims(req);
+            return MakeResponse(HttpStatusCode.NotFound, null);
+        });
+
+        await Assert.ThrowsAsync<DotwireApiException>(async () =>
+        {
+            await foreach (var _ in client.StreamEventsAsync(Guid.NewGuid(), "user-1", new StreamOptions { AutoResume = false }, TestContext.Current.CancellationToken)) { }
+        });
+
+        Assert.Equal(DotwireHostOptions.DefaultAdminUserId, claims.GetProperty("dw:actor").GetString());
+    }
+
+    [Fact]
+    public async Task GetAccessLogAsync_BuildsQueryAndUsesAuditorToken()
+    {
+        var (client, handler) = MakeClient();
+        HttpRequestMessage? seen = null;
+        string? path = null;
+        JsonElement claims = default;
+        handler.Respond(req =>
+        {
+            seen = req;
+            path = req.RequestUri!.PathAndQuery;
+            claims = DecodeClaims(req);
+            return MakeResponse(HttpStatusCode.OK, """
+                {"entries":[{"kind":"history","roomId":"11111111-1111-4111-8111-111111111111","userId":"dave","actorId":"host-admin","role":"member","via":"rest","start":"2026-11-01T10:00:00+00:00","windowId":null,"end":null,"endReason":null,"expiresAt":null,"fromSeq":3,"toSeq":9,"count":7}],"next":"abc"}
+                """);
+        });
+        var roomId = Guid.Parse("11111111-1111-4111-8111-111111111111");
+        var from = new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.Zero);
+        var to = new DateTimeOffset(2026, 11, 2, 0, 0, 0, TimeSpan.Zero);
+
+        var page = await client.GetAccessLogAsync(
+            new AccessLogQuery(from, to, roomId, "a b&c", 50, "cur+sor/="), TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpMethod.Get, seen!.Method);
+        Assert.StartsWith("/audit/access?", path);
+        var query = System.Web.HttpUtility.ParseQueryString(seen.RequestUri!.Query);
+        Assert.Equal(from.ToString("O"), query["from"]);
+        Assert.Equal(to.ToString("O"), query["to"]);
+        Assert.Equal(roomId.ToString(), query["roomId"]);
+        Assert.Equal("a b&c", query["userId"]);
+        Assert.Equal("50", query["limit"]);
+        Assert.Equal("cur+sor/=", query["cursor"]);
+        Assert.Contains("userId=a%20b%26c", path);
+        Assert.Equal(DotwireHostOptions.DefaultAuditorUserId, claims.GetProperty("sub").GetString());
+        Assert.Equal("auditor", claims.GetProperty("dw:role").GetString());
+        Assert.False(claims.TryGetProperty("dw:actor", out _));
+        Assert.Equal("abc", page.Next);
+        var entry = Assert.Single(page.Entries);
+        Assert.Equal("history", entry.Kind);
+        Assert.Equal("host-admin", entry.ActorId);
+        Assert.Equal(3UL, entry.FromSeq);
+        Assert.Equal(9UL, entry.ToSeq);
+        Assert.Equal(7, entry.Count);
+    }
+
+    [Fact]
+    public async Task GetAccessLogAsync_OmitsUnsetOptionalParameters()
+    {
+        var (client, handler) = MakeClient();
+        string? path = null;
+        handler.Respond(req =>
+        {
+            path = req.RequestUri!.PathAndQuery;
+            return MakeResponse(HttpStatusCode.OK, """{"entries":[],"next":null}""");
+        });
+
+        var page = await client.GetAccessLogAsync(new AccessLogQuery(DateTimeOffset.UnixEpoch), TestContext.Current.CancellationToken);
+
+        Assert.StartsWith("/audit/access?from=", path);
+        Assert.DoesNotContain("to=", path);
+        Assert.DoesNotContain("roomId=", path);
+        Assert.DoesNotContain("userId=", path);
+        Assert.DoesNotContain("limit=", path);
+        Assert.DoesNotContain("cursor=", path);
+        Assert.Empty(page.Entries);
+        Assert.Null(page.Next);
+    }
+
+    [Fact]
+    public async Task GetAccessLog_503_MapsUnavailable()
+    {
+        var (client, handler) = MakeClient();
+        handler.Respond(_ => MakeResponse(HttpStatusCode.ServiceUnavailable, """{"error":"access_log_unavailable"}"""));
+
+        var ex = await Assert.ThrowsAsync<DotwireApiException>(() =>
+            client.GetAccessLogAsync(new AccessLogQuery(DateTimeOffset.UnixEpoch), TestContext.Current.CancellationToken));
+
+        Assert.Equal(DotwireErrorKind.Unavailable, ex.Kind);
+    }
+
     [Fact]
     public async Task SendAsUserAsync_ResolvesRoleAfter403_ThenSucceeds()
     {
@@ -573,13 +791,13 @@ public class DotwireHostClientUnitTests
     public async Task GetComplianceSettingsAsync_GetsAdminComplianceAndParses()
     {
         var (client, handler) = MakeClient();
-        var sent = Capture(handler, HttpStatusCode.OK, """{"allowChanges":true,"minimumKeepDays":30,"erasureMode":"anonymize","activeHolds":2,"retentionPaused":true}""");
+        var sent = Capture(handler, HttpStatusCode.OK, """{"allowChanges":true,"minimumKeepDays":30,"erasureMode":"anonymize","activeHolds":2,"retentionPaused":true,"accessLogEnabled":true,"accessLogRetentionDays":2190}""");
 
         var settings = await client.GetComplianceSettingsAsync(Ct);
 
         Assert.Equal(HttpMethod.Get, sent.Method);
         Assert.Equal("/admin/compliance", sent.Path);
-        Assert.Equal(new ComplianceSettings(true, 30, "anonymize", 2, true), settings);
+        Assert.Equal(new ComplianceSettings(true, 30, "anonymize", 2, true, true, 2190), settings);
     }
 
     [Fact]

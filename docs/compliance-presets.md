@@ -3,12 +3,14 @@
 Suggested settings per regime for a dotwire deployment. These are a starting point for a host's
 own counsel and auditor, not a configuration dotwire applies.
 
-**No preset exists in code.** dotwire has no regime switch and no preset file. The three settings
+**No preset exists in code.** dotwire has no regime switch and no preset file. The settings
 below are plain configuration keys that the host sets in its own deployment configuration:
 
 - `Dotwire:Compliance:AllowChanges` (default `true`)
 - `Dotwire:Compliance:MinimumKeepDays` (default `0`)
 - `Dotwire:Compliance:Erasure:Mode` (default `anonymize`, or `delete`)
+- `Dotwire:AccessLog:Enabled` (default `false`)
+- `Dotwire:AccessLog:RetentionDays` (default `0`, which keeps access-log rows indefinitely)
 
 Retention is set with `Dotwire:Retention:MessagesDays` at startup, or with `PUT /admin/retention`.
 Use one of the two, not both (see COMPLIANCE.md, "Technical controls inventory").
@@ -91,16 +93,27 @@ host must cover in its own assessment.
 | `MinimumKeepDays` | At least the documentation period in 45 CFR 164.316(b)(2), six years. State medical-record rules are often longer, so use the longest one that applies. |
 | `Erasure:Mode` | `delete`. Health information in free text is unlikely to be de-identified by anonymization. |
 | `Retention:MessagesDays` | At least `MinimumKeepDays`. The startup check enforces this. |
+| `AccessLog:Enabled` | `true`. The access log is the record that §164.312(b) asks for (our reading). |
+| `AccessLog:RetentionDays` | At least `2190`, the same six-year documentation period as `MinimumKeepDays`. The startup check enforces the floor. |
 
 **What dotwire can't cover:** the Business Associate Agreement (dotwire is software, not a covered
 entity or business associate, see COMPLIANCE.md); the administrative and physical safeguards; the
 minimum-necessary standard; plaintext metadata (who messaged whom and when can itself be protected
 health information); accounting of disclosures; breach notification; and state retention rules.
 
-**Read access is not logged.** dotwire's audit log records admin and compliance actions, not which
-member opened a room or read its messages. The audit-controls standard (45 CFR 164.312(b)) is only
-partly covered. Record access to chat by other means, or document chat access as unlogged in the risk
-analysis (see COMPLIANCE.md, "Accepted limitations").
+**Access logging is off by default.** dotwire's audit log records admin and compliance actions. With
+`AccessLog:Enabled` set to `true`, the access log also records which member opened a room and when, and
+which history pages each member was served. Our reading is that this is the record 45 CFR 164.312(b)
+asks for, subject to the limitations in COMPLIANCE.md. With it off, which member opened a room or read
+its messages is not recorded, and the audit-controls standard is only partly covered. Enable the access
+log, or record access to chat by other means, or document chat access as unlogged in the risk analysis
+(see COMPLIANCE.md, "Accepted limitations").
+
+## SOC 2 (AICPA trust services criteria)
+
+No setting is needed for SOC 2. CC7.2 asks for monitoring of system activity, and the access log is one
+optional input to it (`AccessLog:Enabled`, with `AccessLog:RetentionDays` set by the host). See
+COMPLIANCE.md, "Control mappings."
 
 ## MiFID II (EU Markets in Financial Instruments Directive II)
 
@@ -110,6 +123,10 @@ analysis (see COMPLIANCE.md, "Accepted limitations").
 | `MinimumKeepDays` | `1826` (five years). Use `2556` (seven years) where the competent authority has asked for a longer period. |
 | `Erasure:Mode` | `delete`. With `AllowChanges` set to `false`, the erasure waits until the rows reach end of life. |
 | `Retention:MessagesDays` | At least `MinimumKeepDays`. |
+
+**Optional:** `AccessLog:Enabled` records which member opened a room and read its history. The
+record-keeping rules in this table do not require it (our reading); enable it if the host's own policy
+needs it.
 
 **What dotwire can't cover:** durable, non-rewritable storage and time-stamping of records; the
 recording duties for telephone and electronic communications that may apply to chat used for trading
@@ -131,6 +148,9 @@ set. An archive fed only by postsend will have holes. Page each room's history a
 | `MinimumKeepDays` | `1095` (three years) for business communications under Rule 17a-4(b)(4). Use `2190` (six years) where FINRA Rule 4511(c) applies and no other period is specified. |
 | `Erasure:Mode` | `delete`. The erasure waits until the rows reach end of life. |
 | `Retention:MessagesDays` | At least `MinimumKeepDays`. |
+
+**Optional:** `AccessLog:Enabled` records which member opened a room and read its history. It is not one
+of the record-keeping items in this table (our reading); enable it if the host's own policy needs it.
 
 **What dotwire can't cover:** the storage itself. Our reading is that Rule 17a-4(f) calls for
 either WORM (write once, read many) media or an audit-trail alternative. A Postgres database is not

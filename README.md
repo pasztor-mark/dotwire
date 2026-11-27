@@ -39,7 +39,7 @@ The whole stack (dotwire, Postgres + TimescaleDB, NATS JetStream, Next.js, Caddy
 * **Shard-Key Discipline:** Hot-path queries include `room_id`; TimescaleDB hypertables support time-based retention through chunk drops.
 * **Envelope Encryption at Rest:** Payloads are encrypted with AES-256-GCM (`nonce(12) ‖ ciphertext ‖ tag(16)`) at the gateway before publishing to JetStream or writing to disk. Key IDs travel alongside envelopes for zero-downtime key rotation.
 * **Tamper-Evident Audit Chain:** Append-only compliance log hash-chained with SHA-256, anchored by periodic checkpoints, verifiable via `GET /audit/verify`, and protected with database-level revoked grants and guard triggers.
-* **Compliance Surface:** Redaction, emergency deletion, legal holds, account erasure with optional erasure notices, DSAR export, and configurable retention (Postgres chunk drops + JetStream `MaxAge`) via the admin API and both host SDKs. Settings are in [Compliance settings](#compliance-settings).
+* **Compliance Surface:** Redaction, emergency deletion, legal holds, account erasure with optional erasure notices, DSAR export, an opt-in access log of member live windows and history reads, and configurable retention (Postgres chunk drops + JetStream `MaxAge`) via the admin API and both host SDKs. Settings are in [Compliance settings](#compliance-settings).
 * **Webhooks & SSE:** Optional presend/postsend webhook call-outs for host-side moderation, and a resumable Server-Sent Events read path alongside SignalR.
 * **Per-Node Rate Limiting:** In-process token-bucket limits on send, read, admin, and hub routes — no external dependency.
 * **OpenTelemetry Observability:** OTLP metrics for the send path, fanout, auth lookups, JetStream lag and database pools, opt-in traces scrubbed to an allowlist of tags (no ids, SQL, or content), and an optional Grafana overlay with a provisioned dashboard. See [Metrics](#metrics) and [Tracing](#tracing).
@@ -93,7 +93,7 @@ echo "Auth__Keys__dev=\"$(awk '{printf "%s\\n",$0}' dev-jwt.pub)\"" >> .env
 docker compose up -d --build
 ```
 
-Omit `--build` to run the published image, `ghcr.io/pasztor-mark/dotwire:<version>` (`linux/amd64` and `linux/arm64`; set `DOTWIRE_VERSION`, default `0.5.1`).
+Omit `--build` to run the published image, `ghcr.io/pasztor-mark/dotwire:<version>` (`linux/amd64` and `linux/arm64`; set `DOTWIRE_VERSION`, default `0.6.0`).
 
 The compose stacks publish plain HTTP on `127.0.0.1` only. Before exposing dotwire, put TLS in front of it, set `Cors:AllowedOrigins` and `AllowedHosts` to your real origins and host names, keep `ConnectionStrings:PostgresMigrator` on the migrating node only, and for `compose.multinode.yaml` set `NATS_USER`, `NATS_PASSWORD`, `POSTGRES_REPLICATION_PASSWORD` and `HAPROXY_STATS_PASSWORD` in `.env`. Connection strings in compose `environment:` are visible through `docker inspect`; in production supply them from your secret store instead. Point the host SDKs at an `https` `baseUrl` outside localhost. See ARCHITECTURE.md, "Deployment posture".
 
@@ -210,6 +210,8 @@ Every compliance key, with its default. Out-of-range values fail startup. Effect
 | `Dotwire__Compliance__Erasure__Mode` | `anonymize` | `anonymize`, `delete` | Mode used when an erase request omits `mode`. `anonymize` re-attributes messages to `dotwire:erased`; `delete` removes them. |
 | `Dotwire__Compliance__Erasure__RecheckMinutes` | `60` | `1..1440` | How often the erasure worker re-checks open erasures, besides its wake-ups on request and hold release. |
 | `Dotwire__Compliance__HoldRetentionWaitSeconds` | `30` | `0..600` | How long placing a hold waits for a running retention job to stop. The hold is placed even when the wait times out. |
+| `Dotwire__AccessLog__Enabled` | `false` | bool | Records each member's live windows (hub or SSE, open to close) and each history page served, ids only, queryable by auditors at `GET /audit/access`. Refuses an open or a history read it cannot record. Needs `Nats__Enabled=true` and `Auth__MaxTokenLifetimeMinutes` above `0`, and must be the same on every node. See ARCHITECTURE.md, "Access log." |
+| `Dotwire__AccessLog__RetentionDays` | `0` | `0..36500` | Days to keep access-log rows; `0` keeps them indefinitely. When above `0`, must be at least `Dotwire__Compliance__MinimumKeepDays`. Applies whether or not logging is enabled. Legal holds pause it. |
 | `Dotwire__Webhooks__Erasure__Url` | unset | `https` or loopback | Enables erasure notices. Unset publishes nothing. `Dotwire__Webhooks__AllowInsecureUrls` applies as for other webhooks. |
 | `Dotwire__Webhooks__Erasure__TimeoutMs` | `2000` | integer | Timeout for one erasure-notice POST. The consumer's ack wait is the larger of 30 s and twice this value. |
 | `Nats__ErasureNoticesStream` | `ERASURES` | name | JetStream stream for erasure notices. Keep the default. |
@@ -241,10 +243,13 @@ Instruments (meter `Dotwire`):
 | `dotwire.jetstream.consumer.oldest_pending.age` | ObservableGauge<double> | `s` | `stream`, `consumer` | poller snapshot; `0` when pending is 0 |
 | `dotwire.jetstream.stream.bytes` | ObservableGauge<long> | `By` | `stream` | poller snapshot: `StreamState.Bytes` |
 | `dotwire.jetstream.stream.messages` | ObservableGauge<long> | `{message}` | `stream` | poller snapshot: `StreamState.Messages` |
-| `dotwire.jetstream.stream.max_bytes` | ObservableGauge<long> | `By` | `stream` | server `StreamConfig.MaxBytes`, only when > 0 (AUDIT) |
+| `dotwire.jetstream.stream.max_bytes` | ObservableGauge<long> | `By` | `stream` | server `StreamConfig.MaxBytes`, only when > 0 (AUDIT, ACCESS) |
 | `dotwire.jetstream.stream.max_age` | ObservableGauge<double> | `s` | `stream` | server `StreamConfig.MaxAge`, only when > 0 (ROOMS) |
 | `dotwire.audit.writer.lock_held` | ObservableGauge<int> | `1` | none | `AuditWriterService`: 1 while the advisory lock is held, else 0 |
 | `dotwire.audit.unavailable` | Counter<long> | `{response}` | none | `ApiResults.AuditUnavailable()` |
+| `dotwire.access_log.unavailable` | Counter<long> | `{event}` | `event` (`opened`, `read`) | `AccessLogPublisher.RecordAsync` failures: a subscribe, SSE open or history page refused because its event could not be recorded |
+| `dotwire.access_log.close_dropped` | Counter<long> | `{event}` | `reason` (`queue_full`, `publish_failed`) | `AccessLogPublisher` close pump: a `live.closed` that was not recorded. The window then ends at its token's `expires_at` |
+| `dotwire.access_log.malformed` | Counter<long> | `{event}` | none | `AccessLogWriterService`: a stream message that failed to parse or validate. It is counted and acked, not stored |
 | `dotwire.rejections` | Counter<long> | `{rejection}` | `transport` (`hub`, `rest`, `sse`), `reason` (`rate_limited`, `too_many_connections`, `busy`), `operation` (`connect`, `subscribe`, `unsubscribe`, `send`, `audit_verify`) | sites that bypass the rate-limit middleware: `RoomHub.OnConnectedAsync`, `RoomHub.Send`, `HubRateLimitFilter.InvokeMethodAsync`, `SendRateLimitFilter` (REST send when `HubSend:Enabled=true`), the SSE connection cap in `Events`, the full-verify gate in `Audit` |
 | `dotwire.sse.active_connections` | ObservableGauge<long> | `{connection}` | none | `RoomInterestManager`: sum of `_sseChannels` per-room counts |
 | `dotwire.webhook.presend.results` | Counter<long> | `{call}` | `outcome` (`allowed`, `allowed_with_rewrite`, `rejected`, `unavailable`, `failed_open`) | `PresendWebhookClient.EvaluateAsync` / `Unavailable` |
@@ -260,7 +265,7 @@ Instruments (meter `Dotwire`):
 
 Built-in meters are exported too: ASP.NET Core (`Microsoft.AspNetCore.Hosting`, Kestrel, SignalR connections, rate limiting, which includes `aspnetcore.rate_limiting.requests` for middleware rejections), `System.Net.Http`, `System.Runtime`, `Npgsql` and `NATS.Net`. Third-party tags are scrubbed by views: `NATS.Net` `messaging.client.*` is dropped (it carries subjects), `nats.client.*` has no tags, and `db.client.*` keeps only `db.client.connection.state`, `db.client.connection.pool.name`, `db.operation.name` and `error.type`. The pool name is `read` or `write`: both data sources are given a fixed name, because without one Npgsql fills that tag with connection-string fragments.
 
-A JetStream gauge that disappears means the poller is failing or NATS is unreachable. Alert on its absence.
+A JetStream gauge that disappears means the poller is failing or NATS is unreachable. Alert on its absence. The ACCESS stream and `access-writer` gauges are reported only when `Dotwire__AccessLog__Enabled=true`, so their absence alerts only then.
 
 In Prometheus (via OTLP) names become snake case with unit suffixes: `dotwire.rejections` is `dotwire_rejections_total`, `dotwire.jetstream.consumer.oldest_pending.age` is `dotwire_jetstream_consumer_oldest_pending_age_seconds`, and `dotwire.audit.writer.lock_held` is `dotwire_audit_writer_lock_held_ratio`. `service.name` and `service.instance.id` become the `service_name` and `service_instance_id` labels; the node role is on `target_info` as `dotwire_node_role`.
 
@@ -289,6 +294,10 @@ Each limit is emitted as its own gauge, so these are ratios. The thresholds are 
 | AUDIT `stream.bytes / max_bytes` | > 0.5 | > 0.8 |
 | `sum(audit.writer.lock_held)` across nodes | | == 0 for 5 min (no audit writer) |
 | `rate(audit.unavailable)` | | > 0 |
+| ACCESS `stream.bytes / max_bytes` (access log enabled) | > 0.5 | > 0.8 |
+| ACCESS `access-writer` `oldest_pending.age` (writer stalled; a full stream follows) | > 300 s | > 3600 s |
+| `rate(access_log.unavailable)` (members are being refused) | | > 0 |
+| `rate(access_log.close_dropped)` (windows fall back to `expires_at`) | > 0 | |
 | `rate(webhook.presend.results{outcome=unavailable or failed_open})` | > 0 for 5 min | |
 | `rate(webhook.postsend.dropped)` | > 0 | |
 | JetStream gauges absent | | 5 min (poller failing or NATS unreachable) |

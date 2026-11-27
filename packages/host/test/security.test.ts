@@ -298,3 +298,10 @@ test('a throwing onErasure answers 500 so dotwire retries the notice', async () 
   assert.equal(result.status, 500);
   assert.deepEqual(result.body, { error: 'erasure_handler_failed' });
 });
+
+test('getAccessLog rejects room ids that are not UUIDs before any request', async () => {
+  const { fetchImpl, calls } = createFakeFetch(() => jsonRes(200, { entries: [], next: null }));
+  const client = new DotwireHostClient(baseConfig({ fetch: fetchImpl }));
+  await assert.rejects(() => client.getAccessLog({ from: '2026-11-01T00:00:00.000Z', roomId: `${ROOM}/../x` }), TypeError);
+  assert.equal(calls.length, 0);
+});

@@ -116,6 +116,9 @@ public class MessageCompressionComposeTests
         {
             await ExecOwnerAsync("SELECT remove_compression_policy('messages', if_exists => true)");
             await ExecOwnerAsync("ALTER TABLE messages SET (timescaledb.compress = false)");
+            await ExecOwnerAsync("SELECT remove_compression_policy('access_log', if_exists => true)");
+            await ExecOwnerAsync("SELECT decompress_chunk(c, if_compressed => true) FROM show_chunks('access_log') c");
+            await ExecOwnerAsync("ALTER TABLE access_log SET (timescaledb.compress = false)");
         }
     }
 

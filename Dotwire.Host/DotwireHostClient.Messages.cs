@@ -25,7 +25,7 @@ public sealed partial class DotwireHostClient
         var finalContent = content;
         var ack = await WithResolvedRoleAsync(userId, (role, innerCt) =>
         {
-            var token = MintToken(userId, role, ttl: _options.DefaultTokenTtl);
+            var token = MintMemberCallToken(userId, role);
             var body = JsonBody(new SendMessageRequestDto(finalContent), DotwireHostJsonContext.Default.SendMessageRequestDto);
             return SendAsync(HttpMethod.Post, $"/rooms/{roomId}/messages", token, DotwireHostJsonContext.Default.SendMessageResult, innerCt, body, idempotencyKey);
         }, ct);
@@ -58,7 +58,7 @@ public sealed partial class DotwireHostClient
         var qs = BuildHistoryQuery(query);
         return WithResolvedRoleAsync(asUserId, (role, innerCt) =>
         {
-            var token = MintToken(asUserId, role, ttl: _options.DefaultTokenTtl);
+            var token = MintMemberCallToken(asUserId, role);
             return SendAsync(HttpMethod.Get, $"/rooms/{roomId}/messages{qs}", token, DotwireHostJsonContext.Default.RoomHistory, innerCt);
         }, ct);
     }

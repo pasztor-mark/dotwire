@@ -40,11 +40,14 @@ public sealed partial class DotwireHostClient : IDotwireHostClient
     public Func<ErasureNotice, CancellationToken, Task>? Erasure { get; set; }
 
     /// <inheritdoc />
-    public string MintToken(string userId, string? role = null, string? displayName = null, TimeSpan? ttl = null) =>
-        _signer.MintToken(userId, role ?? "member", displayName, ttl);
+    public string MintToken(string userId, string? role = null, string? displayName = null, TimeSpan? ttl = null, string? actor = null) =>
+        _signer.MintToken(userId, role ?? "member", displayName, ttl, actor);
 
     /// <inheritdoc />
     public DotwireRoom Room(Guid roomId) => new(this, roomId);
+
+    private string MintMemberCallToken(string userId, string role) =>
+        _signer.MintToken(userId, role, ttl: _options.DefaultTokenTtl, actor: _options.AdminUserId);
 
     private string AdminToken() => _adminToken.Get();
 

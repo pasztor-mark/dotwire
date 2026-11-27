@@ -238,6 +238,21 @@ const current = await host.getErasure(started.id);
 await host.emergencyDeleteMessage(roomId, seq, 'court_order');
 ```
 
+## Access log
+
+Member-scoped calls the SDK makes on a user's behalf (history, send, participants, SSE) mint their token
+with `dw:actor` = `adminUserId` (default `host-admin`), so the access log attributes the read to the
+host rather than to the member. `mintToken` sets `dw:actor` only when you pass `actor`; `tokenResponse` never does: tokens you hand to end-user clients stay unattributed.
+
+`getAccessLog` reads with the auditor token. It throws `DotwireApiError` with `kind: 'Unavailable'`
+(HTTP 503) only when the read cannot be recorded in the audit log, so retrying is safe. The query works
+whether or not logging is enabled; a disabled log returns whatever earlier enabled periods recorded.
+
+```ts
+const page = await host.getAccessLog({ from: '2026-11-01T00:00:00Z', roomId, limit: 50 });
+// page.entries: AccessLogEntry[]; page.next is an opaque cursor for the next page, or null
+```
+
 While any hold is active, retention is paused (`retentionPaused`). Erasure revokes the user's room
 memberships and role at once, as `deleteUserRole` does. `anonymize` re-attributes the user's messages
 to `dotwire:erased`, and `delete` removes them. Holds, minimum keep and write-once settings still apply,
@@ -303,7 +318,8 @@ means the listed messages are gone.
 | `getMessages(roomId, options)` | `Promise<RoomHistoryResponse>` | Queries history as `options.asUserId`. |
 | `handlePresendWebhook(request)` / `handlePostSendWebhook(request)` | `Promise<Response>` | Verifies and handles dotwire's webhook call-outs. Requires `webhookSecret` (or `allowUnsignedWebhooks: true`). |
 | `handlePresendWebhookBody(body, signature, rawBody, { timestamp, signatureV2 })` | `Promise<WebhookResult>` | Express-style variant; pass the raw body and the `X-Dotwire-Timestamp` / `X-Dotwire-Signature-V2` headers. |
-| `getComplianceSettings()` | `Promise<ComplianceSettings>` | Reads `allowChanges`, `minimumKeepDays`, `erasureMode`, `activeHolds` and `retentionPaused`. |
+| `getComplianceSettings()` | `Promise<ComplianceSettings>` | Reads `allowChanges`, `minimumKeepDays`, `erasureMode`, `activeHolds`, `retentionPaused`, `accessLogEnabled` and `accessLogRetentionDays`. |
+| `getAccessLog({ from, to?, roomId?, userId?, limit?, cursor? })` | `Promise<AccessLogPage>` | Pages the access log as the auditor. `from`/`to` accept a `Date` or ISO string; `roomId` must be a UUID. Throws `Unavailable` (503) when the read cannot be recorded in the audit log. |
 | `placeRoomLegalHold(roomId, matterRef)` / `placeUserLegalHold(userId, matterRef)` | `Promise<LegalHold>` | Places a hold. `matterRef` is stored in plaintext: pass an opaque reference. |
 | `releaseLegalHold(holdId)` | `Promise<void>` | Releases a hold. Releasing it twice answers `409` (`Conflict`). |
 | `listLegalHolds({ activeOnly? })` | `Promise<LegalHold[]>` | Lists holds. `activeOnly` defaults to `true`. |

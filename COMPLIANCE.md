@@ -44,6 +44,12 @@ the doc section linked.
   by `/audit/verify`. The JetStream AUDIT stream only queues events until they are chained into
   Postgres: written events are removed, and a full queue (`Nats:AuditMaxBytes`) fails audited
   calls closed instead of discarding events. See ARCHITECTURE.md, "Audit log."
+- **Opt-in access log (off by default).** With `Dotwire:AccessLog:Enabled=true`, dotwire writes an
+  append-only record, in its own table, of each live window a member opens (hub subscribe or SSE stream,
+  with its close and reason) and each history page served, as ids only. `GET /audit/access` (auditor role)
+  queries it, and each query is itself audited. An open or a history read that cannot be recorded is
+  refused, never served unlogged. Whether to enable it is the host's decision, and the risk analysis should
+  record it either way. See ARCHITECTURE.md, "Access log."
 - **Role cross-check + membership authorization pipeline.** Every authenticated request
   verifies the JWT signature and standard claims, then cross-checks the token's `dw:role`
   claim against the service-side `user_roles` table — the table is authoritative, not the
@@ -60,14 +66,15 @@ the doc section linked.
   configured, each redaction publishes a notice once the stores are cleaned. See ARCHITECTURE.md, "Encryption at rest & data lifecycle"
   ("Redaction mechanics").
 - **DSAR export endpoint** (admin role). For a given `sub`, exports that user's messages
-  (decrypted), memberships, roles, and references to their audit entries. See ARCHITECTURE.md,
+  (decrypted), memberships, roles, references to their audit entries, and access-log rows where the user
+  is the subject or the actor (empty unless the access log is on). See ARCHITECTURE.md,
   "Encryption at rest & data lifecycle" ("DSAR export mechanics").
 - **Configurable retention (content and metadata), API and startup config.** Postgres history
   retention (Timescale chunk drops, `O(1)` per chunk) is host-configured and defaults to
   indefinite, settable either at startup (`Dotwire:Retention:MessagesDays`) or live via the
   admin API/SDK retention methods (`GET`/`PUT /admin/retention`) — manage it from one of the
   two, not both, per ARCHITECTURE.md's "Retention mechanics." Every retention change emits a
-  `retention.set` audit event. While any legal hold is active, the global retention job is
+  `retention.set` audit event. While any legal hold is active, the retention jobs for messages and the access log are
   paused (`GET /admin/retention` reports `paused`), and a non-zero retention below
   `MinimumKeepDays` is refused with `409 minimum_keep`. JetStream stream retention (`MaxAge`) defaults to roughly 48
   hours, since it only needs to cover batch-writer lag and reconnect gap-fill, not serve as
@@ -99,7 +106,8 @@ the doc section linked.
   `Dotwire:Compliance:MinimumKeepDays` and `Dotwire:Compliance:Erasure:Mode` are set per deployment in
   configuration and validated at startup. No API can change them, so a stolen admin token cannot
   weaken them. `GET /admin/compliance` reads them. dotwire ships no regime presets in code; the
-  suggested settings per regime live in `docs/compliance-presets.md`.
+  suggested settings per regime live in `docs/compliance-presets.md`. The access-log keys
+  (`Dotwire:AccessLog:Enabled`, `Dotwire:AccessLog:RetentionDays`) are config-only in the same way.
 - **Key rotation (both key systems).** dotwire's AES-256-GCM at-rest encryption keys rotate by
   introducing a new key id for new messages while old keys are retained to decrypt old
   messages — no mass re-encryption. The host's RS256 JWT signing keys rotate independently, via
@@ -126,7 +134,7 @@ full control environment, of which dotwire's technical controls are one input.
 |---|---|---|
 | CC6.1 / CC6.6 — logical access controls | JWT signature/claims verification + role cross-check pipeline against `user_roles` and `room_members` (AUTH.md) | Manage who holds `admin`/`auditor` roles; issue and scope host-side JWTs correctly |
 | CC6.7 — transmission and at-rest protection | TLS in transit + AES-256-GCM at-rest encryption (ARCHITECTURE.md) | Terminate and manage TLS; supply and custody the encryption key in production |
-| CC7.2 / CC7.3 — system monitoring and incident detection | Hash-chained audit log, including self-logging of audit access (ARCHITECTURE.md); OpenTelemetry metrics for writer lag against the ROOMS max age, audit backlog against its cap, audit-writer presence and audit `503`s (README, "Metrics") | Monitor the audit log and the OTLP metrics operationally, alert on the README thresholds; define and run an incident response process |
+| CC7.2 / CC7.3 — system monitoring and incident detection | Hash-chained audit log, including self-logging of audit access (ARCHITECTURE.md); with `Dotwire:AccessLog:Enabled=true`, the access log of member windows and history reads, with self-logged queries (ARCHITECTURE.md, "Access log"); OpenTelemetry metrics for writer lag against the ROOMS max age, audit backlog against its cap, audit-writer presence, audit `503`s, and access-log `503`s and dropped closes (README, "Metrics") | Monitor the audit and access logs and the OTLP metrics operationally, alert on the README thresholds; define and run an incident response process |
 | CC8.1 — change management | *(no dotwire mechanism — see Host obligation)* | Host owns change management for its deployment: release approval, testing, and rollout process for dotwire and its configuration |
 
 ### ISO 27001 Annex A (2022)
@@ -136,7 +144,7 @@ full control environment, of which dotwire's technical controls are one input.
 | A.5.15 — access control | Role cross-check pipeline (`dw:role` vs. `user_roles`) + room membership check against `room_members` (AUTH.md) | Define the organizational access-control policy; grant/revoke roles and memberships correctly |
 | A.8.10 — information deletion | Redact/delete message API, account erasure (`anonymize` or `delete`), legal holds that block erasure and pause retention, and configurable retention (content and metadata) (ARCHITECTURE.md) | Choose and enforce a retention policy and a hold procedure; record hold placement and release; invoke redaction, erasure and DSAR endpoints as part of an operational process |
 | A.8.12 — data leakage prevention | AES-256-GCM at-rest encryption; audit events never contain message content, only ids | Prevent leakage in host-side systems (logs, backups, exports) outside dotwire's boundary |
-| A.8.15 — logging | Hash-chained, append-only audit log of admin, auditor and compliance actions (ARCHITECTURE.md). Member reads and live deliveries are not logged | Ship/retain logs per organizational policy; review the audit log periodically |
+| A.8.15 — logging | Hash-chained, append-only audit log of admin, auditor and compliance actions (ARCHITECTURE.md). With `Dotwire:AccessLog:Enabled=true`, an append-only access log of member live windows and history reads, ids only, queried through `GET /audit/access`. With the access log off (the default), member reads and live deliveries are not logged | Ship/retain logs per organizational policy; enable the access log or record in the risk analysis why it is off; review the audit and access logs periodically |
 | A.8.24 — use of cryptography | Both key systems: AES-256-GCM at-rest encryption keys and RS256 JWT signing keys (AUTH.md, "The two key systems") | Custody and rotate the encryption key and JWT private key; document key management procedures |
 
 **Operator note (CC6.1, CC6.6 and A.5.15):** the mappings above describe the default configuration,
@@ -149,7 +157,7 @@ policy. Keep the value as low as load allows.
 | Framework requirement | dotwire mechanism | Host obligation |
 |---|---|---|
 | §164.312(a) — access control | Role cross-check + membership authorization pipeline (AUTH.md) | Assign unique user identities on the host side; manage emergency access procedures |
-| §164.312(b) — audit controls | **Partial.** The hash-chained audit log (ARCHITECTURE.md) records admin, auditor and compliance actions. It does not record member activity: which user opened a room, read its history or received its messages is not recorded anywhere (see "Accepted limitations") | Review audit log output as part of an operational compliance program; record access to ePHI in chat by other means, or treat chat access as unlogged in the risk analysis |
+| §164.312(b) — audit controls | **Covered when `Dotwire:AccessLog:Enabled=true`**, subject to the access-log limitations under "Accepted limitations" (our reading; confirm with counsel). The hash-chained audit log (ARCHITECTURE.md) records admin, auditor and compliance actions. The access log records each member's live windows (who, which room, via hub or SSE, when opened and closed, and why, or the upper bound if the close was lost) and each history page served (who, which room, seq range, count, when), queryable through `GET /audit/access`. With the access log off (the default), member activity is not recorded anywhere | Enable the access log, review its output as part of an operational compliance program, and set `RetentionDays` per `docs/compliance-presets.md`; or record in the risk analysis why it is off, and record access to ePHI in chat by other means |
 | §164.312(c)(1) — integrity | Hash chain (`hash = SHA-256(prev_hash ‖ canonical_event)`) with daily checkpoint anchors and a `GET /audit/verify` endpoint, enabling tamper detection via chain verification | Act on integrity-verification failures; archive `audit_checkpoints` rows to independent cold storage on a regular cadence so a verification anchor survives even if the live database is compromised, and retain checkpoint verification records |
 | §164.312(e) — transmission security | TLS in transit + AES-256-GCM at-rest encryption for content that traverses JetStream | Terminate and configure TLS correctly for the deployment's network topology |
 | *(not addressed by dotwire)* | — | Business Associate Agreement (BAA), and all administrative and physical safeguards, are entirely host obligations — dotwire is software, not a covered entity or business associate |
@@ -160,12 +168,12 @@ The article mappings below are our reading of each clause. Confirm them with cou
 
 | Framework requirement | dotwire mechanism | Host obligation |
 |---|---|---|
-| Art. 15 — right of access | DSAR export endpoint (decrypted messages, memberships, roles, audit references) | Authenticate and fulfill the data subject's request through the endpoint within the legal deadline |
+| Art. 15 — right of access | DSAR export endpoint (decrypted messages, memberships, roles, audit references, and access-log rows where the user is the subject or the actor) | Authenticate and fulfill the data subject's request through the endpoint within the legal deadline |
 | Art. 17 — right to erasure | Redaction and account erasure (`anonymize` or `delete`); legal holds and keep periods are respected, and an erasure that is blocked finishes automatically when they end; JetStream copies are deleted; the hash chain survives because audit events carry ids only, never content | Delete the identity in the host's user table; review identifying free text, which anonymization does not remove; choose `delete` for DMs and small rooms; decide and execute erasure for host-side copies dotwire has no visibility into |
 | Art. 17(2) and Art. 19 — notification of recipients | Erasure-notice webhook: a signed `ErasureNotice` per redaction and per erasure pass, listing the affected `(roomId, seq)` pairs, through a durable queue | Forward the notice to every recipient the host gave the data to; deduplicate, since delivery is at-least-once; apply the listed changes without re-deriving hold or keep rules |
-| Art. 17(3) — exceptions to erasure | Legal hold blocks erasure of held data (our reading: Art. 17(3)(e), legal claims). The audit log keeps the erased user's `sub` (our reading: Art. 17(3)(b) and (e), records kept for a legal obligation or legal claims) | Record which exceptions the host relies on and for which data; use an opaque `sub`, so the retained audit id identifies no one once the host deletes its identity row; use the emergency path only with a reason code and a documented basis |
+| Art. 17(3) — exceptions to erasure | Legal hold blocks erasure of held data (our reading: Art. 17(3)(e), legal claims). The audit log and the access log keep the erased user's `sub` (our reading: Art. 17(3)(b) and (e), records kept for a legal obligation or legal claims) | Record which exceptions the host relies on and for which data; use an opaque `sub`, so the retained audit id identifies no one once the host deletes its identity row; use the emergency path only with a reason code and a documented basis |
 | Art. 18, Art. 21 and Art. 22 — restriction, objection, automated decisions | *(no dotwire mechanism)* — dotwire makes no decisions about people and does no profiling | Operate restriction, objection and automated-decision processes in the host application; see "Host responsibilities" |
-| Art. 20 — data portability | DSAR export as JSON (decrypted messages, memberships, roles, audit references) | Deliver the export to the data subject through the host's own channel |
+| Art. 20 — data portability | DSAR export as JSON (decrypted messages, memberships, roles, audit references, access-log rows) | Deliver the export to the data subject through the host's own channel |
 | Art. 25 — data protection by design and by default | AES-256-GCM at-rest encryption on by default | Keep encryption enabled; document the design choice in the host's own DPIA/records |
 | Art. 30 — records of processing activities | Hash-chained audit log as an input to the host's processing-activity records | Compile and maintain the actual Art. 30 record; the audit log is a source, not the record itself |
 | Art. 32 — security of processing | AES-256-GCM at-rest encryption + TLS in transit + hash-chain integrity | Perform the host's own risk assessment and select organizational measures beyond dotwire's boundary |
@@ -177,7 +185,7 @@ Our reading of the California Consumer Privacy Act, as amended. Confirm it with 
 | Framework requirement | dotwire mechanism | Host obligation |
 |---|---|---|
 | §1798.100 and §1798.110 — right to know | DSAR export endpoint | Verify the requester and respond through the host's process |
-| §1798.105 — right to delete | Account erasure (`anonymize` or `delete`). The exceptions are legal holds and the audit trail: the audit ids are kept (our reading: §1798.105(d)) | Delete the identity in the host's user table; decide which §1798.105(d) exceptions apply and record them; review identifying free text |
+| §1798.105 — right to delete | Account erasure (`anonymize` or `delete`). The exceptions are legal holds and the audit trail: the audit ids and access-log ids are kept (our reading: §1798.105(d)) | Delete the identity in the host's user table; decide which §1798.105(d) exceptions apply and record them; review identifying free text |
 | §1798.130 — response procedures and deadlines | *(no dotwire mechanism)* | Track request intake, identity verification and response deadlines in the host's process |
 
 ### PIPL
@@ -206,6 +214,7 @@ Our reading of the Personal Information Protection Law of the People's Republic 
 | Account erasure (`POST /admin/users/{id}/erase`) | Delete the identity in the host's user table; review identifying content; choose `delete` for DMs and small rooms; keep `sub` values unique to one person |
 | Erasure notices (`ErasureNotice` webhook) | Verify and deduplicate notices; forward them to the host's own recipients; alert on `dotwire.webhook.erasure.failed` |
 | Compliance settings (`Dotwire:Compliance:*`) | Set `AllowChanges`, `MinimumKeepDays` and `Erasure:Mode` per deployment in configuration, using the suggested settings in `docs/compliance-presets.md` as a starting point |
+| Opt-in access log (`Dotwire:AccessLog:*`), `GET /audit/access` and the DSAR `accessLog` array | Enable it per deployment, or record in the risk analysis why it is off; set `RetentionDays`; keep `Enabled` and `Auth:MaxTokenLifetimeMinutes` the same on every node; set `dw:actor` on tokens your backend uses for member reads; review the log and alert on the access-log metrics |
 
 ## Accepted limitations (read before mapping a control)
 
@@ -236,7 +245,7 @@ Our reading of the Personal Information Protection Law of the People's Republic 
 - **Applied migrations are checksummed.** Startup fails if an already-applied migration file
   changed, so schema drift from edited history is visible rather than silent.
 - **Compressed history is a storage measure, not a control.** With `Dotwire:Compression:AfterDays`
-  set (opt-in, off by default), older `messages` chunks are compressed. Compression changes the
+  set (opt-in, off by default), older `messages` and `access_log` chunks are compressed. Compression changes the
   storage layout only: it adds no encryption or access control, and it does not change how
   content is protected (content is already encrypted before it is written). Redaction still
   physically removes rows from compressed chunks, and the redaction tombstone still blocks
@@ -280,12 +289,41 @@ Our reading of the Personal Information Protection Law of the People's Republic 
   `Nats:ErasureNoticesMaxAgeHours` (default 168). A receiver that is down for longer never gets them,
   and JetStream drops them without telling anyone. Alert on `dotwire.webhook.erasure.failed` and on
   receiver downtime.
-- **Member activity is not audited.** The audit log records admin, auditor and compliance actions.
-  It does not record a member subscribing to a room, reading its history, receiving live messages or
-  reading a stream. Sends are stored with their sender and time in the messages table, but they are not
-  audit events. dotwire therefore cannot answer "who read this conversation, and when". Regimes that
-  expect access logging for sensitive data, such as HIPAA's audit controls (§164.312(b)), are only
-  partly covered.
+- **Member activity is not recorded while the access log is off.** The audit log records admin, auditor
+  and compliance actions. With `Dotwire:AccessLog:Enabled=false` (the default), a member subscribing to a
+  room, reading its history or receiving its live messages is not recorded anywhere, so dotwire cannot
+  answer "who read this conversation, and when". Sends are stored with their sender and time in the
+  messages table, but they are not audit events. Regimes that expect access logging for sensitive data,
+  such as HIPAA's audit controls (§164.312(b)), need the access log on or another record.
+- **Access-log closes are best-effort.** A `live.closed` event waits in an in-memory queue (10,000
+  events) and is tried up to three times. A full queue, a failed publish, or a shutdown that does not finish
+  draining within 5 seconds drops it, and `dotwire.access_log.close_dropped` counts the drops. A window
+  whose close was dropped reads as open until its `expires_at` (the token's `exp`), so that is its upper
+  bound, not its real end. Alert on the counter.
+- **An ambiguous publish failure can leave a phantom record.** A timeout can fail a publish that
+  JetStream already stored. For a failed open, a compensating `error` close is queued, so that window
+  has zero length. A history read answered `503` can still have been stored, and that phantom
+  `history.read` cannot be compensated. The log errs toward recording too much.
+- **`dw:actor` covers only calls the SDKs make, or calls the host tags.** Both host SDKs set it on their
+  own member calls (history, send, participants, SSE). Tokens minted for end users (`MintToken`,
+  `mintToken`, `tokenResponse`) do not carry it unless the host passes `actor` (`tokenResponse` never does), so a member's own client is logged without an actor. A
+  host that mints tokens for its own services and wants attribution passes `actor` (or sets `dw:actor` itself).
+- **Access ids are kept after erasure.** Erasure does not delete `access_log` rows, so they keep the
+  erased user's `sub` and any `dw:actor`. Our reading is that GDPR Art. 17(3)(b) and (e) and CCPA
+  §1798.105(d) cover keeping them, and that with an opaque `sub` and the host's identity row deleted they
+  identify no one. Confirm this with counsel.
+- **`Enabled` and the token cap must match on every node.** Gateway nodes publish opens and SSE reads,
+  `Api` nodes publish REST reads, and the query uses the answering node's `Auth:MaxTokenLifetimeMinutes`.
+  A node with a different setting records differently. Each node's `access_log.config` audit event shows
+  its `Enabled` setting at startup, so a flag mismatch is visible in the trail. The token cap is not
+  recorded there, so check it in configuration.
+- **Lowering the token cap can hide older windows.** The query looks back `Auth:MaxTokenLifetimeMinutes`
+  (plus clock skew) from `from`. After the cap is lowered, a window opened under the older, larger cap can
+  be missed by queries whose `from` falls within the old cap's length of the change.
+- **Denials, participant reads and client IPs are not recorded.** A request refused before its window
+  opens (for example a 403, or a denied subscribe), `GET /rooms/{id}/participants`, and the client's IP
+  address or user agent are not in the access log. A window that opens and then fails the post-subscribe
+  membership re-check is logged as an open with a `revoked` close.
 - **The postsend webhook is best-effort, not an archive feed.** Its queue lives in memory: a full queue
   drops the newest message, a delivery that fails `MaxAttempts` times (default 3) is dropped, and a
   restart loses everything still queued. Each drop is logged and counted as

@@ -10,7 +10,7 @@ public interface IDotwireHostClient
     /// <summary>
     /// Mints a token directly, bypassing role resolution entirely - the caller asserts the role.
     /// </summary>
-    string MintToken(string userId, string? role = null, string? displayName = null, TimeSpan? ttl = null);
+    string MintToken(string userId, string? role = null, string? displayName = null, TimeSpan? ttl = null, string? actor = null);
 
     Task<UserRole> SetUserRoleAsync(string userId, string role, CancellationToken ct = default);
     Task<UserRole?> GetUserRoleAsync(string userId, CancellationToken ct = default);
@@ -38,6 +38,7 @@ public interface IDotwireHostClient
 
     Task<AuditPage> ReadAuditLogAsync(long afterId = 0, int limit = 100, CancellationToken ct = default);
     Task<AuditVerification> VerifyAuditLogAsync(bool full = false, CancellationToken ct = default);
+    Task<AccessLogPage> GetAccessLogAsync(AccessLogQuery query, CancellationToken ct = default);
     Task<IReadOnlyList<AuditCheckpoint>> GetAuditCheckpointsAsync(int limit = 30, CancellationToken ct = default);
     Task<AuditArchiveResult> ArchiveAuditLogAsync(Stream destination, long afterId = 0, string? previousHash = null, CancellationToken ct = default);
 

@@ -41,7 +41,7 @@ contract already covers it).
 
 **Ephemeral traffic rule (contract, not a suggestion):** presence, typing indicators, and read
 receipts, and the live `retracted`, `revoked` and `erased` notices, ride NATS core, never
-JetStream. They are never persisted and never sit in any ack path. Agents must not "helpfully" start persisting them — that would silently turn a
+JetStream. They are never persisted and never sit in any ack path. Access-log events are different: they are server records of what was served, written to JetStream, and are not read receipts (see "Access log"). Agents must not "helpfully" start persisting the ephemeral ones — that would silently turn a
 constant-cost broadcast mechanism into a storage and replay liability for data nobody needs to
 recover.
 
@@ -310,6 +310,74 @@ acquire the lock (another node already holds it) goes into standby, retrying acq
 exactly one active writer and a hot standby ready to take over if the active writer's
 connection drops (which also releases the advisory lock, since it is session-scoped).
 
+## Access log
+
+The access log records what dotwire serves to a member, not what the member saw. It holds two kinds
+of record: a **live window** (a hub subscription or an SSE stream, from open to close) and a **history
+read** (one history page served, with its seq range and row count). It is off by default
+(`Dotwire:AccessLog:Enabled=false`), holds ids only, never message content, and lives in its own
+hypertable rather than the audit chain, so chat-volume reads do not pass through the single audit
+writer. Live message delivery adds nothing to it.
+
+**Producers.** Each producer publishes an `AccessEvent` to the `ACCESS` stream (subject
+`dotwire.access`) before the data leaves the server:
+
+- Hub `Subscribe` publishes `live.opened` (`via=hub`) and waits for the ack before the connection joins
+  the room. A failed publish refuses the subscribe with `HubException("AccessLogUnavailable")`. A
+  duplicate subscribe writes nothing.
+- SSE `GET /rooms/{id}/events` publishes `live.opened` (`via=sse`) and waits for the ack before the
+  response starts, so a failure still answers `503 access_log_unavailable`. Each replay page publishes
+  one `history.read` (`via=sse`) before its rows are written. The page is recorded as read from storage, so rows skipped as undecryptable or cut by `MaxReplayRows` are recorded but not sent. A failure part-way ends the stream; the
+  client resumes with `Last-Event-ID`.
+- REST `GET /rooms/{id}/messages` publishes one `history.read` (`via=rest`) after the page is read and
+  decrypted, before it is returned. A failure answers `503 access_log_unavailable` with no rows. The SDK
+  history export pages this endpoint, so it is covered too.
+
+Each window has a new `window_id`, per connection and room. **Closes:** every way a window leaves a room
+publishes `live.closed` with that id and a reason: `left`, `disconnected` (client close, token expiry,
+laggard abort, node shutdown), `revoked` (admin broadcast, membership sweep, a failed membership
+re-check) or `error`. The first removal path wins; later ones publish nothing. Closes are not acked on
+the request path. They go through a bounded in-memory queue of 10,000 events, each tried up to three times, and a
+full queue or a final failure drops the close and counts it in `dotwire.access_log.close_dropped`. The
+open row stores the token's `expires_at`, and both transports end the connection at that time, so a
+window whose close was lost ends no later than `expires_at`. The query returns it with `end` null.
+
+**Fail closed.** Opens and history reads have no fail-open setting. If the log cannot record one, dotwire
+refuses to serve it. A failed open also queues a compensating `live.closed` with reason `error`, so if
+the open was stored after all, the window ends at once. The same happens when the client disconnects
+during the publish.
+
+**Writer.** `AccessLogWriterService` runs on every `All` and `Api` node with NATS enabled, once the
+`ACCESS` stream exists (it rechecks every 30 s). It drains the stream whether or not logging is enabled
+on that node, so a flag set on only some nodes still gets written, and turning it off does not strand
+events already in the stream. The stream uses interest retention, `discard: new` and a 1 GiB cap
+(`Nats:AccessLogMaxBytes`), so a full stream fails the publish and the producer refuses the request. Each
+batch (up to 500 messages or 1 second) is inserted in one transaction on the write pool with
+`ON CONFLICT DO NOTHING` on `(time, stream_seq)`, then acked. There is no advisory lock, since there is no
+chain to order. A message that fails to parse or validate is logged by stream sequence, counted in
+`dotwire.access_log.malformed` and acked.
+
+**Query.** `GET /audit/access` (auditor role, read pool, `Cache-Control: no-store`) pairs each open with
+its close (same room and `window_id`, closed no later than `expires_at` plus clock skew) and lists history
+reads, sorted by start time. Filters: `from` (required), `to`, `roomId`, `userId`, `limit`, `cursor`. The
+lookback uses the query node's `Auth:MaxTokenLifetimeMinutes`, so a window opened under a larger cap can
+fall outside it after the cap is lowered. Before answering, the query publishes `access_log.read` to the
+audit chain. If that fails, the answer is `503 audit_unavailable`. The DSAR export
+(`GET /admin/users/{id}/export`) includes rows where the user is the subject or the `actor_id`. Erasure
+keeps them.
+
+**Actor.** `actor_id` is the token's optional `dw:actor` claim (AUTH.md). Both host SDKs set it on their
+own member calls, so a host-side read is attributed to the host. Public mints do not set it.
+
+**Retention, holds and compression.** `Dotwire:AccessLog:RetentionDays` (`0` keeps rows) is applied at
+startup by `set_access_log_retention`, whether or not logging is enabled. Legal holds pause access-log
+retention as they pause message retention. `Dotwire:Compression:AfterDays` also compresses `access_log`.
+
+**Startup.** Each node records an `access_log.config` event in the audit chain at startup (`value` `1`
+enabled, `0` disabled). `Enabled` and `Auth:MaxTokenLifetimeMinutes` must match on every node. Startup
+refuses `Enabled` with NATS off, `Enabled` with no token cap, and a `RetentionDays` that is out of range
+or between `0` and `Dotwire:Compliance:MinimumKeepDays`.
+
 ## Observability
 
 Metrics go to an OTLP collector and nowhere else. Every custom instrument lives in `DotwireMetrics`,
@@ -318,9 +386,13 @@ measurements. The built-in ASP.NET Core, Kestrel, SignalR, rate-limiting, `Syste
 `System.Runtime`, Npgsql and NATS.Net meters are added to the same provider.
 
 `JetStreamMetricsPoller` runs on `All` and `Api` nodes only. Every 30 s it reads the ROOMS and AUDIT
-stream and consumer state, so each of those nodes reports the same cluster-wide values and dashboards
-take `max()`. A failed poll clears that stream's snapshot, so its gauges go absent rather than freeze.
-Gateway nodes do not run the poller.
+stream and consumer state (and the ACCESS stream and `access-writer` consumer when the access log is
+enabled), so each of those nodes reports the same cluster-wide values and dashboards
+take `max()`. A failed poll clears that stream's snapshot, so its gauges go absent rather than freeze. Gateway nodes do not run the poller.
+
+The access log adds three instruments: `dotwire.access_log.unavailable` (`event`: `opened` or `read`),
+`dotwire.access_log.close_dropped` (`reason`: `queue_full` or `publish_failed`) and
+`dotwire.access_log.malformed` (writer). None carries an id.
 
 No ids are ever tags. Room, message, user and sender ids, subjects and SQL text stay out of every metric.
 Because third-party meters can add tags on upgrade, OpenTelemetry views enforce this rather than
@@ -474,7 +546,7 @@ fetching past messages — go against Postgres via the dedicated read pool (see 
 never the write pool. Because Postgres trails the JetStream ack by up to one batch interval,
 the newest page and `afterSeq` pages are topped up from the `ROOMS` stream's tail (redaction
 tombstones still apply), so a just-acked message is normally readable at once; if that
-JetStream read fails, the endpoint serves Postgres rows alone. **Live delivery** — messages as they're sent — comes through SignalR
+JetStream read fails or does not answer within 3 seconds, the endpoint serves Postgres rows alone. **Live delivery** — messages as they're sent — comes through SignalR
 fanout off NATS, not through Postgres at all; a connected client never polls the database for
 new messages. The two paths reconnect at gap-fill: a client rejoining after a blip or falling
 behind is served "room X, seq > N" (see the write path's ordering token section), which itself
@@ -604,7 +676,7 @@ chunks (see "Data layout"): `drop_chunks` removes whole compressed chunks once t
 While any legal hold is active, the retention job is paused. `set_message_retention` re-creates the
 policy and then calls `sync_retention_schedule()`, which leaves the job unscheduled; a bare
 `alter_job` pause would be undone by the policy re-add (confirmed on TimescaleDB 2.32). `GET
-/admin/retention` reports `paused: true` in that state. `PUT /admin/retention` answers
+/admin/retention` reports `paused: true` in that state (and `GET /admin/compliance` reports `retentionPaused: true`), for the messages and access-log jobs alike. `PUT /admin/retention` answers
 `409 minimum_keep` for `0 < days < MinimumKeepDays`, and a hold does not reject the change: the new
 policy is created paused. `alter_job` does not stop a run already in progress, so `POST /admin/holds`
 waits up to `Dotwire:Compliance:HoldRetentionWaitSeconds` (default 30) for the job to stop running,
@@ -644,8 +716,9 @@ erasure with `202` when the mode matches, and `409 erasure_mode_conflict` when i
 mode is final. The request inserts the `erasures` row, then revokes access the way
 `DELETE /admin/users/{id}/role` does: `room_members` and `user_roles` rows are removed, `role.deleted`
 and `member.removed` are audited, and `ephemeral.revoked` is published per room after the commit. It
-then wakes the worker. While an erasure is open, `PUT /admin/users/{id}/role` and room member adds for
-that user answer `409 erasure_open`, so an erasure that is still running cannot sweep up new messages.
+then wakes the worker. While an erasure is open, `PUT /admin/users/{id}/role`, room member adds for
+that user and admin injections with that user as `senderId` answer `409 erasure_open`, so an erasure
+that is still running cannot sweep up new messages.
 The check runs inside the same locked transaction as the erasure insert. The anonymized sender id is
 the constant `dotwire:erased`, which `IdValidation` rejects as a token `sub`, an admin path id and an
 injection sender.

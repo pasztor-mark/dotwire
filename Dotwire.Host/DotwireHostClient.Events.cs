@@ -144,7 +144,7 @@ public sealed partial class DotwireHostClient
 
         for (var attempt = 0; attempt < 2; attempt++)
         {
-            var token = MintToken(userId, role, ttl: _options.DefaultTokenTtl);
+            var token = MintMemberCallToken(userId, role);
             using var request = new HttpRequestMessage(HttpMethod.Get, path);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
             if (afterSeq.HasValue)

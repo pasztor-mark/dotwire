@@ -54,6 +54,21 @@ public sealed record AuditEvent(
     long? Value,
     DateTimeOffset Time);
 
+public sealed record AccessEvent(
+    string Event,
+    DateTimeOffset Time,
+    Guid RoomId,
+    string UserId,
+    string? ActorId,
+    string Role,
+    string Via,
+    Guid? WindowId = null,
+    DateTimeOffset? ExpiresAt = null,
+    string? Reason = null,
+    ulong? FromSeq = null,
+    ulong? ToSeq = null,
+    int? Count = null);
+
 public sealed record EmergencyDeleteRequest(string? Reason);
 
 public sealed record RedactMessageResponse(Guid RoomId, ulong Seq, bool RemovedFromHistory, bool RemovedFromStream);
@@ -89,7 +104,7 @@ public sealed record ErasureStatus(
     string[] BlockedBy,
     DateTimeOffset? CompletedAt);
 
-public sealed record ComplianceResponse(bool AllowChanges, int MinimumKeepDays, string ErasureMode, int ActiveHolds, bool RetentionPaused);
+public sealed record ComplianceResponse(bool AllowChanges, int MinimumKeepDays, string ErasureMode, int ActiveHolds, bool RetentionPaused, bool AccessLogEnabled, int AccessLogRetentionDays);
 
 /// <summary>A durable, hash-chained audit_log row as returned by `/audit*` (spec §3.7). `Hash` is lowercase hex.</summary>
 public sealed record AuditEntry(
@@ -110,6 +125,24 @@ public sealed record AuditVerificationResponse(bool Ok, long FromId, long ToId, 
 public sealed record AuditCheckpointEntry(DateOnly Day, long LastId, string Hash, DateTimeOffset CreatedAt);
 
 public sealed record AuditCheckpointsResponse(AuditCheckpointEntry[] Checkpoints);
+
+public sealed record AccessLogEntry(
+    string Kind,
+    Guid RoomId,
+    string UserId,
+    string? ActorId,
+    string Role,
+    string Via,
+    DateTimeOffset Start,
+    Guid? WindowId,
+    DateTimeOffset? End,
+    string? EndReason,
+    DateTimeOffset? ExpiresAt,
+    ulong? FromSeq,
+    ulong? ToSeq,
+    int? Count);
+
+public sealed record AccessLogPageResponse(AccessLogEntry[] Entries, string? Next);
 
 /// <summary>New 4xx/5xx failure body shape (spec §3.14): `{ "error": "&lt;code&gt;", "reason"?: "&lt;text&gt;" }`.</summary>
 public sealed record ApiErrorResponse(string Error, string? Reason = null);
@@ -176,6 +209,9 @@ public sealed record SseRevokedPayload(Guid RoomId);
 [JsonSerializable(typeof(AuditCheckpointEntry))]
 [JsonSerializable(typeof(AuditCheckpointEntry[]))]
 [JsonSerializable(typeof(AuditCheckpointsResponse))]
+[JsonSerializable(typeof(AccessLogEntry))]
+[JsonSerializable(typeof(AccessLogEntry[]))]
+[JsonSerializable(typeof(AccessLogPageResponse))]
 [JsonSerializable(typeof(PresendWebhookRequest))]
 [JsonSerializable(typeof(PresendWebhookResponse))]
 [JsonSerializable(typeof(PostSendWebhookRequest))]
@@ -194,10 +230,13 @@ public sealed record SseRevokedPayload(Guid RoomId);
 [JsonSerializable(typeof(EraseUserRequest))]
 [JsonSerializable(typeof(ErasureStatus))]
 [JsonSerializable(typeof(ErasureStatus[]))]
+[JsonSerializable(typeof(AccessEvent))]
 public partial class DotwireJsonContext : JsonSerializerContext;
 
 public static class Messages
 {
+    private static readonly TimeSpan TailReadTimeout = TimeSpan.FromSeconds(3);
+
     public static void MapMessageEndpoints(WebApplication app, bool hubSend)
     {
         var group = app.MapGroup("/rooms/{roomId}/messages")
@@ -234,6 +273,7 @@ public static class Messages
             RoomsStreamCache streams,
             IOptions<NatsOptions> natsOptions,
             HttpContext http,
+            AccessLogPublisher accessLog,
             ILoggerFactory loggerFactory) =>
         {
             if (!Guid.TryParse(roomId, out var roomGuid))
@@ -266,11 +306,32 @@ public static class Messages
                 }
             }
 
+            if (accessLog.IsEnabled)
+            {
+                try
+                {
+                    await accessLog.RecordAsync(HistoryReadEvent(http.User, roomGuid, AccessEvents.Rest, messages.Count,
+                        messages.Count == 0 ? null : messages.Min(m => m.Seq),
+                        messages.Count == 0 ? null : messages.Max(m => m.Seq)), ct);
+                }
+                catch (AccessLogUnavailableException)
+                {
+                    return ApiResults.AccessLogUnavailable();
+                }
+            }
+
             return Results.Ok(new RoomHistoryResponse(roomGuid, messages.ToArray(), hasMore));
         }).RequireRateLimiting("read");
     }
 
     public const int MaxIdempotencyKeyLength = 128;
+
+    internal static AccessEvent HistoryReadEvent(ClaimsPrincipal user, Guid roomId, string via, int count, ulong? fromSeq, ulong? toSeq) =>
+        new(AccessEvents.HistoryRead, DateTimeOffset.UtcNow, roomId,
+            user.FindFirstValue("sub") ?? string.Empty,
+            user.FindFirstValue("dw:actor"),
+            user.FindFirstValue("dw:role") ?? string.Empty,
+            via, FromSeq: fromSeq, ToSeq: toSeq, Count: count);
 
     internal static SendRejection? ValidateContent(string? content, int maxBytes) =>
         string.IsNullOrEmpty(content) || Encoding.UTF8.GetByteCount(content) > maxBytes ? new SendRejection("invalid_content") : null;
@@ -364,12 +425,14 @@ public static class Messages
             : rawRows.Count > 0 ? rawRows[^1].Seq : afterSeq!.Value;
 
         List<(ulong Seq, DateTimeOffset Time, string SenderId, string KeyId, byte[] Content)> tail;
+        using var tailDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        tailDeadline.CancelAfter(TailReadTimeout);
         try
         {
             tail = await ReadUnpersistedTailAsync(
-                readDataSource, streams, natsOptions, roomGuid, persistedTail, newest ? pageSize + 1 : pageSize - rawRows.Count + 1, newest, ct);
+                readDataSource, streams, natsOptions, roomGuid, persistedTail, newest ? pageSize + 1 : pageSize - rawRows.Count + 1, newest, tailDeadline.Token);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             logger.LogWarning("JetStream tail read failed for room {RoomId}, serving Postgres history only: {Error}", roomGuid, ex.Message);
             return (rawRows, hasMore);

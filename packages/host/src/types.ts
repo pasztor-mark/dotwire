@@ -36,6 +36,7 @@ export interface MintTokenOptions {
   displayName?: string;
   /** jose-style duration string, e.g. "15m". Defaults to `config.defaultTokenTtl`. */
   ttl?: string;
+  actor?: string;
 }
 
 export interface PresendContext {
@@ -184,6 +185,22 @@ export interface UserExportAuditEvent {
   time: string;
 }
 
+export interface UserExportAccessEvent {
+  time: string;
+  event: string;
+  roomId: string;
+  userId: string;
+  actorId: string | null;
+  role: string;
+  via: string;
+  windowId: string | null;
+  expiresAt: string | null;
+  reason: string | null;
+  fromSeq: number | null;
+  toSeq: number | null;
+  count: number | null;
+}
+
 export interface UserExport {
   userId: string;
   exportedAt: string;
@@ -191,6 +208,38 @@ export interface UserExport {
   roomIds: string[];
   messages: UserExportMessage[];
   auditEvents: UserExportAuditEvent[];
+  accessLog: UserExportAccessEvent[];
+}
+
+export interface AccessLogQuery {
+  from: string | Date;
+  to?: string | Date;
+  roomId?: string;
+  userId?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface AccessLogEntry {
+  kind: string;
+  roomId: string;
+  userId: string;
+  actorId: string | null;
+  role: string;
+  via: string;
+  start: string;
+  windowId: string | null;
+  end: string | null;
+  endReason: string | null;
+  expiresAt: string | null;
+  fromSeq: number | null;
+  toSeq: number | null;
+  count: number | null;
+}
+
+export interface AccessLogPage {
+  entries: AccessLogEntry[];
+  next: string | null;
 }
 
 export interface GetMessagesOptions {
@@ -252,6 +301,8 @@ export interface ComplianceSettings {
   erasureMode: string;
   activeHolds: number;
   retentionPaused: boolean;
+  accessLogEnabled: boolean;
+  accessLogRetentionDays: number;
 }
 
 export interface LegalHold {

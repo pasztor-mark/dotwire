@@ -6,6 +6,8 @@ import { parseSseStream, toRoomEvent } from './sse.js';
 import { auditChainHash, GENESIS_HASH } from './audit-chain.js';
 import { delay, isAbortError } from './util.js';
 import type {
+  AccessLogPage,
+  AccessLogQuery,
   AddRoomMembersOptions,
   AuditArchiveResult,
   AuditCheckpointsResponse,
@@ -64,6 +66,10 @@ export class PayloadTooLargeError extends Error {
 export function roomPath(roomId: string): string {
   if (typeof roomId !== 'string' || !UUID_PATTERN.test(roomId)) throw new TypeError('invalid roomId: expected a UUID');
   return roomId;
+}
+
+function isoString(value: string | Date): string {
+  return typeof value === 'string' ? value : value.toISOString();
 }
 
 export function seqPath(seq: number): string {
@@ -273,7 +279,8 @@ export class DotwireHostClient {
     const path = `/admin/users/${userId}/export`;
     const res = await this.adminRequest('GET', `/admin/users/${encodeURIComponent(userId)}/export`);
     await this.throwIfError(res, 'GET', path);
-    return (await res.json()) as UserExport;
+    const body = (await res.json()) as Omit<UserExport, 'accessLog'> & { accessLog?: UserExport['accessLog'] };
+    return { ...body, accessLog: body.accessLog ?? [] };
   }
 
   /** Returns the raw response stream so the caller can pipe an arbitrarily large export without buffering it. */
@@ -492,6 +499,22 @@ export class DotwireHostClient {
     const res = await this.auditorRequest('GET', path, { query: { full } });
     await this.throwIfError(res, 'GET', path);
     return (await res.json()) as AuditVerificationResponse;
+  }
+
+  async getAccessLog(query: AccessLogQuery): Promise<AccessLogPage> {
+    const path = '/audit/access';
+    const res = await this.auditorRequest('GET', path, {
+      query: {
+        from: isoString(query.from),
+        to: query.to === undefined ? undefined : isoString(query.to),
+        roomId: query.roomId === undefined ? undefined : roomPath(query.roomId),
+        userId: query.userId,
+        limit: query.limit,
+        cursor: query.cursor
+      }
+    });
+    await this.throwIfError(res, 'GET', path);
+    return (await res.json()) as AccessLogPage;
   }
 
   async getAuditCheckpoints(limit = 30): Promise<AuditCheckpointsResponse['checkpoints']> {
@@ -879,7 +902,7 @@ export class DotwireHostClient {
     const firstRole = cachedRole ?? 'member';
 
     const attempt = async (role: DotwireRole): Promise<Response> => {
-      const token = await this.signer.mintToken(userId, { role, ttl: this.defaultTtl });
+      const token = await this.signer.mintToken(userId, { role, actor: this.adminUserId, ttl: this.defaultTtl });
       return this.rawFetch(method, path, { ...opts, token });
     };
 

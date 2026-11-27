@@ -37,6 +37,7 @@ public static class Events
             IAccessStore accessStore,
             UserConnectionLimiter connectionLimiter,
             IOptions<SseOptions> sseOptionsAccessor,
+            AccessLogPublisher accessLog,
             DotwireMetrics metrics,
             ILoggerFactory loggerFactory) =>
         {
@@ -67,11 +68,32 @@ public static class Events
             var joined = false;
             try
             {
-                (var reader, revoked) = await interestManager.RegisterSseConnectionAsync(roomGuid, connectionId, userId, sseOptions.BufferSize, role);
+                AccessEvent? opened = null;
+                if (accessLog.IsEnabled)
+                {
+                    opened = AccessEvents.OpenEvent(http.User, roomGuid, AccessEvents.Sse);
+                    if (opened is null)
+                    {
+                        await ApiResults.AccessLogUnavailable().ExecuteAsync(http);
+                        return;
+                    }
+
+                    try
+                    {
+                        await accessLog.RecordAsync(opened, http.RequestAborted);
+                    }
+                    catch (AccessLogUnavailableException)
+                    {
+                        await ApiResults.AccessLogUnavailable().ExecuteAsync(http);
+                        return;
+                    }
+                }
+
+                (var reader, revoked) = await interestManager.RegisterSseConnectionAsync(roomGuid, connectionId, userId, sseOptions.BufferSize, role, opened);
 
                 if (!await accessStore.IsMemberAsync(roomGuid, userId, http.RequestAborted))
                 {
-                    interestManager.UnregisterSseConnection(roomGuid, connectionId);
+                    interestManager.UnregisterSseConnection(roomGuid, connectionId, AccessEvents.Revoked);
                     http.Response.StatusCode = StatusCodes.Status403Forbidden;
                     return;
                 }
@@ -97,8 +119,17 @@ public static class Events
                     var (replayedTo, truncated) = await ReplayAsync(
                         resumeSeq.Value,
                         sseOptions.MaxReplayRows,
-                        (current, token) => Messages.QueryHistoryPageAsync(
-                            readDataSource, streams, natsOptions.Value, logger, roomGuid, current, null, sseOptions.ReplayPageSize, token),
+                        async (current, token) =>
+                        {
+                            var page = await Messages.QueryHistoryPageAsync(
+                                readDataSource, streams, natsOptions.Value, logger, roomGuid, current, null, sseOptions.ReplayPageSize, token);
+                            if (accessLog.IsEnabled)
+                                await accessLog.RecordAsync(Messages.HistoryReadEvent(
+                                    http.User, roomGuid, AccessEvents.Sse, page.Rows.Count,
+                                    page.Rows.Count == 0 ? null : page.Rows.Min(r => r.Seq),
+                                    page.Rows.Count == 0 ? null : page.Rows.Max(r => r.Seq)), token);
+                            return page;
+                        },
                         async (row, token) =>
                         {
                             byte[] decrypted;
@@ -192,7 +223,8 @@ public static class Events
             }
             finally
             {
-                if (interestManager.UnregisterSseConnection(roomGuid, connectionId) && joined)
+                var reason = revoked.IsCancellationRequested ? AccessEvents.Revoked : AccessEvents.Disconnected;
+                if (interestManager.UnregisterSseConnection(roomGuid, connectionId, reason) && joined)
                     presenceCoalescer.QueueLeave(roomGuid, userId);
                 connectionLimiter.Release(userId);
             }

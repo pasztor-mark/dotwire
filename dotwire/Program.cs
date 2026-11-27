@@ -36,6 +36,7 @@ builder.Services.Configure<RateLimitOptions>(builder.Configuration.GetSection(Ra
 builder.Services.Configure<RetentionOptions>(builder.Configuration.GetSection(RetentionOptions.SectionName));
 builder.Services.Configure<CompressionOptions>(builder.Configuration.GetSection(CompressionOptions.SectionName));
 builder.Services.Configure<ComplianceOptions>(builder.Configuration.GetSection(ComplianceOptions.SectionName));
+builder.Services.Configure<AccessLogOptions>(builder.Configuration.GetSection(AccessLogOptions.SectionName));
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.SectionName));
 builder.Services.AddSingleton<ILsnSource, PostgresLsnSource>();
 builder.Services.AddSingleton<MessageCipher>();
@@ -63,6 +64,11 @@ CompressionRules.Validate(
 ComplianceRules.Validate(
     builder.Configuration.GetSection(ComplianceOptions.SectionName).Get<ComplianceOptions>() ?? new ComplianceOptions(),
     builder.Configuration.GetSection(RetentionOptions.SectionName).Get<RetentionOptions>() ?? new RetentionOptions());
+AccessLogRules.Validate(
+    builder.Configuration.GetSection(AccessLogOptions.SectionName).Get<AccessLogOptions>() ?? new AccessLogOptions(),
+    builder.Configuration.GetSection(NatsOptions.SectionName).Get<NatsOptions>() ?? new NatsOptions(),
+    authOptions,
+    builder.Configuration.GetSection(ComplianceOptions.SectionName).Get<ComplianceOptions>() ?? new ComplianceOptions());
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
@@ -183,6 +189,8 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<PresenceCoalescer>
 builder.Services.AddSingleton<TypingThrottle>();
 builder.Services.AddSingleton<UserConnectionLimiter>();
 builder.Services.AddSingleton<AuditPublisher>();
+builder.Services.AddSingleton<AccessLogPublisher>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<AccessLogPublisher>());
 
 builder.Services.AddHttpClient(PresendWebhookClient.HttpClientName, client =>
         client.MaxResponseContentBufferSize = PresendWebhookClient.MaxResponseBytes)
@@ -208,6 +216,7 @@ if (nodeRole is NodeRole.All or NodeRole.Api)
 {
     builder.Services.AddHostedService<PostgresWriterService>();
     builder.Services.AddHostedService<AuditWriterService>();
+    builder.Services.AddHostedService<AccessLogWriterService>();
     builder.Services.AddHostedService<ErasureNotifierService>();
     builder.Services.AddHostedService<ErasureWorkerService>();
 }
@@ -291,6 +300,14 @@ if (postgres.Migrate)
         await cmd.ExecuteScalarAsync();
     }
 
+    {
+        await using var dataSource = new NpgsqlDataSourceBuilder(RequireConnectionString(app.Configuration, "PostgresMigrator")) { Name = "migrator" }.Build();
+        await using var conn = await dataSource.OpenConnectionAsync();
+        await using var cmd = new NpgsqlCommand("SELECT set_access_log_retention($1)", conn);
+        cmd.Parameters.AddWithValue(app.Services.GetRequiredService<IOptions<AccessLogOptions>>().Value.RetentionDays);
+        await cmd.ExecuteScalarAsync();
+    }
+
     var compressionDays = app.Services.GetRequiredService<IOptions<CompressionOptions>>().Value.AfterDays;
     if (compressionDays.HasValue)
     {
@@ -305,13 +322,27 @@ if (postgres.Migrate)
 }
 
 var nats = app.Services.GetRequiredService<IOptions<NatsOptions>>().Value;
+var accessLogOptions = app.Services.GetRequiredService<IOptions<AccessLogOptions>>().Value;
 if (nats.Enabled)
 {
     await JetStreamProvisioner.ProvisionAsync(
         app.Services.GetRequiredService<INatsJSContext>(),
         nats,
         app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(nameof(JetStreamProvisioner)),
-        webhooks: webhooksOptions);
+        webhooks: webhooksOptions,
+        accessLog: accessLogOptions);
+
+    try
+    {
+        await app.Services.GetRequiredService<AuditPublisher>().PublishAsync(
+            new AuditEvent("access_log.config", null, null, null, null, accessLogOptions.Enabled ? 1 : 0, DateTimeOffset.UtcNow),
+            CancellationToken.None);
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogError("Access log config audit event could not be published ({ErrorType}): {Error}", ex.GetType().Name, ex.Message);
+        app.Services.GetRequiredService<DotwireMetrics>().AuditUnavailable();
+    }
 }
 
 await keyRing.RefreshAsync();

@@ -58,7 +58,8 @@ public class RealtimeFanoutUnitTests
             new PresenceCoalescer(nats, disabled, NullLogger<PresenceCoalescer>.Instance),
             disabled,
             NullLogger<RoomInterestManager>.Instance,
-            TestMetrics.Create().Metrics);
+            TestMetrics.Create().Metrics,
+            AccessWindowTests.Disabled());
     }
 
     private static async Task<(RoomHub Hub, CountingNats Nats)> CreateSubscribedHubAsync()
@@ -79,7 +80,8 @@ public class RealtimeFanoutUnitTests
             null!,
             null!,
             Options.Create(new DotwireOptions()),
-            TestMetrics.Create().Metrics)
+            TestMetrics.Create().Metrics,
+            AccessWindowTests.Disabled())
         {
             Context = new FakeCallerContext("conn-1", "user-1"),
         };
@@ -109,7 +111,8 @@ public class RealtimeFanoutUnitTests
             null!,
             sendLimiter,
             Options.Create(new DotwireOptions { HubSend = new HubSendOptions { Enabled = true } }),
-            metrics)
+            metrics,
+            AccessWindowTests.Disabled())
         {
             Context = new FakeCallerContext("conn-1", "user-1"),
         };
@@ -198,7 +201,8 @@ public class RealtimeFanoutUnitTests
             new PresenceCoalescer(nats, Options.Create(new NatsOptions { Enabled = false }), NullLogger<PresenceCoalescer>.Instance),
             Options.Create(new NatsOptions { Enabled = true }),
             NullLogger<RoomInterestManager>.Instance,
-            TestMetrics.Create().Metrics);
+            TestMetrics.Create().Metrics,
+            AccessWindowTests.Disabled());
         var (reader, _) = await interestManager.RegisterSseConnectionAsync(RoomId, "sse-1", "user-1", bufferSize: 8);
 
         var ephemeral = $"room.{RoomId}.ephemeral.>";

@@ -110,6 +110,13 @@ public static class DotwireHostServiceCollectionExtensions
   `403` surfaces as `DotwireApiException` with `Kind == Forbidden`.
 - `MintToken(userId, role, ...)` bypasses resolution entirely - you assert the role.
 
+Member-scoped calls the SDK makes on a user's behalf (history, send, participants, SSE) also carry
+`dw:actor` = `AdminUserId`, so the access log attributes the read to the host rather than to the
+member. `MintToken` sets `dw:actor` only when you pass `actor`: tokens you hand to end-user clients stay unattributed.
+`GetAccessLogAsync` is auditor-scoped and throws `Kind == Unavailable` (503) only when the read
+cannot be recorded in the audit log (`audit_unavailable`). The query works whether or not logging is
+enabled; a disabled log returns whatever earlier enabled periods recorded.
+
 Admin and auditor tokens are cached internally and re-minted one minute before their own
 expiry, so calling admin/auditor-scoped methods in a hot loop doesn't re-mint a token per call.
 
@@ -276,7 +283,8 @@ audit row is written.
 
 ```csharp
 var settings = await client.GetComplianceSettingsAsync();
-// AllowChanges, MinimumKeepDays, ErasureMode, ActiveHolds, RetentionPaused
+// AllowChanges, MinimumKeepDays, ErasureMode, ActiveHolds, RetentionPaused,
+// AccessLogEnabled, AccessLogRetentionDays
 
 var hold = await client.PlaceRoomLegalHoldAsync(roomId, "matter-2026-114");
 await client.ReleaseLegalHoldAsync(hold.Id);
@@ -321,7 +329,11 @@ var checkpoints = await client.GetAuditCheckpointsAsync();
 await client.SetMessageRetentionDaysAsync(365); // 0 = indefinite
 var days = await client.GetMessageRetentionDaysAsync();
 
-var export = await client.ExportUserAsync(userId);          // buffered UserExport
+var access = await client.GetAccessLogAsync(new AccessLogQuery(
+    From: DateTimeOffset.UtcNow.AddDays(-7), RoomId: roomId, Limit: 200));
+// access.Entries (Kind "live" | "history"), access.Next is the cursor for the next page, or null
+
+var export = await client.ExportUserAsync(userId);          // buffered UserExport, includes AccessLog
 await client.ExportUserAsync(userId, someStream);            // streamed straight through
 ```
 

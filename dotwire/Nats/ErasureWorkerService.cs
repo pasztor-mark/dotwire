@@ -53,6 +53,9 @@ public sealed class ErasureWorkerService(
         return TimeSpan.FromSeconds(Math.Max(Math.Max(seconds, dotwire.AuthCacheSeconds), 5));
     }
 
+    internal static bool MayStillBeInStream(DateTimeOffset time, int maxAgeHours, DateTimeOffset now) =>
+        maxAgeHours <= 0 || time > now.AddHours(-maxAgeHours);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         while (!stoppingToken.IsCancellationRequested)
@@ -232,12 +235,12 @@ public sealed class ErasureWorkerService(
     {
         if (!_revocationDone.Contains(id))
         {
-            await ReplicaCatchUp.WaitForReplicaAsync(lsnSource, await RevocationLsnAsync(conn, id, ct), ReplicaPoll, ct);
+            await WaitForReplicaAsync(id, await RevocationLsnAsync(conn, id, ct), ct);
             _revocationDone.Add(id);
         }
 
         await WaitForWriterAsync(id, ct);
-        await ReplicaCatchUp.WaitForReplicaAsync(lsnSource, await lsnSource.PrimaryLsnAsync(ct), ReplicaPoll, ct);
+        await WaitForReplicaAsync(id, await lsnSource.PrimaryLsnAsync(ct), ct);
 
         var options = natsOptions.Value;
         var stream = options.Enabled ? await js.GetStreamAsync(options.RoomsStream, cancellationToken: ct) : null;
@@ -245,7 +248,7 @@ public sealed class ErasureWorkerService(
 
         await ProcessPagesAsync(id, userId, mode, stream, ct);
 
-        await ReplicaCatchUp.WaitForReplicaAsync(lsnSource, await lsnSource.PrimaryLsnAsync(ct), ReplicaPoll, ct);
+        await WaitForReplicaAsync(id, await lsnSource.PrimaryLsnAsync(ct), ct);
         if (await CountMessagesAsync(userId, ct) > 0 || _pendingStreamDeletes.TryGetValue(id, out var stuck) && stuck.Count > 0)
             return;
 
@@ -294,6 +297,13 @@ public sealed class ErasureWorkerService(
 
         throw new InvalidOperationException($"No revocation LSN for erasure {id}");
     }
+
+    private Task WaitForReplicaAsync(long erasureId, ulong target, CancellationToken ct) =>
+        ReplicaCatchUp.WaitForReplicaAsync(lsnSource, target, ReplicaPoll, ct,
+            (waited, replayed) => logger.LogWarning(
+                "Erasure {ErasureId} still waiting for the read replica after {WaitSeconds}s: replayed LSN {ReplayedLsn}, target LSN {TargetLsn}",
+                erasureId, (int)waited.TotalSeconds, new NpgsqlLogSequenceNumber(replayed).ToString(), new NpgsqlLogSequenceNumber(target).ToString()),
+            WriterWarnInterval);
 
     private async Task WaitForWriterAsync(long erasureId, CancellationToken ct)
     {
@@ -353,8 +363,9 @@ public sealed class ErasureWorkerService(
             {
                 if (stream is not null)
                 {
-                    var horizon = DateTimeOffset.UtcNow.AddHours(-natsOptions.Value.RoomsMaxAgeHours);
-                    foreach (var row in processed.Where(r => r.Time > horizon))
+                    var now = DateTimeOffset.UtcNow;
+                    var maxAgeHours = natsOptions.Value.RoomsMaxAgeHours;
+                    foreach (var row in processed.Where(r => MayStillBeInStream(r.Time, maxAgeHours, now)))
                         await DeleteFromStreamAsync(id, stream, row.RoomId, (ulong)row.Seq, ct);
                 }
 

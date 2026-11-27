@@ -48,6 +48,12 @@ public static partial class Admin
             if (!IdValidation.IsValid(senderId))
                 return ApiResults.InvalidUserId();
 
+            await using (var conn = await writeDataSource.OpenConnectionAsync(http.RequestAborted))
+            {
+                if (await ErasureStatusQuery.OpenErasureIdAsync(conn, null, senderId, http.RequestAborted) is not null)
+                    return ApiResults.Conflict("erasure_open", $"erasure open for {senderId}");
+            }
+
             var actorId = http.User.FindFirstValue("sub")!;
             var content = request.Content!;
             var time = DateTimeOffset.UtcNow;

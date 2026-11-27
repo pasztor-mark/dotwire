@@ -125,6 +125,9 @@ public sealed class ErasureWorkerComposeTests : IAsyncDisposable
                     "SELECT remove_compression_policy('messages', if_exists => true)",
                     "SELECT decompress_chunk(c, if_compressed => true) FROM show_chunks('messages') c",
                     "ALTER TABLE messages SET (timescaledb.compress = false)",
+                    "SELECT remove_compression_policy('access_log', if_exists => true)",
+                    "SELECT decompress_chunk(c, if_compressed => true) FROM show_chunks('access_log') c",
+                    "ALTER TABLE access_log SET (timescaledb.compress = false)",
                 })
                 {
                     await using var cmd = new NpgsqlCommand(sql, conn);
@@ -174,6 +177,18 @@ public sealed class ErasureWorkerComposeTests : IAsyncDisposable
         foreach (var arg in args)
             cmd.Parameters.AddWithValue(arg);
         return (long)(await cmd.ExecuteScalarAsync(Ct))!;
+    }
+
+    private async Task SeedAccessRowAsync(Guid room, string user)
+    {
+        await using var conn = await OpenOwnerAsync(Ct);
+        await using var cmd = new NpgsqlCommand(
+            "INSERT INTO access_log (time, stream_seq, event, room_id, user_id, role, via, count) " +
+            "VALUES (now(), $1, 'history.read', $2, $3, 'member', 'rest', 1)", conn);
+        cmd.Parameters.AddWithValue(Random.Shared.NextInt64(1, long.MaxValue));
+        cmd.Parameters.AddWithValue(room);
+        cmd.Parameters.AddWithValue(user);
+        await cmd.ExecuteNonQueryAsync(Ct);
     }
 
     private async Task SeedAsync(string sub, string role, params Guid[] rooms)
@@ -366,6 +381,22 @@ public sealed class ErasureWorkerComposeTests : IAsyncDisposable
         Assert.Equal(3, await OwnerCountAsync("SELECT count(*) FROM message_redactions WHERE room_id = $1", room));
         await AssertGoneFromJetStreamAsync(seqs);
         await AssertSingleErasedAuditAsync(user, 2);
+    }
+
+    [Fact]
+    public async Task Erasure_LeavesAccessRows()
+    {
+        var factory = NewFactory();
+        var admin = await AdminAsync(factory);
+        var room = Guid.NewGuid();
+        var user = NewId("it-erw-user");
+        await SeedAsync(user, "member", room);
+        await SeedAccessRowAsync(room, user);
+
+        var status = await EraseAsync(admin, user);
+        await WaitCompletedAsync(admin, status.Id);
+
+        Assert.Equal(1, await OwnerCountAsync("SELECT count(*) FROM access_log WHERE user_id = $1", user));
     }
 
     [Fact]

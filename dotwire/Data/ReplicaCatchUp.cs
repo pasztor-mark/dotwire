@@ -30,13 +30,23 @@ public sealed class PostgresLsnSource(
 
 public static class ReplicaCatchUp
 {
-    public static async Task WaitForReplicaAsync(ILsnSource source, ulong target, TimeSpan poll, CancellationToken ct)
+    public static async Task WaitForReplicaAsync(
+        ILsnSource source, ulong target, TimeSpan poll, CancellationToken ct,
+        Action<TimeSpan, ulong>? onStillWaiting = null, TimeSpan? warnInterval = null)
     {
+        var start = TimeProvider.System.GetTimestamp();
+        var lastWarn = start;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
             if (await source.ReplicaReplayLsnAsync(ct) is not { } replayed || replayed >= target)
                 return;
+
+            if (onStillWaiting is not null && warnInterval is { } interval && TimeProvider.System.GetElapsedTime(lastWarn) >= interval)
+            {
+                lastWarn = TimeProvider.System.GetTimestamp();
+                onStillWaiting(TimeProvider.System.GetElapsedTime(start), replayed);
+            }
 
             await Task.Delay(poll, ct);
         }

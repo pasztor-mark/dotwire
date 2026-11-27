@@ -48,6 +48,22 @@ public class ServerUnitSecurityTests
     }
 
     [Fact]
+    public void InvalidActorClaim_Rejected()
+    {
+        var principal = Principal(("sub", "u1"), ("dw:role", "member"), ("iat", "1800000000"), ("exp", "1800000900"), ("dw:actor", "bad\nid"));
+
+        Assert.Equal("Token dw:actor claim is not a valid id.", TokenRules.Validate(principal, new AuthOptions(), Now));
+    }
+
+    [Fact]
+    public void ValidActorClaim_Accepted()
+    {
+        var principal = Principal(("sub", "u1"), ("dw:role", "member"), ("iat", "1800000000"), ("exp", "1800000900"), ("dw:actor", "support-7"));
+
+        Assert.Null(TokenRules.Validate(principal, new AuthOptions(), Now));
+    }
+
+    [Fact]
     public void TokenRules_LifetimeCapZeroDisablesTheCheck()
     {
         var principal = Principal(("sub", "u1"), ("dw:role", "member"), ("iat", "1800000000"), ("exp", "1900000000"));

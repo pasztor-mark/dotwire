@@ -48,7 +48,51 @@ public sealed record UserExport(
     string? Role,
     IReadOnlyList<Guid> RoomIds,
     IReadOnlyList<UserExportMessage> Messages,
-    IReadOnlyList<UserExportAuditEvent> AuditEvents);
+    IReadOnlyList<UserExportAuditEvent> AuditEvents,
+    IReadOnlyList<UserExportAccessEvent> AccessLog);
+
+public sealed record UserExportAccessEvent(
+    DateTimeOffset Time,
+    string Event,
+    Guid RoomId,
+    string UserId,
+    string? ActorId,
+    string Role,
+    string Via,
+    Guid? WindowId,
+    DateTimeOffset? ExpiresAt,
+    string? Reason,
+    ulong? FromSeq,
+    ulong? ToSeq,
+    int? Count);
+
+public sealed record AccessLogQuery(
+    DateTimeOffset From,
+    DateTimeOffset? To = null,
+    Guid? RoomId = null,
+    string? UserId = null,
+    int? Limit = null,
+    string? Cursor = null);
+
+public sealed record AccessLogEntry(
+    string Kind,
+    Guid RoomId,
+    string UserId,
+    string? ActorId,
+    string Role,
+    string Via,
+    DateTimeOffset Start,
+    Guid? WindowId,
+    DateTimeOffset? End,
+    string? EndReason,
+    DateTimeOffset? ExpiresAt,
+    ulong? FromSeq,
+    ulong? ToSeq,
+    int? Count);
+
+public sealed record AccessLogPage(IReadOnlyList<AccessLogEntry> Entries, string? Next);
+
+internal sealed record AccessLogPageDto(AccessLogEntry[] Entries, string? Next);
 
 // ---- Audit -------------------------------------------------------------------
 
@@ -82,7 +126,7 @@ public sealed record AuditArchiveResult(long Count, long LastId, string? LastHas
 
 public sealed record RetentionDto(int MessagesDays);
 
-public sealed record ComplianceSettings(bool AllowChanges, int MinimumKeepDays, string ErasureMode, int ActiveHolds, bool RetentionPaused);
+public sealed record ComplianceSettings(bool AllowChanges, int MinimumKeepDays, string ErasureMode, int ActiveHolds, bool RetentionPaused, bool AccessLogEnabled, int AccessLogRetentionDays);
 
 public sealed record LegalHold(
     long Id,
@@ -227,6 +271,11 @@ internal sealed record MessagesErasedDto(Guid RoomId, string Mode, ulong[] Seqs)
 [JsonSerializable(typeof(UserExportAuditEvent))]
 [JsonSerializable(typeof(UserExportAuditEvent[]))]
 [JsonSerializable(typeof(UserExport))]
+[JsonSerializable(typeof(UserExportAccessEvent))]
+[JsonSerializable(typeof(UserExportAccessEvent[]))]
+[JsonSerializable(typeof(AccessLogEntry))]
+[JsonSerializable(typeof(AccessLogEntry[]))]
+[JsonSerializable(typeof(AccessLogPageDto))]
 [JsonSerializable(typeof(AuditEntry))]
 [JsonSerializable(typeof(AuditEntry[]))]
 [JsonSerializable(typeof(AuditPage))]

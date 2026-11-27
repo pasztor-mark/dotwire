@@ -21,7 +21,8 @@ export class DotwireTokenSigner {
     const key = await this.keyPromise;
     const jwt = new SignJWT({
       'dw:role': role,
-      ...(options.displayName ? { 'dw:name': options.displayName } : {})
+      ...(options.displayName ? { 'dw:name': options.displayName } : {}),
+      ...(options.actor ? { 'dw:actor': options.actor } : {})
     })
       .setProtectedHeader({ alg: 'RS256', kid: this.config.keyId })
       .setIssuer(this.config.issuer)
