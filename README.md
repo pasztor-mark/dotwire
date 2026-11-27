@@ -8,6 +8,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Benchmark DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24406317.svg)](https://doi.org/10.5281/zenodo.24406317)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/pasztor-mark/dotwire/badge)](https://scorecard.dev/viewer/?uri=github.com/pasztor-mark/dotwire)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/17203/badge)](https://www.bestpractices.dev/projects/17203)
 
 **[Key highlights](#key-highlights) · [Architecture](#architecture) · [Quickstart](#quickstart) · [Benchmarks](#benchmarks) · [Official SDKs](#official-sdks) · [Docs](#docs) · [Contributing](#contributing) · [License](#license)**
 
