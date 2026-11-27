@@ -14,7 +14,7 @@ COPY . .
 WORKDIR "/src/dotwire"
 RUN dotnet publish "./dotwire.csproj" -c $BUILD_CONFIGURATION -o /app/publish
 
-FROM mcr.microsoft.com/dotnet/runtime-deps:10.0.14@sha256:f87d6824cd56fa4ad117d06461e4eb0058f46a159872dbcc4a836a72efdd1bec AS final
+FROM mcr.microsoft.com/dotnet/runtime-deps:11.0.0@sha256:b392cb6e185b0c02cd8066b8b3b2e78d58f7cc15ba5d52ea3e2bfe8f3c0060f9 AS final
 LABEL org.opencontainers.image.source="https://github.com/pasztor-mark/dotwire" \
       org.opencontainers.image.licenses="Apache-2.0"
 USER $APP_UID
