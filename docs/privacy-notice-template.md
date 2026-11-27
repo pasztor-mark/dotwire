@@ -8,7 +8,9 @@
 ## 1. Who we are
 
 [Organization name], [registered address]. Contact for privacy questions: [email or form].
-Data protection contact, if one is appointed: [name, contact].
+Data protection contact, if one is appointed: [name, contact]. [Brazil: the data protection officer
+(encarregado), whose identity and contact the LGPD requires you to publish. Switzerland: the Swiss
+representative, if you are based abroad.]
 
 ## 2. What data we process
 
@@ -61,12 +63,16 @@ You can ask us for:
   same until it ends. We then erase that data automatically. Some audit records keep an opaque
   identifier after erasure, because we must keep a record of what was done. [Adjust to the mode you use,
   and state how you treat DMs and small rooms.]
-- **Restriction and objection.** [Describe how to ask us to limit or stop a use of your data, and
-  what we do: for example, removing you from rooms.]
+- **Restriction, blocking and objection.** [Describe how to ask us to limit, block or stop a use of
+  your data, and what we do: for example, removing you from rooms.]
+- **Correction.** [Describe how to ask us to correct data about you. Chat messages cannot be edited, so
+  say what you do instead, for example replacing the message.]
 - **Portability.** [Describe the export format and how to get it.]
-- **Complaints.** [Name of the supervisory authority and how to contact it.]
+- **Complaints.** [Name of the supervisory authority and how to contact it: for example the data
+  protection authority in your country, the Swiss FDPIC, or the Brazilian ANPD.]
 
-We respond within [period].
+We respond within [period]. [GDPR: one month. FADP: 30 days. LGPD: 15 days for the full answer. Use the
+shortest period that applies.]
 
 ## 7. Automated decisions
 

@@ -10,8 +10,8 @@ systems. dotwire's job is to make that audit easier by shipping the technical co
 needs and being honest about which controls it cannot provide.
 
 This document exists to make that split explicit: it maps dotwire's built-in technical
-controls to clauses in four common frameworks (SOC 2, ISO 27001 Annex A, HIPAA technical
-safeguards, GDPR) and states plainly what remains the host's responsibility in every case.
+controls to clauses in common frameworks (SOC 2, ISO 27001 Annex A, HIPAA technical
+safeguards, GDPR, CCPA, PIPL, FADP, LGPD) and states plainly what remains the host's responsibility in every case.
 Nothing in this document, and no other dotwire document, should be read as a claim that
 dotwire itself is compliant or certified — where certification requires a control dotwire
 cannot supply (a signed BAA, a security awareness training program, a documented change
@@ -198,6 +198,45 @@ Our reading of the Personal Information Protection Law of the People's Republic 
 | Art. 47 — deletion | Account erasure. The retention-period carve-out is covered by keep periods and legal holds: data inside them is erased when they end (our reading) | Delete the identity in the host's user table; define retention periods and holds; respond within the host's deadlines |
 | Art. 44, Art. 46 and Art. 48 — choice, correction, explanation of rules | *(no dotwire mechanism)* | Host obligations; dotwire does not track consent (see "What dotwire deliberately does not do") |
 
+### FADP
+
+Our reading of the Swiss Federal Act on Data Protection (revised law, in force since 1 September 2023)
+and its Ordinance. Confirm it with counsel.
+
+| Framework requirement | dotwire mechanism | Host obligation |
+|---|---|---|
+| Art. 25 — right of access (30 days) | DSAR export endpoint (decrypted messages, memberships, roles, audit references, access-log rows where the user is the subject or the actor) | Verify the requester and answer within 30 days. The export is the data only. Also tell the person the purpose, the retention period, the recipients and the source, from the host's own records |
+| Art. 28 — data portability | DSAR export as JSON | Deliver the export to the person through the host's own channel |
+| Art. 32 and Art. 6(4) — deletion, destruction when no longer needed | Redaction and account erasure (`anonymize` or `delete`), configurable retention for content and metadata. Legal holds and keep periods are respected, and a blocked erasure finishes by itself when they end | Set a retention period, because the default is unlimited. Delete the identity in the host's user table; choose `delete` for DMs and small rooms; review identifying free text |
+| Art. 32 — correction and objection | *(no dotwire mechanism)* — messages cannot be edited. An objection is applied through memberships, redaction or erasure | Decide on and apply corrections and objections in the host application (see "Host responsibilities") |
+| Art. 7 — data protection by design and by default | AES-256-GCM at-rest encryption on by default; ids-only audit events | Choose a retention period and keep encryption on. Unlimited retention is dotwire's default and is not a by-default choice for a Swiss deployment; record the decision |
+| Art. 8 — data security | AES-256-GCM at-rest encryption, TLS in transit, hash-chained audit log, role and membership pipeline | Perform the host's own risk assessment; terminate TLS; custody the keys |
+| Ordinance on logging (our reading: needed when sensitive data is processed on a large scale or the risk is high, and measures alone do not protect it) | Opt-in access log of member live windows and history reads, with `RetentionDays` | Turn the access log on for such deployments and set `RetentionDays` to at least `365` (our reading of the one-year minimum). The log shares the database with the data it describes, so export it to separate storage if the Ordinance applies |
+| Art. 24 — notification of a breach to the FDPIC | *(no dotwire mechanism)*. `GET /audit/verify` and the metrics help detect a breach | Run the incident process. Report a breach likely to cause high risk to the FDPIC as soon as possible, and inform the people affected where required |
+| Art. 16 and Art. 17 — disclosure abroad | *(no dotwire mechanism)* — dotwire sends data only to the URLs the host configures (webhooks, the OTLP endpoint) | Check that each destination abroad has an adequate level of protection or a safeguard, and record it |
+| Art. 12, Art. 22, Art. 14 and Art. 21 — records of processing, impact assessment, Swiss representative, automated decisions | *(no dotwire mechanism)* — the audit log is an input to the records of processing | Keep the records of processing (unless an exemption for small organizations applies), perform the impact assessment, appoint a Swiss representative where the host is based abroad, and operate any automated-decision process |
+| Art. 31 — keeping the audit trail after erasure | The audit log and the access log keep the erased user's `sub` (our reading: processing justified by a legal obligation or an overriding interest) | Use an opaque `sub`, so the retained id identifies no one once the host deletes its identity row |
+
+### LGPD
+
+Our reading of Brazil's Lei Geral de Proteção de Dados (Law 13.709/2018). Confirm it with counsel.
+
+| Framework requirement | dotwire mechanism | Host obligation |
+|---|---|---|
+| Art. 18 I and II, Art. 19 — confirmation and access | DSAR export endpoint (decrypted messages, memberships, roles, audit references, access-log rows) | Verify the requester. Answer at once in simplified form, or within **15 days** with the full declaration, which is a shorter deadline than the GDPR's. The export is the data only; the origin, the purpose and the retention period come from the host's own records |
+| Art. 18 IV and VI, Art. 12 and Art. 16 — anonymization or deletion, end of processing | Account erasure (`anonymize` or `delete`), redaction and configurable retention. Keep periods and legal holds cover the retention exceptions in Art. 16 and finish the erasure when they end | Use `delete`. Anonymized messages count as anonymous only if they cannot be traced back, and free text in a small room often can be. Delete the identity in the host's user table. Set a retention period, because the default is unlimited |
+| Art. 18 IV — blocking | *(no dotwire mechanism)* — removing a person's room memberships stops live access and is audited as `member.removed` | Keep the record of the block and apply it through memberships (see "Host responsibilities") |
+| Art. 18 III — correction | *(no dotwire mechanism)* — messages cannot be edited | Decide on and apply corrections in the host application |
+| Art. 18 V — portability | DSAR export as JSON | Deliver the export through the host's own channel |
+| Art. 18 §6 — tell recipients about deletion, anonymization, blocking or correction | Erasure-notice webhook for each redaction and each erasure pass, listing the affected `(roomId, seq)` pairs | Forward the notices to every recipient and deduplicate. Notify recipients of blocks and corrections yourself, because dotwire sends no notice for them |
+| Art. 18 VII — information on who the data was shared with | *(no dotwire mechanism)* | Keep the list of recipients, including whatever runs behind the webhook URLs |
+| Art. 46 and Art. 47 — security | AES-256-GCM at-rest encryption, TLS in transit, hash-chained audit log, role and membership pipeline | Perform the host's own risk assessment; terminate TLS; custody the keys |
+| Art. 48 — notification of a security incident to the ANPD and the people affected | *(no dotwire mechanism)*. `GET /audit/verify` and the metrics help detect an incident | Run the incident process. Our reading is that ANPD Resolution 15/2024 sets a deadline of three business days for relevant incidents; confirm the current rule |
+| Art. 20 — review of automated decisions | *(no dotwire mechanism)* — dotwire makes no decisions about people | Operate and explain any automated decision the host builds on chat content (for example moderation) |
+| Art. 33 — international transfer | *(no dotwire mechanism)* — dotwire sends data only to the URLs the host configures | Check each destination abroad against the legal grounds for transfer, and record it |
+| Art. 37, Art. 38, Art. 41 and Art. 14 — records of processing, impact report (RIPD), data protection officer (encarregado), children's data | *(no dotwire mechanism)* — the audit log is an input to the records | Keep the records, prepare the RIPD, appoint the encarregado and publish their contact, and handle children's data under Art. 14 |
+| Art. 7 and Art. 16 — keeping the audit trail after erasure | The audit log and the access log keep the erased user's `sub` (our reading: legal obligation and the exercise of rights) | Use an opaque `sub`, so the retained id identifies no one once the host deletes its identity row |
+
 ## Shared responsibility matrix
 
 | dotwire provides | Host must do |
@@ -357,10 +396,24 @@ Our reading of the Personal Information Protection Law of the People's Republic 
 dotwire does not do the following. They are the host's, in its own application, and the
 mappings above assume the host handles them:
 
-- **Restriction (GDPR Art. 18, CCPA, PIPL).** dotwire has no restriction flag. A host restricts
-  processing for a person by removing that person's room memberships, which stops live access and
-  is audited as `member.removed`. The host keeps its own record of the restriction and of when it
-  applies.
+- **Restriction (GDPR Art. 18, CCPA, PIPL, and blocking under LGPD Art. 18 IV).** dotwire has no
+  restriction flag. A host restricts processing for a person by removing that person's room
+  memberships, which stops live access and is audited as `member.removed`. The host keeps its own
+  record of the restriction and of when it applies, and tells the recipients of the data when the
+  law requires it (LGPD Art. 18 §6); dotwire sends no notice for a restriction.
+- **Correction (GDPR Art. 16, FADP Art. 32, LGPD Art. 18 III).** Messages cannot be edited, and
+  dotwire has no correction workflow. The host decides whether a request is valid and applies it,
+  for example by redacting the message and posting a corrected one. A host that must keep earlier
+  versions can keep them through the postsend webhook.
+- **Breach notification (FADP Art. 24, LGPD Art. 48, GDPR Art. 33, HIPAA).** dotwire detects but does
+  not report. The audit chain check (`GET /audit/verify`), the access log and the metrics are inputs
+  to the host's incident process. Deciding that a breach happened, notifying the regulator and
+  informing the people affected, within the legal deadline, is the host's job. Prepare the process
+  before an incident, because the deadlines are short (LGPD: three business days, our reading).
+- **Transfers abroad (GDPR Chapter V, FADP Art. 16, LGPD Art. 33, PIPL).** dotwire sends data only to
+  URLs the host configures: webhook receivers and the OTLP endpoint (metrics carry no personal
+  data). The host checks and records the legal ground for every destination outside its region, and
+  for the location of its own database, NATS and backups.
 - **Objection (GDPR Art. 21).** dotwire has no objection workflow. The host decides whether an
   objection stops processing and applies the outcome through memberships, redaction or erasure.
 - **Automated decisions (GDPR Art. 22).** dotwire makes no decisions about people and does no

@@ -85,6 +85,41 @@ personal information protection impact assessment (Art. 55 and 56); data localiz
 regulator requires it; and the plaintext metadata columns (who messaged whom and when), which the
 host must cover in its own assessment.
 
+## FADP (Swiss Federal Act on Data Protection)
+
+| Setting | Suggested value (our reading; confirm with counsel) |
+|---|---|
+| `AllowChanges` | `true`. |
+| `MinimumKeepDays` | `0`, unless a Swiss legal record-keeping duty covers a category of data. Then use the number that duty requires. |
+| `Erasure:Mode` | `anonymize` for general rooms, `delete` for DMs and small rooms, where anonymized messages can still point to a person. A request can override the mode per call. |
+| `Retention:MessagesDays` | The shortest period that serves the purpose (Art. 6(4)). dotwire's unlimited default is not a by-default choice under Art. 7, so set a period and record why. |
+| `AccessLog:Enabled` | `true` if the deployment processes sensitive data on a large scale or at high risk, because the Ordinance then asks for a log of reads and changes (our reading). Otherwise optional. |
+| `AccessLog:RetentionDays` | At least `365`, the one-year minimum for that log (our reading). |
+
+**What dotwire can't cover:** answering access requests within 30 days and adding the purpose,
+retention period and recipients to the export (Art. 25); correction and objection (Art. 32); reporting
+a breach to the FDPIC (Art. 24); the check on every destination abroad (Art. 16 and 17); the records
+of processing, the impact assessment and a Swiss representative for a host based abroad (Art. 12, 22
+and 14); a log kept apart from the database if the Ordinance applies; and backups outside dotwire's
+encryption.
+
+## LGPD (Brazil, Lei Geral de Proteção de Dados)
+
+| Setting | Suggested value (our reading; confirm with counsel) |
+|---|---|
+| `AllowChanges` | `true`. |
+| `MinimumKeepDays` | `0`, unless a legal or regulatory obligation requires keeping data (Art. 16 I). Then use the number that obligation requires. |
+| `Erasure:Mode` | `delete`. Anonymized data is outside the law only if it cannot be traced back (Art. 12), and free text in chat often can be. |
+| `Retention:MessagesDays` | The period after which the purpose has been met (Art. 15 and 16). Disclose it to people. |
+| `AccessLog:Enabled` | Optional. The law has no access-log duty of its own; enable it if the host's security or incident policy needs it. |
+
+**What dotwire can't cover:** the legal basis for processing (Art. 7) and any consent record; the
+15-day answer to access requests (Art. 19); blocking and correction (Art. 18); notices to recipients
+about blocks and corrections (Art. 18 §6); the report to the ANPD and the people affected after an
+incident (Art. 48); international transfer grounds (Art. 33); the records of processing, the impact
+report and the data protection officer (Art. 37, 38 and 41); children's data (Art. 14); and
+backups outside dotwire's encryption.
+
 ## HIPAA (US Health Insurance Portability and Accountability Act)
 
 | Setting | Suggested value (our reading; confirm with counsel) |
