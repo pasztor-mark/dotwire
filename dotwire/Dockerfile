@@ -1,8 +1,8 @@
-FROM mcr.microsoft.com/dotnet/aspnet:10.0.14 AS base
+FROM mcr.microsoft.com/dotnet/aspnet:10.0.14@sha256:1a48394b6f29d3a32c79d9edecd4abda0ecbe8776d567dbfc4590ed6979c740c AS base
 WORKDIR /app
 EXPOSE 8080
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0.403 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0.403@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e AS build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends clang zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -14,7 +14,7 @@ COPY . .
 WORKDIR "/src/dotwire"
 RUN dotnet publish "./dotwire.csproj" -c $BUILD_CONFIGURATION -o /app/publish
 
-FROM mcr.microsoft.com/dotnet/runtime-deps:10.0.14 AS final
+FROM mcr.microsoft.com/dotnet/runtime-deps:10.0.14@sha256:f87d6824cd56fa4ad117d06461e4eb0058f46a159872dbcc4a836a72efdd1bec AS final
 LABEL org.opencontainers.image.source="https://github.com/pasztor-mark/dotwire" \
       org.opencontainers.image.licenses="Apache-2.0"
 USER $APP_UID

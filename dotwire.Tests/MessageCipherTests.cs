@@ -2,6 +2,8 @@ using System.Security.Cryptography;
 using System.Text;
 using Dotwire.Configuration;
 using Dotwire.Crypto;
+using FsCheck;
+using FsCheck.Fluent;
 using Microsoft.Extensions.Options;
 using Xunit;
 
@@ -196,5 +198,37 @@ public class MessageCipherTests
 
         Assert.Equal("history", Encoding.UTF8.GetString(cipher.Decrypt(cipher.ActiveKeyId, reencrypted, RoomA, "dotwire:erased")));
         Assert.ThrowsAny<CryptographicException>(() => cipher.Decrypt(cipher.ActiveKeyId, reencrypted, RoomA, "alice"));
+    }
+
+    [Fact]
+    public void AnyPlaintextRoundTrips()
+    {
+        var cipher = Create(allowLegacy: false);
+
+        Prop.ForAll<byte[], Guid, NonNull<string>>((plaintext, roomId, sender) =>
+                cipher.Decrypt(cipher.ActiveKeyId, cipher.Encrypt(plaintext, roomId, sender.Get), roomId, sender.Get)
+                    .AsSpan().SequenceEqual(plaintext))
+            .QuickCheckThrowOnFailure();
+    }
+
+    [Fact]
+    public void ArbitraryEnvelopesOnlyFailWithCryptographicException()
+    {
+        var strict = Create(allowLegacy: false);
+        var legacy = Create(allowLegacy: true);
+
+        Prop.ForAll<byte[], bool>((envelope, allowLegacy) =>
+            {
+                try
+                {
+                    (allowLegacy ? legacy : strict).Decrypt("k1", envelope, RoomA, "alice");
+                }
+                catch (CryptographicException)
+                {
+                }
+
+                return true;
+            })
+            .QuickCheckThrowOnFailure();
     }
 }
