@@ -1,0 +1,32 @@
+name: Starter template
+description: Add or claim a starter template under examples/.
+labels: [good first issue, help wanted]
+body:
+  - type: markdown
+    attributes:
+      value: Comment on the issue to claim it. One assignee at a time.
+  - type: input
+    id: framework
+    attributes:
+      label: Framework
+      placeholder: Next.js, SvelteKit, ASP.NET Core...
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: What the template shows
+      description: Token minting, client connection, one room with send and receive.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: Lives in `examples/<name>/` with its own README.
+          required: true
+        - label: No secrets committed; config comes from `.env`.
+          required: true
+        - label: I checked PRODUCT.md's out-of-scope list.
+          required: true
