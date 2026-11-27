@@ -443,7 +443,7 @@ public class WebhookComposeTests
             {
                 await js.DeleteStreamAsync(stream);
             }
-            catch (NatsJSApiException)
+            catch (NATS.Client.Core.NatsException)
             {
             }
         }
